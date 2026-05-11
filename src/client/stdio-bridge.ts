@@ -1053,18 +1053,34 @@ async function resolveSingleHostId(input: {
   }
   const body = await readOptionalJsonResponse(response);
   const hosts = Array.isArray(body?.hosts)
-    ? body.hosts.filter(
-        (entry): entry is { hostId: string } =>
-          typeof entry?.hostId === "string" && entry.hostId.trim() !== "",
-      )
+    ? body.hosts.filter(isRelayHostDiscoveryEntry)
     : [];
-  if (hosts.length === 0) {
+  const onlineHosts = hosts.filter((host) => host.online !== false);
+  if (onlineHosts.length === 0) {
     throw new Error(
       "ACP relay host discovery found no online hosts.",
     );
   }
-  return hosts.sort((left, right) => left.hostId.localeCompare(right.hostId))[0]
-    .hostId;
+  return onlineHosts
+    .sort((left, right) => left.hostId.localeCompare(right.hostId))[0].hostId;
+}
+
+type RelayHostDiscoveryEntry = {
+  hostId: string;
+  online?: boolean;
+};
+
+function isRelayHostDiscoveryEntry(
+  entry: unknown,
+): entry is RelayHostDiscoveryEntry {
+  return (
+    typeof entry === "object" &&
+    entry !== null &&
+    typeof (entry as { hostId?: unknown }).hostId === "string" &&
+    (entry as { hostId: string }).hostId.trim() !== "" &&
+    ((entry as { online?: unknown }).online === undefined ||
+      typeof (entry as { online?: unknown }).online === "boolean")
+  );
 }
 
 function readRelayAuthUrl(message: string): string | undefined {

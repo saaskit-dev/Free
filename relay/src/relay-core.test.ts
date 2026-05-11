@@ -17,6 +17,7 @@ import { createAcpRemoteChildTraceContext } from "../../src/shared/trace-context
 import { AcpRelayInMemoryControlPlaneStore } from "./control-plane-store.js";
 import {
   AcpRelayBroker,
+  createRelayAuthorizationPage,
   type AcpRelayBrokerOptions,
   type AcpRelayTraceSpanInput,
 } from "./relay-core.js";
@@ -123,6 +124,51 @@ describe("AcpRelayBroker", () => {
     ).toBe(false);
   });
 
+  it("keeps a prebound client open while its host route reconnects", async () => {
+    const identity = await createProofFixture();
+    const broker = createBroker();
+    const [clientSocket, relayClientSocket] = createMemoryWebSocketPair();
+    const clientCloses: Array<{ code?: number; reason?: string }> = [];
+    clientSocket.addEventListener("close", (event) => {
+      clientCloses.push(event ?? {});
+    });
+
+    broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      connectionProof: identity.proof,
+      hostId: "host-1",
+      routeReady: true,
+      socket: relayClientSocket,
+    });
+
+    expect(clientCloses).toEqual([]);
+    expect(broker.hasPendingHostReconnects()).toBe(true);
+
+    const [hostSocket, relayHostSocket] = createMemoryWebSocketPair();
+    const hostFrames: unknown[] = [];
+    hostSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        hostFrames.push(JSON.parse(event.data));
+      }
+    });
+    await broker.registerHost("host-1", relayHostSocket, {
+      agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+      workspaceRoots: [{ path: "/workspace" }],
+    });
+
+    await waitFor(() =>
+      hostFrames.some(
+        (frame) =>
+          isRecord(frame) && frame.frameType === AcpRemoteFrameType.Hello,
+      ),
+    );
+    expect(clientCloses).toEqual([]);
+    expect(broker.hasPendingHostReconnects()).toBe(false);
+  });
+
   it("does not authorize a prebound host before explicit selection", async () => {
     const identity = await createProofFixture();
     const broker = createBroker({ authWaitMs: 5 });
@@ -174,6 +220,93 @@ describe("AcpRelayBroker", () => {
         id: 1,
       }),
     ]);
+  });
+
+  it("lists registered offline hosts without making them online", async () => {
+    const broker = new AcpRelayBroker({
+      controlPlaneStore: new AcpRelayInMemoryControlPlaneStore({
+        accounts: [{ accountId: "acct-1" }],
+        clientDevices: [{ accountId: "acct-1", clientId: "client-1" }],
+        grants: [
+          {
+            accountId: "acct-1",
+            clientId: "client-1",
+            hostId: "host-1",
+            policyVersion: 1,
+            scopes: ["acp:connect"],
+          },
+          {
+            accountId: "acct-1",
+            clientId: "client-1",
+            hostId: "host-2",
+            policyVersion: 1,
+            scopes: ["acp:connect"],
+          },
+        ],
+        hosts: [
+          { accountId: "acct-1", hostId: "host-1" },
+          { accountId: "acct-1", hostId: "host-2" },
+        ],
+      }),
+    });
+    const [, relayHostSocket] = createMemoryWebSocketPair();
+    await broker.registerHost("host-1", relayHostSocket, {
+      agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+      machine: "online-machine",
+      workspaceRoots: [{ path: "/workspace" }],
+    });
+
+    await expect(
+      broker.discoverableHosts({
+        accountId: "acct-1",
+        clientId: "client-1",
+      }),
+    ).resolves.toEqual({
+      hosts: [
+        {
+          hostId: "host-1",
+          metadata: {
+            agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+            machine: "online-machine",
+            workspaceRoots: [{ path: "/workspace" }],
+          },
+          online: true,
+        },
+        {
+          hostId: "host-2",
+          metadata: undefined,
+          online: false,
+        },
+      ],
+      ok: true,
+    });
+  });
+
+  it("renders offline hosts as disabled authorization choices", () => {
+    const page = createRelayAuthorizationPage({
+      accountId: "acct-1",
+      connectionId: "conn-1",
+      hosts: [
+        {
+          hostId: "host-1",
+          metadata: {
+            agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+            machine: "online-machine",
+            workspaceRoots: [{ path: "/workspace" }],
+          },
+          online: true,
+        },
+        {
+          hostId: "host-2",
+          online: false,
+        },
+      ],
+      requestUrl: "https://relay.test/authorize?connectionId=conn-1",
+    });
+
+    expect(page).toContain('"hostId":"host-2"');
+    expect(page).toContain("button.disabled = !online");
+    expect(page).toContain("Offline");
   });
 
   it("creates a relay business span and forwards its traceparent to the host", async () => {

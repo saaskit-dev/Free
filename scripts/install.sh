@@ -211,8 +211,10 @@ is_local_checkout() {
 install_from_local_checkout() {
   echo "Installing Free from local checkout: $repo_root"
   if command -v pnpm >/dev/null 2>&1; then
+    (cd "$repo_root/../acp-runtime" && pnpm install --frozen-lockfile)
     (cd "$repo_root" && pnpm install --frozen-lockfile)
   else
+    (cd "$repo_root/../acp-runtime" && npm install)
     (cd "$repo_root" && npm install)
   fi
   install_packed_source "$repo_root"
@@ -237,8 +239,10 @@ install_from_git_source() {
   fi
   echo "Installing Free from source..."
   if command -v pnpm >/dev/null 2>&1; then
+    (cd "$tmp_dir/acp-runtime" && pnpm install --frozen-lockfile)
     (cd "$tmp_dir/free" && pnpm install --frozen-lockfile)
   else
+    (cd "$tmp_dir/acp-runtime" && npm install)
     (cd "$tmp_dir/free" && npm install)
   fi
   install_packed_source "$tmp_dir/free"

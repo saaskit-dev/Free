@@ -34,6 +34,7 @@ help:
 		"  make remote-prod-smoke    Run hosted relay smoke"
 
 install:
+	pnpm --dir ../acp-runtime install --frozen-lockfile
 	pnpm install --frozen-lockfile
 
 build:

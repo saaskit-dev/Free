@@ -90,7 +90,11 @@ function resolveHost(hosts) {
 
 function chooseHost(hosts) {
   const candidates = hosts
-    .filter((entry) => typeof entry?.hostId === "string" && entry.hostId.trim())
+    .filter((entry) =>
+      typeof entry?.hostId === "string" &&
+      entry.hostId.trim() &&
+      entry.online !== false
+    )
     .sort((left, right) => left.hostId.localeCompare(right.hostId));
   const localMachine = hostname();
   return candidates.find((entry) => entry.metadata?.machine === localMachine) ??
