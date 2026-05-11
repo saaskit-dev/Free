@@ -53,6 +53,8 @@ export type AcpRemoteBridgeDebugContext = {
   connectionId?: string;
   direction?: "client_to_relay" | "relay_to_client";
   eventName?: string;
+  freeMessageId?: string;
+  freePhase?: string;
   jsonRpcId?: string | number;
   method?: string;
   sessionId?: string;
@@ -572,7 +574,7 @@ export function createAcpRemoteStdioBridge(
     const traceContext = readAcpRemoteTraceContextFromJsonRpcMessage(parsed);
     const sessionId = readMessageSessionId(parsed);
     const payloadSummary = summarizeAcpRemotePayloadForLog(parsed);
-    const span = startFreeSpan(`free.bridge.${parsed.method}`, {
+    const span = startFreeSpan(spanNameForBridgeRequest(parsed.method), {
       attributes: {
         "acp.jsonrpc.id": id === undefined ? undefined : String(id),
         "acp.jsonrpc.method": parsed.method,
@@ -582,6 +584,10 @@ export function createAcpRemoteStdioBridge(
         "acp.remote.payload_bytes": payloadSummary.payloadBytes,
         "acp.remote.payload_hash": payloadSummary.payloadHash,
         "acp.session.id": sessionId,
+        "free.message.id": messageIdFromPayloadSummary(payloadSummary),
+        "free.message.prompt_text_chars": payloadSummary.promptTextChars,
+        "free.message.prompt_text_hash": payloadSummary.promptTextHash,
+        "free.phase": phaseForBridgeRequest(parsed.method),
       },
       kind: SpanKind.CLIENT,
       traceContext,
@@ -624,6 +630,7 @@ export function createAcpRemoteStdioBridge(
       "acp.remote.response_has_error": attributes.hasError,
       "acp.jsonrpc.method": attributes.method,
       "acp.session.id": attributes.sessionId,
+      "free.outcome": attributes.hasError ? "error" : "ok",
       ...Object.fromEntries(
         Object.entries(attributes).filter(([, value]) => value !== undefined),
       ),
@@ -1400,6 +1407,8 @@ function logClientMessage(
       jsonRpcId: isJsonRpcId(id) ? id : undefined,
       method: typeof method === "string" ? method : undefined,
       ...payloadSummary,
+      freeMessageId: messageIdFromPayloadSummary(payloadSummary),
+      freePhase: phaseForBridgeRequest(method),
       sessionId,
       ...traceContextToDebugFields(traceContext),
       severityText: "INFO",
@@ -1470,6 +1479,8 @@ function logRelayMessage(
       jsonRpcId: isJsonRpcId(id) ? id : undefined,
       method: method ?? (notificationMethod !== "-" ? notificationMethod : undefined),
       ...payloadSummary,
+      freeMessageId: messageIdFromPayloadSummary(payloadSummary),
+      freePhase: phaseForBridgeResponse(method ?? notificationMethod, hasError),
       sessionId,
       ...traceContextToDebugFields(traceContext),
       severityText: hasError ? "ERROR" : "INFO",
@@ -1564,6 +1575,32 @@ function traceContextToDebugFields(
         traceparent: traceContext.traceparent,
       }
     : {};
+}
+
+function spanNameForBridgeRequest(method: string): string {
+  return method === "session/prompt" ? "free.message.receive" : `free.bridge.${method}`;
+}
+
+function phaseForBridgeRequest(method: string | undefined): string | undefined {
+  return method === "session/prompt" ? "bridge.receive" : undefined;
+}
+
+function phaseForBridgeResponse(
+  method: string | undefined,
+  hasError: boolean,
+): string | undefined {
+  if (method !== "session/prompt") {
+    return undefined;
+  }
+  return hasError ? "bridge.return_error" : "bridge.return_result";
+}
+
+function messageIdFromPayloadSummary(
+  summary: AcpRemotePayloadLogSummary,
+): string | undefined {
+  return summary.promptMessageId ??
+    summary.responseUserMessageId ??
+    summary.updateMessageId;
 }
 
 function formatJsonRpcId(id: unknown): string {

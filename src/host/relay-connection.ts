@@ -82,6 +82,8 @@ export type AcpRemoteHostDebugContext = {
   ack?: number;
   connectionId?: string;
   direction?: "relay_to_host" | "host_to_relay";
+  freeMessageId?: string;
+  freePhase?: string;
   jsonRpcId?: string | number;
   method?: string;
   seq?: number;
@@ -871,6 +873,8 @@ export function createAcpRemoteHostConnection(
         connectionId,
         direction,
         ...frameContext,
+        freeMessageId: messageIdFromPayloadSummary(payloadSummary),
+        freePhase: phaseForHostTransport(direction, method),
         jsonRpcId: details.id,
         method,
         ...payloadSummary,
@@ -921,11 +925,12 @@ export function createAcpRemoteHostConnection(
     span?: FreeSpanHandle;
   } {
     const details = readAcpPayloadDebugDetails(payload);
+    const payloadSummary = summarizeAcpRemotePayloadForLog(payload);
     if (!details.traceContext) {
       return { payload };
     }
     const span = startFreeSpan(
-      `free.host.transport.${direction}.${details.method ?? "message"}`,
+      spanNameForHostTransport(direction, details.method),
       {
         attributes: {
           "acp.jsonrpc.id": details.id === undefined ? undefined : String(details.id),
@@ -936,6 +941,10 @@ export function createAcpRemoteHostConnection(
           "acp.remote.direction": direction,
           "acp.remote.seq": frameContext?.seq,
           "acp.session.id": details.sessionId,
+          "free.message.id": messageIdFromPayloadSummary(payloadSummary),
+          "free.message.prompt_text_chars": payloadSummary.promptTextChars,
+          "free.message.prompt_text_hash": payloadSummary.promptTextHash,
+          "free.phase": phaseForHostTransport(direction, details.method),
         },
         kind: direction === "relay_to_host" ? SpanKind.SERVER : SpanKind.CLIENT,
         traceContext: details.traceContext,
@@ -1045,6 +1054,36 @@ function traceContextToDebugFields(
         traceparent: traceContext.traceparent,
       }
     : {};
+}
+
+function spanNameForHostTransport(
+  direction: "relay_to_host" | "host_to_relay",
+  method: string | undefined,
+): string {
+  if (method === "session/prompt") {
+    return direction === "relay_to_host"
+      ? "free.host.receive_prompt"
+      : "free.host.return_result";
+  }
+  return `free.host.transport.${direction}.${method ?? "message"}`;
+}
+
+function phaseForHostTransport(
+  direction: "relay_to_host" | "host_to_relay",
+  method: string | undefined,
+): string | undefined {
+  if (method !== "session/prompt") {
+    return undefined;
+  }
+  return direction === "relay_to_host" ? "host.receive" : "host.return_result";
+}
+
+function messageIdFromPayloadSummary(
+  summary: AcpRemotePayloadLogSummary,
+): string | undefined {
+  return summary.promptMessageId ??
+    summary.responseUserMessageId ??
+    summary.updateMessageId;
 }
 
 function formatJsonRpcId(id: unknown): string {

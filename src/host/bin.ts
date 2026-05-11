@@ -420,6 +420,13 @@ async function runHost(argv: readonly string[]): Promise<void> {
         "acp.remote.update_text_chars": context?.updateTextChars,
         "acp.remote.update_text_hash": context?.updateTextHash,
         "acp.session.id": context?.sessionId,
+        "free.message.id": context?.freeMessageId ??
+          context?.promptMessageId ??
+          context?.responseUserMessageId ??
+          context?.updateMessageId,
+        "free.message.prompt_text_chars": context?.promptTextChars,
+        "free.message.prompt_text_hash": context?.promptTextHash,
+        "free.phase": context?.freePhase,
         ...attributes,
       },
       {
@@ -580,6 +587,8 @@ function appendHostClassifiedLog(
       ack: context?.ack,
       connectionId: context?.connectionId,
       direction: context?.direction,
+      freeMessageId: context?.freeMessageId,
+      freePhase: context?.freePhase,
       jsonRpcId: context?.jsonRpcId,
       kind: "text",
       method: context?.method,

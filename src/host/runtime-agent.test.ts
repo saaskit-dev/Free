@@ -30,10 +30,14 @@ describe("AcpRemoteRuntimeAgent", () => {
     const streams = createStreamPair();
     const notifications: unknown[] = [];
     let receivedPrompt: AcpRuntimePrompt | undefined;
+    let receivedTurnOptions:
+      | { _traceContext?: import("@opentelemetry/api").Context }
+      | undefined;
 
     const session = createFakeRuntimeSession({
-      onPrompt(prompt) {
+      onPrompt(prompt, options) {
         receivedPrompt = prompt;
+        receivedTurnOptions = options;
       },
     });
     const runtime = {
@@ -134,6 +138,7 @@ describe("AcpRemoteRuntimeAgent", () => {
     expect(response.stopReason).toBe("end_turn");
     expect(response.userMessageId).toBe("client-message-1");
     expect(receivedPrompt).toEqual([{ text: "hello", type: "text" }]);
+    expect(receivedTurnOptions?._traceContext).toBeDefined();
     expect(notifications).toEqual([
       {
         sessionId: "runtime-session-1",
@@ -1268,7 +1273,10 @@ function createStreamPair(): { client: Stream; server: Stream } {
 function createFakeRuntimeSession(input: {
   history?: readonly AcpRuntimeHistoryEntry[];
   id?: string;
-  onPrompt(prompt: AcpRuntimePrompt): void;
+  onPrompt(
+    prompt: AcpRuntimePrompt,
+    options?: { _traceContext?: import("@opentelemetry/api").Context },
+  ): void;
   threadEntries?: readonly AcpRuntimeThreadEntry[];
 }): AcpRuntimeSession {
   const id = input.id ?? "runtime-session-1";
@@ -1338,8 +1346,8 @@ function createFakeRuntimeSession(input: {
         outputText: "hello from runtime",
         turnId: "turn-1",
       }),
-      start: (prompt) => {
-        input.onPrompt(prompt);
+      start: (prompt, options) => {
+        input.onPrompt(prompt, options);
         return {
           completion: Promise.resolve({
             output: [{ text: "hello from runtime", type: "text" }],

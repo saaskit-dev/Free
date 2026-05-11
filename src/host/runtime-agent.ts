@@ -357,6 +357,14 @@ export class AcpRemoteRuntimeAgent implements Agent {
     return this.withRuntimeSpan("session/prompt", params, async (span) => {
       const active = await this.getOrRestoreSession(params, "session/prompt");
       const userMessageId = params.messageId ?? randomUUID();
+      span.span.setAttributes({
+        "free.message.id": userMessageId,
+        "free.message.prompt_block_count": Array.isArray(params.prompt)
+          ? params.prompt.length
+          : 1,
+        "free.message.prompt_text_chars": promptTextLength(params.prompt),
+        "free.phase": "runtime.run",
+      });
       for (const notification of mapAcpPromptToUserMessageNotifications(
         params.sessionId,
         params.prompt,
@@ -366,6 +374,7 @@ export class AcpRemoteRuntimeAgent implements Agent {
       }
       const turn = active.session.turn.start(
         mapAcpPromptToRuntimePrompt(params.prompt),
+        { _traceContext: span.context },
       );
       span.span.setAttributes({
         "acp.turn.id": turn.turnId,
@@ -445,7 +454,7 @@ export class AcpRemoteRuntimeAgent implements Agent {
     work: (span: FreeSpanHandle) => Promise<T>,
   ): Promise<T> {
     return withFreeSpan(
-      `free.host.runtime.${method.replaceAll("/", ".")}`,
+      spanNameForRuntimeMethod(method),
       {
         attributes: {
           "acp.jsonrpc.method": method,
@@ -453,6 +462,7 @@ export class AcpRemoteRuntimeAgent implements Agent {
           "acp.remote.host.id": this.options.remoteHostId,
           "acp.remote.machine": this.options.remoteMachineName,
           "acp.session.id": params.sessionId,
+          "free.phase": phaseForRuntimeMethod(method),
         },
         context: traceContextFromParams(params),
         kind: SpanKind.SERVER,
@@ -867,6 +877,34 @@ function addTraceparentMetadata<T extends object>(
     return response;
   }
   return addRemoteSessionMetadata(response, { traceparent });
+}
+
+function spanNameForRuntimeMethod(method: string): string {
+  return method === "session/prompt"
+    ? "free.runtime.run_turn"
+    : `free.host.runtime.${method.replaceAll("/", ".")}`;
+}
+
+function phaseForRuntimeMethod(method: string): string | undefined {
+  return method === "session/prompt" ? "runtime.run" : undefined;
+}
+
+function promptTextLength(prompt: PromptRequest["prompt"]): number {
+  if (!Array.isArray(prompt)) {
+    return 0;
+  }
+  let total = 0;
+  for (const part of prompt) {
+    if (
+      typeof part === "object" &&
+      part !== null &&
+      "text" in part &&
+      typeof part.text === "string"
+    ) {
+      total += part.text.length;
+    }
+  }
+  return total;
 }
 
 function createRemoteSessionMetadata(input: {

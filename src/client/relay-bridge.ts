@@ -68,6 +68,13 @@ function log(
       "acp.remote.update_text_chars": context?.updateTextChars,
       "acp.remote.update_text_hash": context?.updateTextHash,
       "acp.session.id": context?.sessionId,
+      "free.message.id": context?.freeMessageId ??
+        context?.promptMessageId ??
+        context?.responseUserMessageId ??
+        context?.updateMessageId,
+      "free.message.prompt_text_chars": context?.promptTextChars,
+      "free.message.prompt_text_hash": context?.promptTextHash,
+      "free.phase": context?.freePhase,
     },
     {
       severityText,
@@ -394,6 +401,8 @@ function appendClassifiedLog(
     kind: "text",
     method: context?.method,
     observedAt: new Date().toISOString(),
+    freeMessageId: context?.freeMessageId,
+    freePhase: context?.freePhase,
     payloadBytes: context?.payloadBytes,
     payloadHash: context?.payloadHash,
     payloadPreview: context?.payloadPreview,

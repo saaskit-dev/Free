@@ -1224,6 +1224,7 @@ export class AcpRelayBroker {
       input.payload,
       input.client,
     );
+    const payloadSummary = summarizeRelayPayloadForTrace(input.payload);
     if (!details.traceContext) {
       return { payload: input.payload };
     }
@@ -1239,8 +1240,13 @@ export class AcpRelayBroker {
         "acp.remote.host_id": input.client.hostId,
         "acp.remote.transport": input.client.transport,
         "acp.session.id": details.sessionId,
+        "free.message.id": payloadSummary.promptMessageId ??
+          payloadSummary.responseUserMessageId ??
+          payloadSummary.updateMessageId,
+        "free.message.prompt_text_chars": payloadSummary.promptTextChars,
+        "free.phase": phaseForRelayTransport(input.direction, details.method),
       },
-      name: `free.relay.transport.${input.direction}.${details.method ?? "message"}`,
+      name: spanNameForRelayTransport(input.direction, details.method),
       parent: details.traceContext,
     });
     if (!traceContext || !isRecord(input.payload)) {
@@ -4225,6 +4231,81 @@ function readRelayTransportPayloadDetails(
     sessionId,
     traceContext,
   };
+}
+
+function spanNameForRelayTransport(
+  direction: "client_to_host" | "host_to_client",
+  method: string | undefined,
+): string {
+  if (method === "session/prompt") {
+    return direction === "client_to_host"
+      ? "free.relay.route_to_host"
+      : "free.relay.return_to_client";
+  }
+  return `free.relay.transport.${direction}.${method ?? "message"}`;
+}
+
+function phaseForRelayTransport(
+  direction: "client_to_host" | "host_to_client",
+  method: string | undefined,
+): string | undefined {
+  if (method !== "session/prompt") {
+    return undefined;
+  }
+  return direction === "client_to_host" ? "relay.route" : "relay.return_result";
+}
+
+function summarizeRelayPayloadForTrace(payload: unknown): {
+  promptMessageId?: string;
+  promptTextChars?: number;
+  responseUserMessageId?: string;
+  updateMessageId?: string;
+} {
+  if (!isRecord(payload)) {
+    return {};
+  }
+  const params = isRecord(payload.params) ? payload.params : undefined;
+  const result = isRecord(payload.result) ? payload.result : undefined;
+  const summary: {
+    promptMessageId?: string;
+    promptTextChars?: number;
+    responseUserMessageId?: string;
+    updateMessageId?: string;
+  } = {
+    responseUserMessageId: readString(result?.userMessageId),
+  };
+  if (payload.method === "session/prompt") {
+    summary.promptMessageId = readString(params?.messageId);
+    const textChars = collectRelayText(params?.prompt);
+    if (textChars > 0) {
+      summary.promptTextChars = textChars;
+    }
+  }
+  if (payload.method === "session/update") {
+    const update = isRecord(params?.update) ? params.update : undefined;
+    summary.updateMessageId = readString(update?.messageId);
+  }
+  return summary;
+}
+
+function collectRelayText(value: unknown): number {
+  if (typeof value === "string") {
+    return value.length;
+  }
+  if (Array.isArray(value)) {
+    return value.reduce((sum, item) => sum + collectRelayText(item), 0);
+  }
+  if (!isRecord(value)) {
+    return 0;
+  }
+  let total = 0;
+  if (typeof value.text === "string") {
+    total += value.text.length;
+  }
+  for (const key of ["content", "parts", "prompt"]) {
+    total += collectRelayText(value[key]);
+  }
+  return total;
 }
 
 function readPayloadSessionId(payload: Record<string, unknown>): string | undefined {
