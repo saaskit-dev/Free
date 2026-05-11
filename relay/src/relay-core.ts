@@ -22,6 +22,7 @@ import {
   withAcpRemoteTraceparentInJsonRpcMessage,
   type AcpRemoteTraceContext,
 } from "../../src/shared/trace-context.js";
+import { logRelayLifecycle as writeRelayLifecycleEvent } from "./relay-events.js";
 
 export type RelaySocket = {
   close(code?: number, reason?: string): void;
@@ -239,7 +240,7 @@ export type HostWorkspaceListResult =
 export type AcpRelayAuthorizableHostsResult =
   | {
       ok: true;
-      hosts: { hostId: string; metadata?: HostMetadata }[];
+      hosts: { hostId: string; metadata?: HostMetadata; online?: boolean }[];
     }
   | {
       ok: false;
@@ -608,7 +609,16 @@ export class AcpRelayBroker {
       !this.isHostRouteAvailable(hostId, { allowPendingReconnect: true }) &&
       transport === "native-acp"
     ) {
-      input.socket.close(1013, "No host is online for this host.");
+      this.markHostDisconnected(hostId, "Host host is not online.");
+      this.logRelayLifecycle({
+        accountId: input.accountId,
+        clientId,
+        connectionId: input.connectionId,
+        hostId,
+        eventName: "acp.relay.client.waiting_for_host_reconnect",
+        pendingReconnect: this.hostReconnectGraceMs > 0,
+        transport,
+      });
     }
   }
 
@@ -892,6 +902,49 @@ export class AcpRelayBroker {
         .sort((a, b) => a.hostId.localeCompare(b.hostId)),
       ok: true,
     };
+  }
+
+  async discoverableHosts(input: {
+    accountId: string;
+    clientId: string;
+    hostId?: string;
+  }): Promise<AcpRelayAuthorizableHostsResult> {
+    const onlineHosts = new Set(this.onlineHostIds());
+    const hosts = await this.controlPlaneStore.listAuthorizableHosts({
+      accountId: input.accountId,
+      clientId: input.clientId,
+    });
+    return {
+      hosts: hosts
+        .filter((host) => !input.hostId || host.hostId === input.hostId)
+        .map((host) => {
+          const online = onlineHosts.has(host.hostId);
+          return {
+            hostId: host.hostId,
+            metadata: online ? this.hostMetadataMap.get(host.hostId) : undefined,
+            online,
+          };
+        })
+        .sort((a, b) => a.hostId.localeCompare(b.hostId)),
+      ok: true,
+    };
+  }
+
+  async discoverableHostsForConnection(
+    connectionId: string,
+  ): Promise<AcpRelayAuthorizableHostsResult> {
+    const client = this.clients.get(connectionId);
+    if (!client) {
+      return {
+        ok: false,
+        reason: "Client connection is no longer active. Restart the remote session from the ACP client.",
+      };
+    }
+    return this.discoverableHosts({
+      accountId: client.accountId,
+      clientId: client.clientId,
+      hostId: client.connectionProof?.hostId,
+    });
   }
 
   pingHosts(): void {
@@ -1286,33 +1339,7 @@ export class AcpRelayBroker {
     traceContext?: AcpRemoteTraceContext;
     transport?: AcpRelayClientTransport;
   }): void {
-    console.log(
-      JSON.stringify({
-        accountId: input.accountId,
-        bufferedClientPayloads: input.bufferedClientPayloads,
-        clientId: input.clientId,
-        code: input.code,
-        connectionId: input.connectionId,
-        hostId: input.hostId,
-        eventName: input.eventName,
-        jsonRpcId: input.jsonRpcId,
-        method: input.method,
-        nativeClientAck: input.nativeClientAck,
-        pendingClientFrames: input.pendingClientFrames,
-        pendingHostFrames: input.pendingHostFrames,
-        pendingReconnect: input.pendingReconnect,
-        reason: input.reason,
-        replaced: input.replaced,
-        seq: input.seq,
-        sessionId: input.sessionId,
-        severityText: input.severityText ?? "INFO",
-        source: "relay",
-        spanId: input.traceContext?.spanId,
-        traceId: input.traceContext?.traceId,
-        traceparent: input.traceContext?.traceparent,
-        transport: input.transport,
-      }),
-    );
+    writeRelayLifecycleEvent(input);
   }
 
   handleHostText(text: string): string | undefined {
@@ -3169,7 +3196,7 @@ export class AcpRelayBroker {
 export function createRelayAuthorizationPage(input: {
   accountId: string;
   connectionId: string;
-  hosts: readonly { hostId: string; metadata?: HostMetadata }[];
+  hosts: readonly { hostId: string; metadata?: HostMetadata; online?: boolean }[];
   requestUrl: string;
   unavailableReason?: string;
 }): string {
@@ -3287,6 +3314,8 @@ export function createRelayAuthorizationPage(input: {
       }
       .choice:hover { border-color: var(--line-strong); background: #fffdf8; transform: translateY(-1px); }
       .choice.selected { border-color: var(--accent); background: #e8f1eb; }
+      .choice:disabled { opacity: 0.68; transform: none; }
+      .choice:disabled:hover { border-color: var(--line); background: var(--surface); }
       .choice-title {
         display: flex;
         align-items: center;
@@ -3304,6 +3333,7 @@ export function createRelayAuthorizationPage(input: {
         background: var(--accent);
         flex: none;
       }
+      .dot.offline { background: var(--line-strong); }
       .config-grid {
         display: grid;
         grid-template-columns: minmax(240px, 360px) minmax(0, 1fr);
@@ -3597,28 +3627,37 @@ export function createRelayAuthorizationPage(input: {
       hosts.forEach(function(host) {
         const li = document.createElement("li");
         const button = document.createElement("button");
+        const online = host.online !== false;
         button.type = "button";
         button.className = "choice";
+        button.disabled = !online;
         let metaText = "No metadata";
         const machineName = displayMachine(host);
         if (host.metadata) {
           var parts = [];
+          parts.push(online ? "Online" : "Offline");
           if (host.metadata.machine) parts.push(host.metadata.machine);
           parts.push(host.metadata.agentTypes.length + (host.metadata.agentTypes.length === 1 ? " agent" : " agents"));
           parts.push(host.metadata.workspaceRoots.length + (host.metadata.workspaceRoots.length === 1 ? " workspace root" : " workspace roots"));
           metaText = parts.join(" · ");
+        } else {
+          metaText = online ? "Online" : "Offline";
         }
-        button.innerHTML = '<div class="choice-title"><span>' + escapeHtml(machineName) + '</span><span class="dot" aria-hidden="true"></span></div><div class="meta">' + escapeHtml(metaText) + '</div>';
+        button.innerHTML = '<div class="choice-title"><span>' + escapeHtml(machineName) + '</span><span class="dot ' + (online ? '' : 'offline') + '" aria-hidden="true"></span></div><div class="meta">' + escapeHtml(metaText) + '</div>';
         button.onclick = function() {
+          if (!online) return;
           selectHost(host, button);
         };
         li.appendChild(button);
         hostList.appendChild(li);
       });
 
-      if (hosts.length === 1) {
-        var firstButton = hostList.querySelector("button");
-        selectHost(hosts[0], firstButton);
+      const onlineHosts = hosts.filter(function(host) { return host.online !== false; });
+      if (onlineHosts.length === 1) {
+        var firstButton = Array.prototype.find.call(hostList.querySelectorAll("button"), function(button) {
+          return !button.disabled;
+        });
+        selectHost(onlineHosts[0], firstButton);
       }
 
       function selectHost(host, button) {

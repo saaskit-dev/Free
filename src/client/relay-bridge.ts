@@ -169,21 +169,22 @@ async function resolveBridgeHostId(input: {
   const hosts = Array.isArray(body?.hosts)
     ? body.hosts.filter(isHostDiscoveryEntry)
     : [];
-  if (hosts.length === 0) {
+  const onlineHosts = hosts.filter((host) => host.online !== false);
+  if (onlineHosts.length === 0) {
     throw new Error("No online Free host found. Run `free auth login` or `free host run` first.");
   }
-  if (hosts.length === 1) {
-    return hosts[0].hostId;
+  if (onlineHosts.length === 1) {
+    return onlineHosts[0].hostId;
   }
 
   const localMachine = hostname();
-  const localHosts = hosts.filter(
+  const localHosts = onlineHosts.filter(
     (host) => host.metadata?.machine === localMachine,
   );
   if (localHosts.length > 0) {
     return localHosts.sort(compareHostDiscoveryEntries)[0].hostId;
   }
-  return hosts.sort(compareHostDiscoveryEntries)[0].hostId;
+  return onlineHosts.sort(compareHostDiscoveryEntries)[0].hostId;
 }
 
 type HostDiscoveryEntry = {
@@ -191,6 +192,7 @@ type HostDiscoveryEntry = {
   metadata?: {
     machine?: string;
   };
+  online?: boolean;
 };
 
 function isHostDiscoveryEntry(value: unknown): value is HostDiscoveryEntry {
