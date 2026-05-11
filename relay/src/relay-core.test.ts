@@ -307,6 +307,119 @@ describe("AcpRelayBroker", () => {
     });
   });
 
+  it("lets authorization select any host with a matching bridge proof", async () => {
+    const authority = await createEd25519KeyPair();
+    const client = await createEd25519KeyPair();
+    const accountSession = await createAcpRemoteAccountSession({
+      accountId: "acct-1",
+      principalId: "client-1",
+      principalPublicKey: client.publicKey,
+      principalType: "client",
+      signingKey: { kid: "authority-1", privateKey: authority.privateKey },
+    });
+    const credential = { accountSession, privateKey: client.privateKey };
+    const broker = new AcpRelayBroker({
+      controlPlaneStore: new AcpRelayInMemoryControlPlaneStore({
+        accounts: [{ accountId: "acct-1" }],
+        clientDevices: [{ accountId: "acct-1", clientId: "client-1" }],
+        grants: [
+          {
+            accountId: "acct-1",
+            clientId: "client-1",
+            hostId: "host-1",
+            policyVersion: 1,
+            scopes: ["acp:connect"],
+          },
+          {
+            accountId: "acct-1",
+            clientId: "client-1",
+            hostId: "host-2",
+            policyVersion: 1,
+            scopes: ["acp:connect"],
+          },
+        ],
+        hosts: [
+          { accountId: "acct-1", hostId: "host-1" },
+          { accountId: "acct-1", hostId: "host-2" },
+        ],
+      }),
+    });
+    const [, relayHostSocket1] = createMemoryWebSocketPair();
+    await broker.registerHost({
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        machine: "first-machine",
+        workspaceRoots: [{ path: "/workspace-1" }],
+      },
+      socket: relayHostSocket1,
+    });
+    const [hostSocket2, relayHostSocket2] = createMemoryWebSocketPair();
+    const hostFrames: unknown[] = [];
+    hostSocket2.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        hostFrames.push(JSON.parse(event.data));
+      }
+    });
+    await broker.registerHost({
+      hostId: "host-2",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        machine: "second-machine",
+        workspaceRoots: [{ path: "/workspace-2" }],
+      },
+      socket: relayHostSocket2,
+    });
+
+    const [, relayClientSocket] = createMemoryWebSocketPair();
+    const proof1 = await createAcpRemoteConnectionProof({
+      connectionId: "conn-1",
+      credential,
+      hostId: "host-1",
+    });
+    const proof2 = await createAcpRemoteConnectionProof({
+      connectionId: "conn-1",
+      credential,
+      hostId: "host-2",
+    });
+    broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      connectionProof: proof1,
+      connectionProofs: [proof1, proof2],
+      socket: relayClientSocket,
+    });
+
+    await expect(
+      broker.discoverableHostsForConnection("conn-1"),
+    ).resolves.toMatchObject({
+      hosts: [
+        { hostId: "host-1", online: true },
+        { hostId: "host-2", online: true },
+      ],
+      ok: true,
+    });
+    await expect(
+      broker.authorizeClient({
+        connectionId: "conn-1",
+        hostId: "host-2",
+        workspaceRoots: ["/workspace-2"],
+      }),
+    ).resolves.toMatchObject({
+      hostId: "host-2",
+      ok: true,
+    });
+
+    await waitFor(() => hostFrames.length > 0);
+    expect(hostFrames[0]).toMatchObject({
+      hostId: "host-2",
+      proof: proof2,
+      workspaceRoots: ["/workspace-2"],
+    });
+  });
+
   it("renders offline hosts as disabled authorization choices", () => {
     const page = createRelayAuthorizationPage({
       accountId: "acct-1",

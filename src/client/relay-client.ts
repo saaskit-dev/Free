@@ -15,6 +15,7 @@ export type ConnectAcpRemoteClientRelayOptions = {
   clientId?: string;
   connectionId?: string;
   connectionProof?: AcpRemoteConnectionProof;
+  connectionProofs?: readonly AcpRemoteConnectionProof[];
   hostId?: string;
   nativeClientAck?: boolean;
   relayUrl: string | URL;
@@ -80,6 +81,11 @@ export function connectAcpRemoteClientRelay(
   if (options.connectionProof) {
     headers["x-acp-connection-proof"] = encodeAcpRemoteConnectionProof(
       options.connectionProof,
+    );
+  }
+  if (options.connectionProofs && options.connectionProofs.length > 0) {
+    headers["x-acp-connection-proofs"] = JSON.stringify(
+      options.connectionProofs.map(encodeAcpRemoteConnectionProof),
     );
   }
   const socket = options.socketFactory({

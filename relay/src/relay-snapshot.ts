@@ -27,6 +27,7 @@ export type RelayWebSocketAttachment = {
   endpoint: AcpRemoteEndpointKind;
   nativeClientAck?: boolean;
   connectionProof?: AcpRemoteConnectionProof;
+  connectionProofs?: readonly AcpRemoteConnectionProof[];
   transport?: AcpRelayClientTransport;
   version: typeof RELAY_SOCKET_ATTACHMENT_VERSION;
 };
@@ -109,6 +110,9 @@ export function readRelayWebSocketAttachment(
     connectionProof: isConnectionProof(record.connectionProof)
       ? record.connectionProof
       : undefined,
+    connectionProofs: Array.isArray(record.connectionProofs)
+      ? record.connectionProofs.filter(isConnectionProof)
+      : undefined,
     transport: isRelayClientTransport(record.transport)
       ? record.transport
       : undefined,
@@ -142,6 +146,9 @@ export function isClientStateSnapshot(
       Number.isSafeInteger(record.lastHostSeq)) &&
     (record.connectionProof === undefined ||
       isConnectionProof(record.connectionProof)) &&
+    (record.connectionProofs === undefined ||
+      (Array.isArray(record.connectionProofs) &&
+        record.connectionProofs.every(isConnectionProof))) &&
     (record.lastAuthorization === undefined ||
       isRelayAuthorizationSelection(record.lastAuthorization))
   );

@@ -145,7 +145,10 @@ function readAccountCredentialFromEnv(): AcpRemoteAccountSessionCredential | und
 async function resolveBridgeHostId(input: {
   accountCredential: AcpRemoteAccountSessionCredential;
   relayUrl: string;
-}): Promise<string> {
+}): Promise<{
+  hosts: HostDiscoveryEntry[];
+  primaryHostId: string;
+}> {
   const hostsUrl = new URL(
     "/api/hosts",
     input.relayUrl.replace(/^ws(s?):\/\//, "http$1://"),
@@ -174,7 +177,10 @@ async function resolveBridgeHostId(input: {
     throw new Error("No online Free host found. Run `free auth login` or `free host run` first.");
   }
   if (onlineHosts.length === 1) {
-    return onlineHosts[0].hostId;
+    return {
+      hosts,
+      primaryHostId: onlineHosts[0].hostId,
+    };
   }
 
   const localMachine = hostname();
@@ -182,9 +188,15 @@ async function resolveBridgeHostId(input: {
     (host) => host.metadata?.machine === localMachine,
   );
   if (localHosts.length > 0) {
-    return localHosts.sort(compareHostDiscoveryEntries)[0].hostId;
+    return {
+      hosts,
+      primaryHostId: localHosts.sort(compareHostDiscoveryEntries)[0].hostId,
+    };
   }
-  return onlineHosts.sort(compareHostDiscoveryEntries)[0].hostId;
+  return {
+    hosts,
+    primaryHostId: onlineHosts.sort(compareHostDiscoveryEntries)[0].hostId,
+  };
 }
 
 type HostDiscoveryEntry = {
@@ -270,16 +282,24 @@ async function main(): Promise<void> {
     );
   }
   const clientId = accountCredential.accountSession.principalId;
-  const hostId = await resolveBridgeHostId({
+  const hostSelection = await resolveBridgeHostId({
     accountCredential,
     relayUrl,
   });
+  const hostId = hostSelection.primaryHostId;
   const connectionId = crypto.randomUUID();
-  const connectionProof = await createAcpRemoteConnectionProof({
-    connectionId,
-    credential: accountCredential,
-    hostId,
-  });
+  const connectionProofs = await Promise.all(
+    hostSelection.hosts.map((host) =>
+      createAcpRemoteConnectionProof({
+        connectionId,
+        credential: accountCredential,
+        hostId: host.hostId,
+      }),
+    ),
+  );
+  const connectionProof =
+    connectionProofs.find((proof) => proof.hostId === hostId) ??
+    connectionProofs[0];
   relayLogUploader = createFreeLogUploaderFromEnv({
     accountSession: encodeAcpRemoteAccountSession(
       accountCredential.accountSession,
@@ -310,8 +330,8 @@ async function main(): Promise<void> {
   const bridge = createAcpRemoteStdioBridge({
     connectionId,
     connectionProof,
+    connectionProofs,
     clientId,
-    hostId,
     debugLog,
     onClose() {
       log("bridge closed.");

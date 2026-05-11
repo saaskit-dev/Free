@@ -64,6 +64,7 @@ export type AcpRelayClientRegistration = {
   clientId?: string;
   connectionId: string;
   connectionProof?: AcpRemoteConnectionProof;
+  connectionProofs?: readonly AcpRemoteConnectionProof[];
   hostId?: string;
   nativeClientAck?: boolean;
   restoredHibernatedSocket?: boolean;
@@ -87,6 +88,7 @@ export type AcpRelayClientStateSnapshot = {
   lastAuthorization?: RelayAuthorizationSelection;
   lastHostSeq?: number;
   connectionProof?: AcpRemoteConnectionProof;
+  connectionProofs?: readonly AcpRemoteConnectionProof[];
   seq: number;
   sessionControlRequests?: readonly RelayJsonRpcRequest[];
 };
@@ -145,6 +147,7 @@ type RelayClient = {
   sessionControlRequests: Map<string, RelayJsonRpcRequest>;
   socket?: RelaySocket;
   connectionProof?: AcpRemoteConnectionProof;
+  connectionProofs: Map<string, AcpRemoteConnectionProof>;
   transport: AcpRelayClientTransport;
   lastAuthorization?: RelayAuthorizationSelection;
   pendingSessionSelections: Map<string, RelayAuthorizationSelection>;
@@ -585,6 +588,11 @@ export class AcpRelayBroker {
       ),
       socket: input.socket,
       connectionProof: input.connectionProof ?? snapshot?.connectionProof,
+      connectionProofs: connectionProofMap([
+        ...(snapshot?.connectionProofs ?? []),
+        ...(input.connectionProofs ?? []),
+        ...(input.connectionProof ? [input.connectionProof] : []),
+      ]),
       pendingSessionSelections: new Map(),
       sessionSelectionWaiters: new Map(),
       waiters: new Set(),
@@ -912,8 +920,12 @@ export class AcpRelayBroker {
     accountId: string;
     clientId: string;
     hostId?: string;
+    hostIds?: readonly string[];
   }): Promise<AcpRelayAuthorizableHostsResult> {
     const activeHostRouteIds = new Set(this.activeHostRouteIds());
+    const allowedInputHostIds = input.hostIds
+      ? new Set(input.hostIds)
+      : undefined;
     const hosts = await this.controlPlaneStore.listAuthorizableHosts({
       accountId: input.accountId,
       clientId: input.clientId,
@@ -921,6 +933,7 @@ export class AcpRelayBroker {
     return {
       hosts: hosts
         .filter((host) => !input.hostId || host.hostId === input.hostId)
+        .filter((host) => !allowedInputHostIds || allowedInputHostIds.has(host.hostId))
         .map((host) => {
           const online = activeHostRouteIds.has(host.hostId);
           return {
@@ -947,7 +960,12 @@ export class AcpRelayBroker {
     return this.discoverableHosts({
       accountId: client.accountId,
       clientId: client.clientId,
-      hostId: client.connectionProof?.hostId,
+      hostIds:
+        client.connectionProofs.size > 0
+          ? [...client.connectionProofs.keys()]
+          : client.connectionProof
+            ? [client.connectionProof.hostId]
+            : undefined,
     });
   }
 
@@ -1004,6 +1022,18 @@ export class AcpRelayBroker {
     return result.hosts.map((host) => host.hostId);
   }
 
+  private availableConnectionProofForHost(
+    client: RelayClient,
+    hostId: string,
+  ): AcpRemoteConnectionProof | undefined {
+    return (
+      client.connectionProofs.get(hostId) ??
+      (client.connectionProof?.hostId === hostId
+        ? client.connectionProof
+        : undefined)
+    );
+  }
+
   private async ensureClientDeviceRegistered(client: RelayClient): Promise<void> {
     const [account, device] = await Promise.all([
       this.controlPlaneStore.getAccount(client.accountId),
@@ -1040,12 +1070,14 @@ export class AcpRelayBroker {
     if (!route.host && !input.allowPendingHostReconnect) {
       return { ok: false, reason: "Host host is not online." };
     }
-    if (!client.connectionProof) {
+    const selectedProof = this.availableConnectionProofForHost(
+      client,
+      input.hostId,
+    );
+    if (!selectedProof) {
       return { ok: false, reason: "ACP connection proof is required." };
     }
-    if (client.connectionProof.hostId !== input.hostId) {
-      return { ok: false, reason: "Connection proof host mismatch." };
-    }
+    client.connectionProof = selectedProof;
     await this.ensureClientDeviceRegistered(client);
 
     const grantDecision = await this.controlPlaneStore.resolveGrant({
@@ -4132,6 +4164,7 @@ function createClientStateSnapshot(
     lastAuthorization: client.lastAuthorization,
     lastHostSeq: client.lastHostSeq,
     connectionProof: client.connectionProof,
+    connectionProofs: [...client.connectionProofs.values()],
     seq: client.seq,
     sessionControlRequests: [...client.sessionControlRequests.values()],
   };
@@ -4141,6 +4174,12 @@ function framesToSeqMap(
   frames: readonly AcpRemoteDataFrame[] | undefined,
 ): Map<number, AcpRemoteDataFrame> {
   return new Map((frames ?? []).map((frame) => [frame.seq, frame] as const));
+}
+
+function connectionProofMap(
+  proofs: readonly AcpRemoteConnectionProof[],
+): Map<string, AcpRemoteConnectionProof> {
+  return new Map(proofs.map((proof) => [proof.hostId, proof] as const));
 }
 
 function requestsToIdMap(

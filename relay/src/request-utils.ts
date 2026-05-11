@@ -83,6 +83,31 @@ export function readConnectionProof(
   }
 }
 
+export function readConnectionProofs(
+  request: Request,
+): AcpRemoteConnectionProof[] {
+  const encoded = request.headers.get("x-acp-connection-proofs");
+  if (!encoded) {
+    return [];
+  }
+  try {
+    const values = JSON.parse(encoded) as unknown;
+    if (!Array.isArray(values)) {
+      return [];
+    }
+    const proofs: AcpRemoteConnectionProof[] = [];
+    for (const value of values) {
+      if (typeof value !== "string") {
+        return [];
+      }
+      proofs.push(decodeAcpRemoteConnectionProof(value));
+    }
+    return proofs;
+  } catch {
+    return [];
+  }
+}
+
 export function parseHostMetadataHeaders(
   request: Request,
 ): HostMetadata | undefined {

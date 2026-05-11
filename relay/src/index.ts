@@ -61,6 +61,7 @@ import {
   normalizeMessageData,
   parseHostMetadataHeaders,
   readConnectionProof,
+  readConnectionProofs,
   readOptionalPositiveInteger,
   resolveClientId,
   resolveHostId,
@@ -234,6 +235,7 @@ export default {
       }
     } else {
       const connectionProof = readConnectionProof(request, url);
+      const connectionProofs = readConnectionProofs(request);
       if (!connectionProof) {
         return new Response("Missing connection proof.", { status: 401 });
       }
@@ -252,6 +254,22 @@ export default {
       );
       if (!proof.ok) {
         return new Response(proof.reason, { status: 401 });
+      }
+      for (const candidate of connectionProofs) {
+        const candidateProof = await verifyAcpRemoteConnectionProof(
+          candidate,
+          verificationKeys.keys,
+          {
+            clientId: resolveClientId(request, url),
+            connectionId: url.searchParams.get("connectionId") ?? undefined,
+          },
+        );
+        if (!candidateProof.ok) {
+          return new Response(candidateProof.reason, { status: 401 });
+        }
+        if (candidateProof.accountId !== proof.accountId) {
+          return new Response("Connection proof account mismatch.", { status: 401 });
+        }
       }
       accountId = proof.accountId;
     }
@@ -409,6 +427,7 @@ export class AcpRelayShard {
       const authUrl = createAuthorizationUrl(request, connectionId).toString();
       const nativeClientAck = url.searchParams.get("nativeClientAck") === "1";
       const connectionProof = readConnectionProof(request, url);
+      const connectionProofs = readConnectionProofs(request);
       if (!connectionProof) {
         server.close(1008, "Missing connection proof.");
         return new Response(null, {
@@ -445,6 +464,7 @@ export class AcpRelayShard {
         authUrl,
         clientId,
         connectionProof,
+        connectionProofs,
         nativeClientAck,
         transport: clientTransport,
       });
@@ -454,6 +474,7 @@ export class AcpRelayShard {
         clientId,
         connectionId,
         connectionProof,
+        connectionProofs,
         hostId,
         nativeClientAck,
         socket: server,
@@ -615,6 +636,7 @@ export class AcpRelayShard {
           attachment.routeReady ?? attachment.connectionProof !== undefined,
         clientId: attachment.clientId,
         connectionProof: attachment.connectionProof,
+        connectionProofs: attachment.connectionProofs,
         connectionId: attachment.connectionId,
         hostId: attachment.hostId,
         nativeClientAck: attachment.nativeClientAck,
