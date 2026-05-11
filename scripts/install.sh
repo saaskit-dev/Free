@@ -240,9 +240,12 @@ install_from_git_source() {
   echo "Installing Free from source..."
   if command -v pnpm >/dev/null 2>&1; then
     (cd "$tmp_dir/acp-runtime" && pnpm install --frozen-lockfile)
+    (cd "$tmp_dir/acp-runtime" && pnpm --filter @saaskit-dev/simulator-agent-acp build)
+    (cd "$tmp_dir/acp-runtime" && pnpm run build:lib)
     (cd "$tmp_dir/free" && pnpm install --frozen-lockfile)
   else
     (cd "$tmp_dir/acp-runtime" && npm install)
+    (cd "$tmp_dir/acp-runtime" && npm run build)
     (cd "$tmp_dir/free" && npm install)
   fi
   install_packed_source "$tmp_dir/free"
