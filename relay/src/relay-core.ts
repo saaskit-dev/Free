@@ -15,6 +15,7 @@ import {
 } from "../../src/protocol/index.js";
 import {
   AcpRelayInMemoryControlPlaneStore,
+  type AcpRelayHostMetadata,
   type AcpRelayWritableControlPlaneStore,
 } from "./control-plane-store.js";
 import {
@@ -54,17 +55,7 @@ export type AcpRelayTraceSpanInput = {
 
 export type AcpRelayClientTransport = "native-acp";
 
-export type HostMetadata = {
-  agentTypes: readonly {
-    command?: string;
-    id?: string;
-    type?: string;
-    label: string;
-  }[];
-  machine?: string;
-  runtimeInstanceId?: string;
-  workspaceRoots: readonly { path: string; label?: string }[];
-};
+export type HostMetadata = AcpRelayHostMetadata;
 
 export type AcpRelayClientRegistration = {
   accountId: string;
@@ -409,9 +400,10 @@ export class AcpRelayBroker {
   private readonly clients = new Map<string, RelayClient>();
   private readonly controlPlaneStore: AcpRelayWritableControlPlaneStore;
   private readonly hostHeartbeats = new Map<string, HostHeartbeatState>();
-  private readonly hostReconnects = new Map<string, HostReconnectState>();
-  private readonly hosts = new Map<string, RelaySocket>();
-  private readonly hostMetadataMap = new Map<string, HostMetadata>();
+  private readonly pendingHostReconnects = new Map<string, HostReconnectState>();
+  private readonly activeHostAccountIds = new Map<string, string>();
+  private readonly activeHostRoutes = new Map<string, RelaySocket>();
+  private readonly activeHostMetadata = new Map<string, HostMetadata>();
   private readonly hostReconnectGraceMs: number;
   private readonly hostWorkspaceListRequests =
     new Map<string, PendingHostWorkspaceListRequest>();
@@ -453,20 +445,34 @@ export class AcpRelayBroker {
     this.onTraceSpan = options.onTraceSpan;
   }
 
-  async registerHost(
-    hostId: string,
-    socket: RelaySocket,
-    metadata?: HostMetadata,
-  ): Promise<void> {
-    const previousSocket = this.hosts.get(hostId);
-    this.hosts.set(hostId, socket);
-    this.hostReconnects.delete(hostId);
+  async registerHost(input: {
+    accountId?: string;
+    hostId: string;
+    metadata?: HostMetadata;
+    socket: RelaySocket;
+  }): Promise<void> {
+    const { accountId, hostId, metadata, socket } = input;
+    const connectedAt = this.now().toISOString();
+    const previousSocket = this.activeHostRoutes.get(hostId);
+    this.activeHostRoutes.set(hostId, socket);
+    if (accountId) {
+      this.activeHostAccountIds.set(hostId, accountId);
+    }
+    this.pendingHostReconnects.delete(hostId);
     if (metadata) {
-      this.hostMetadataMap.set(hostId, metadata);
+      this.activeHostMetadata.set(hostId, metadata);
     }
     this.hostHeartbeats.set(hostId, {
-      lastPongAt: this.now().toISOString(),
+      lastPongAt: connectedAt,
     });
+    if (accountId) {
+      await this.controlPlaneStore.updateHostRuntimeState({
+        accountId,
+        connectedAt,
+        hostId,
+        metadata,
+      });
+    }
     previousSocket?.close(1012, "Host connection replaced.");
     this.logRelayLifecycle({
       hostId,
@@ -637,15 +643,16 @@ export class AcpRelayBroker {
   }
 
   removeHost(hostId: string, socket: RelaySocket): void {
-    if (this.hosts.get(hostId) === socket) {
+    if (this.activeHostRoutes.get(hostId) === socket) {
       this.logRelayLifecycle({
         hostId,
         eventName: "acp.relay.host.disconnected",
         pendingReconnect: this.hostReconnectGraceMs > 0,
         severityText: "ERROR",
       });
-      this.hosts.delete(hostId);
+      this.activeHostRoutes.delete(hostId);
       this.hostHeartbeats.delete(hostId);
+      void this.persistHostDisconnected(hostId);
       this.rejectHostWorkspaceListRequests(
         hostId,
         "Host host disconnected.",
@@ -731,13 +738,14 @@ export class AcpRelayBroker {
   closeExpiredDisconnectedHosts(): string[] {
     const expiredHostIds: string[] = [];
     const nowMs = this.now().getTime();
-    for (const [hostId, reconnect] of this.hostReconnects.entries()) {
+    for (const [hostId, reconnect] of this.pendingHostReconnects.entries()) {
       if (nowMs - reconnect.disconnectedAtMs < this.hostReconnectGraceMs) {
         continue;
       }
 
-      this.hostReconnects.delete(hostId);
-      this.hostMetadataMap.delete(hostId);
+      this.pendingHostReconnects.delete(hostId);
+      this.activeHostMetadata.delete(hostId);
+      this.activeHostAccountIds.delete(hostId);
       this.closeClientsForHost(
         hostId,
         1013,
@@ -777,7 +785,7 @@ export class AcpRelayBroker {
   }
 
   hasPendingHostReconnects(): boolean {
-    return this.hostReconnects.size > 0;
+    return this.pendingHostReconnects.size > 0;
   }
 
   hasPendingClientReconnects(): boolean {
@@ -789,19 +797,15 @@ export class AcpRelayBroker {
     return false;
   }
 
-  onlineHostIds(): string[] {
-    return [...this.hosts.keys()].sort();
-  }
-
-  getHostMetadata(hostId: string): HostMetadata | undefined {
-    return this.hostMetadataMap.get(hostId);
+  activeHostRouteIds(): string[] {
+    return [...this.activeHostRoutes.keys()].sort();
   }
 
   private hostRouteState(hostId: string): HostRouteState {
     return {
-      host: this.hosts.get(hostId),
-      metadata: this.hostMetadataMap.get(hostId),
-      pendingReconnect: this.hostReconnects.has(hostId),
+      host: this.activeHostRoutes.get(hostId),
+      metadata: this.activeHostMetadata.get(hostId),
+      pendingReconnect: this.pendingHostReconnects.has(hostId),
     };
   }
 
@@ -826,7 +830,7 @@ export class AcpRelayBroker {
     if (!host) {
       return { ok: false, reason: "Host host is not online." };
     }
-    const hosts = await this.authorizableHosts(input.connectionId);
+    const hosts = await this.activeAuthorizableHosts(input.connectionId);
     if (!hosts.ok || !hosts.hosts.some((host) => host.hostId === input.hostId)) {
       return { ok: false, reason: "Host host is not authorized for this connection." };
     }
@@ -872,7 +876,7 @@ export class AcpRelayBroker {
     return result;
   }
 
-  async authorizableHosts(
+  async activeAuthorizableHosts(
     connectionId: string,
   ): Promise<AcpRelayAuthorizableHostsResult> {
     const client = this.clients.get(connectionId);
@@ -882,14 +886,14 @@ export class AcpRelayBroker {
         reason: "Client connection is no longer active. Restart the remote session from the ACP client.",
       };
     }
-    const onlineHosts = new Set(this.onlineHostIds());
+    const activeHostRouteIds = new Set(this.activeHostRouteIds());
     const hosts = await this.controlPlaneStore.listAuthorizableHosts({
       accountId: client.accountId,
       clientId: client.clientId,
     });
     return {
       hosts: hosts
-        .filter((host) => onlineHosts.has(host.hostId))
+        .filter((host) => activeHostRouteIds.has(host.hostId))
         .filter(
           (host) =>
             !client.connectionProof?.hostId ||
@@ -897,7 +901,7 @@ export class AcpRelayBroker {
         )
         .map((host) => ({
           hostId: host.hostId,
-          metadata: this.hostMetadataMap.get(host.hostId),
+          metadata: this.activeHostMetadata.get(host.hostId),
         }))
         .sort((a, b) => a.hostId.localeCompare(b.hostId)),
       ok: true,
@@ -909,7 +913,7 @@ export class AcpRelayBroker {
     clientId: string;
     hostId?: string;
   }): Promise<AcpRelayAuthorizableHostsResult> {
-    const onlineHosts = new Set(this.onlineHostIds());
+    const activeHostRouteIds = new Set(this.activeHostRouteIds());
     const hosts = await this.controlPlaneStore.listAuthorizableHosts({
       accountId: input.accountId,
       clientId: input.clientId,
@@ -918,10 +922,10 @@ export class AcpRelayBroker {
       hosts: hosts
         .filter((host) => !input.hostId || host.hostId === input.hostId)
         .map((host) => {
-          const online = onlineHosts.has(host.hostId);
+          const online = activeHostRouteIds.has(host.hostId);
           return {
             hostId: host.hostId,
-            metadata: online ? this.hostMetadataMap.get(host.hostId) : undefined,
+            metadata: this.activeHostMetadata.get(host.hostId) ?? host.metadata,
             online,
           };
         })
@@ -948,7 +952,7 @@ export class AcpRelayBroker {
   }
 
   pingHosts(): void {
-    for (const [hostId, socket] of this.hosts.entries()) {
+    for (const [hostId, socket] of this.activeHostRoutes.entries()) {
       const nonce = crypto.randomUUID();
       const frame: AcpRemotePingFrame = {
         connectionId: hostHeartbeatConnectionId(hostId),
@@ -976,10 +980,11 @@ export class AcpRelayBroker {
         continue;
       }
 
-      const host = this.hosts.get(hostId);
+      const host = this.activeHostRoutes.get(hostId);
       host?.close(1011, "Host host heartbeat timed out.");
-      this.hosts.delete(hostId);
+      this.activeHostRoutes.delete(hostId);
       this.hostHeartbeats.delete(hostId);
+      void this.persistHostDisconnected(hostId);
       this.markHostDisconnected(hostId, "Host host heartbeat timed out.");
       closedHostIds.push(hostId);
     }
@@ -991,8 +996,8 @@ export class AcpRelayBroker {
     return heartbeat ? { ...heartbeat } : undefined;
   }
 
-  async authorizableHostIds(connectionId: string): Promise<string[]> {
-    const result = await this.authorizableHosts(connectionId);
+  async activeAuthorizableHostRouteIds(connectionId: string): Promise<string[]> {
+    const result = await this.activeAuthorizableHosts(connectionId);
     if (!result.ok) {
       return [];
     }
@@ -1611,7 +1616,7 @@ export class AcpRelayBroker {
           data: {
             authUrl: client.authUrl,
             connectionId,
-            onlineHosts: this.onlineHostIds(),
+            activeHostRouteIds: this.activeHostRouteIds(),
           },
           message: "Authentication required: host selection was not completed.",
         });
@@ -1658,7 +1663,7 @@ export class AcpRelayBroker {
           data: {
             authUrl: client.authUrl,
             connectionId,
-            onlineHosts: this.onlineHostIds(),
+            activeHostRouteIds: this.activeHostRouteIds(),
           },
           message: "Authentication required: host selection was not completed.",
         });
@@ -1687,7 +1692,7 @@ export class AcpRelayBroker {
       data: {
         authUrl: client.authUrl,
         connectionId,
-        onlineHosts: this.onlineHostIds(),
+        activeHostRouteIds: this.activeHostRouteIds(),
       },
       message: "Authentication required: select a host before using runtime methods.",
     });
@@ -1898,7 +1903,7 @@ export class AcpRelayBroker {
         data: {
           authUrl: client.authUrl,
           connectionId,
-          onlineHosts: this.onlineHostIds(),
+          activeHostRouteIds: this.activeHostRouteIds(),
         },
         message: "Authentication required: session selection was not completed.",
       });
@@ -1930,7 +1935,7 @@ export class AcpRelayBroker {
         data: {
           authUrl: client.authUrl,
           connectionId,
-          onlineHosts: this.onlineHostIds(),
+          activeHostRouteIds: this.activeHostRouteIds(),
         },
         message:
           "Authentication required: historical remote session is missing binding metadata.",
@@ -1962,7 +1967,7 @@ export class AcpRelayBroker {
           authUrl: client.authUrl,
           connectionId,
           hostId: restore.hostId,
-          onlineHosts: this.onlineHostIds(),
+          activeHostRouteIds: this.activeHostRouteIds(),
         },
         message: `Authentication required: ${authorization.reason}`,
       });
@@ -2203,7 +2208,7 @@ export class AcpRelayBroker {
       transport: client.transport,
     });
     if (hostId) {
-      this.hosts.get(hostId)?.send(
+      this.activeHostRoutes.get(hostId)?.send(
         JSON.stringify({
           code,
           connectionId,
@@ -2260,14 +2265,31 @@ export class AcpRelayBroker {
 
   private markHostDisconnected(hostId: string, reason: string): void {
     if (this.hostReconnectGraceMs > 0) {
-      this.hostReconnects.set(hostId, {
+      this.pendingHostReconnects.set(hostId, {
         disconnectedAtMs: this.now().getTime(),
       });
       return;
     }
 
-    this.hostMetadataMap.delete(hostId);
+    this.activeHostMetadata.delete(hostId);
+    this.activeHostAccountIds.delete(hostId);
     this.closeClientsForHost(hostId, 1013, reason);
+  }
+
+  private async persistHostDisconnected(hostId: string): Promise<void> {
+    const accountId = this.activeHostAccountIds.get(hostId);
+    if (!accountId) {
+      return;
+    }
+    try {
+      await this.controlPlaneStore.updateHostRuntimeState({
+        accountId,
+        disconnectedAt: this.now().toISOString(),
+        hostId,
+      });
+    } catch (error) {
+      console.error("Failed to persist ACP relay host disconnect state", error);
+    }
   }
 
   private resolveAckedHostRequestsAfterRuntimeRestart(
@@ -2432,7 +2454,7 @@ export class AcpRelayBroker {
         connectionId,
         client,
       );
-      if (!routeReady || this.hosts.get(hostId) !== socket) {
+      if (!routeReady || this.activeHostRoutes.get(hostId) !== socket) {
         continue;
       }
 
@@ -2905,7 +2927,7 @@ export class AcpRelayBroker {
     if (!hostId) {
       return;
     }
-    this.hosts.get(hostId)?.send(
+    this.activeHostRoutes.get(hostId)?.send(
       JSON.stringify({
         ack: frame.seq,
         channelId: frame.channelId,
@@ -3008,7 +3030,7 @@ export class AcpRelayBroker {
 
   private flushQueuedHostFrames(
     client: RelayClient,
-    host = client.hostId ? this.hosts.get(client.hostId) : undefined,
+    host = client.hostId ? this.activeHostRoutes.get(client.hostId) : undefined,
   ): void {
     if (!host) {
       return;
@@ -3070,7 +3092,7 @@ export class AcpRelayBroker {
       (!client.routeReady ||
         (client.hostId !== undefined &&
           client.connectionProof !== undefined &&
-          this.hosts.has(client.hostId)))
+          this.activeHostRoutes.has(client.hostId)))
     );
   }
 
@@ -3085,7 +3107,7 @@ export class AcpRelayBroker {
       return;
     }
 
-    this.hosts.get(hostId)?.send(
+    this.activeHostRoutes.get(hostId)?.send(
       JSON.stringify({
         code,
         connectionId,
@@ -3112,7 +3134,7 @@ export class AcpRelayBroker {
 
   private handleHostPing(connectionId: string, nonce: string): void {
     const hostId = hostIdFromHostHeartbeatConnectionId(connectionId);
-    const host = hostId ? this.hosts.get(hostId) : undefined;
+    const host = hostId ? this.activeHostRoutes.get(hostId) : undefined;
     host?.send(
       JSON.stringify({
         connectionId,

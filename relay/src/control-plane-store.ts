@@ -21,8 +21,23 @@ export type AcpRelayHostRecord = {
   accountId: AcpRemoteId;
   disabled?: boolean;
   hostId: AcpRemoteId;
+  lastConnectedAt?: string;
+  lastDisconnectedAt?: string;
+  metadata?: AcpRelayHostMetadata;
   previousPublicKey?: string;
   publicKey?: string;
+};
+
+export type AcpRelayHostMetadata = {
+  agentTypes: readonly {
+    command?: string;
+    id?: string;
+    type?: string;
+    label: string;
+  }[];
+  machine?: string;
+  runtimeInstanceId?: string;
+  workspaceRoots: readonly { path: string; label?: string }[];
 };
 
 export type AcpRelayGrantRecord = AcpRemoteGrant & {
@@ -83,6 +98,13 @@ export type AcpRelayWritableControlPlaneStore = AcpRelayControlPlaneStore & {
   ): Promise<void> | void;
   upsertGrant(record: AcpRelayGrantRecord): Promise<void> | void;
   upsertHost(record: AcpRelayHostRecord): Promise<void> | void;
+  updateHostRuntimeState(input: {
+    accountId: AcpRemoteId;
+    connectedAt?: string;
+    disconnectedAt?: string;
+    hostId: AcpRemoteId;
+    metadata?: AcpRelayHostMetadata;
+  }): Promise<void> | void;
   upsertSessionBinding(
     record: AcpRelaySessionBindingRecord,
   ): Promise<void> | void;
@@ -130,6 +152,9 @@ type HostRow = {
   account_id: string;
   disabled: number | null;
   host_id: string;
+  last_connected_at?: string | null;
+  last_disconnected_at?: string | null;
+  metadata_json?: string | null;
   previous_public_key: string | null;
   public_key: string | null;
 };
@@ -194,7 +219,28 @@ export class AcpRelayInMemoryControlPlaneStore
   }
 
   upsertHost(record: AcpRelayHostRecord): void {
-    this.hosts.set(hostKey(record), record);
+    const current = this.hosts.get(hostKey(record));
+    this.hosts.set(hostKey(record), { ...current, ...record });
+  }
+
+  updateHostRuntimeState(input: {
+    accountId: AcpRemoteId;
+    connectedAt?: string;
+    disconnectedAt?: string;
+    hostId: AcpRemoteId;
+    metadata?: AcpRelayHostMetadata;
+  }): void {
+    const key = hostKey(input);
+    const current = this.hosts.get(key);
+    if (!current) {
+      return;
+    }
+    this.hosts.set(key, {
+      ...current,
+      lastConnectedAt: input.connectedAt ?? current.lastConnectedAt,
+      lastDisconnectedAt: input.disconnectedAt ?? current.lastDisconnectedAt,
+      metadata: input.metadata ?? current.metadata,
+    });
   }
 
   upsertGrant(record: AcpRelayGrantRecord): void {
@@ -354,13 +400,17 @@ export class AcpRelayD1ControlPlaneStore
     await this.database
       .prepare(
         `insert into acp_hosts(
-           account_id, host_id, public_key, previous_public_key, disabled, updated_at
+           account_id, host_id, public_key, previous_public_key, disabled,
+           metadata_json, last_connected_at, last_disconnected_at, updated_at
          )
-         values (?1, ?2, ?3, ?4, ?5, current_timestamp)
+         values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, current_timestamp)
          on conflict(account_id, host_id) do update set
            public_key = excluded.public_key,
            previous_public_key = excluded.previous_public_key,
            disabled = excluded.disabled,
+           metadata_json = coalesce(excluded.metadata_json, acp_hosts.metadata_json),
+           last_connected_at = coalesce(excluded.last_connected_at, acp_hosts.last_connected_at),
+           last_disconnected_at = coalesce(excluded.last_disconnected_at, acp_hosts.last_disconnected_at),
            updated_at = current_timestamp`,
       )
       .bind(
@@ -369,6 +419,35 @@ export class AcpRelayD1ControlPlaneStore
         record.publicKey ?? "",
         record.previousPublicKey ?? "",
         record.disabled ? 1 : 0,
+        record.metadata ? JSON.stringify(record.metadata) : null,
+        record.lastConnectedAt ?? null,
+        record.lastDisconnectedAt ?? null,
+      )
+      .run();
+  }
+
+  async updateHostRuntimeState(input: {
+    accountId: AcpRemoteId;
+    connectedAt?: string;
+    disconnectedAt?: string;
+    hostId: AcpRemoteId;
+    metadata?: AcpRelayHostMetadata;
+  }): Promise<void> {
+    await this.database
+      .prepare(
+        `update acp_hosts
+         set last_connected_at = coalesce(?3, last_connected_at),
+             last_disconnected_at = coalesce(?4, last_disconnected_at),
+             metadata_json = coalesce(?5, metadata_json),
+             updated_at = current_timestamp
+         where account_id = ?1 and host_id = ?2`,
+      )
+      .bind(
+        input.accountId,
+        input.hostId,
+        input.connectedAt ?? null,
+        input.disconnectedAt ?? null,
+        input.metadata ? JSON.stringify(input.metadata) : null,
       )
       .run();
   }
@@ -471,7 +550,8 @@ export class AcpRelayD1ControlPlaneStore
   }): Promise<AcpRelayHostRecord | undefined> {
     const row = await this.database
       .prepare(
-        `select account_id, host_id, public_key, previous_public_key, disabled
+        `select account_id, host_id, public_key, previous_public_key, disabled,
+                metadata_json, last_connected_at, last_disconnected_at
          from acp_hosts
          where account_id = ?1 and host_id = ?2
          limit 1`,
@@ -497,7 +577,8 @@ export class AcpRelayD1ControlPlaneStore
 
     const hosts = await this.database
       .prepare(
-        `select account_id, host_id, public_key, previous_public_key, disabled
+        `select account_id, host_id, public_key, previous_public_key, disabled,
+                metadata_json, last_connected_at, last_disconnected_at
          from acp_hosts
          where account_id = ?1 and disabled = 0
          order by host_id asc`,
@@ -667,6 +748,15 @@ function mapHostRow(row: HostRow): AcpRelayHostRecord {
     accountId: row.account_id,
     disabled: Boolean(row.disabled),
     hostId: row.host_id,
+    ...(row.last_connected_at
+      ? { lastConnectedAt: row.last_connected_at }
+      : {}),
+    ...(row.last_disconnected_at
+      ? { lastDisconnectedAt: row.last_disconnected_at }
+      : {}),
+    ...(row.metadata_json
+      ? { metadata: parseHostMetadata(row.metadata_json) }
+      : {}),
     previousPublicKey: row.previous_public_key ?? undefined,
     publicKey: row.public_key ?? undefined,
   };
@@ -736,6 +826,60 @@ function parseStringArray(value: string, label: string): readonly string[] {
     throw new Error(`Invalid ACP relay grant ${label} JSON.`);
   }
   return parsed;
+}
+
+function parseHostMetadata(value: string): AcpRelayHostMetadata | undefined {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!isRecord(parsed)) {
+      return undefined;
+    }
+    const agentTypes = Array.isArray(parsed.agentTypes)
+      ? parsed.agentTypes.filter(isHostAgentType)
+      : [];
+    const workspaceRoots = Array.isArray(parsed.workspaceRoots)
+      ? parsed.workspaceRoots.filter(isHostWorkspaceRoot)
+      : [];
+    const machine =
+      typeof parsed.machine === "string" && parsed.machine.trim()
+        ? parsed.machine
+        : undefined;
+    const runtimeInstanceId =
+      typeof parsed.runtimeInstanceId === "string" &&
+      parsed.runtimeInstanceId.trim()
+        ? parsed.runtimeInstanceId
+        : undefined;
+    return {
+      agentTypes,
+      ...(machine ? { machine } : {}),
+      ...(runtimeInstanceId ? { runtimeInstanceId } : {}),
+      workspaceRoots,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function isHostAgentType(
+  value: unknown,
+): value is AcpRelayHostMetadata["agentTypes"][number] {
+  return (
+    isRecord(value) &&
+    typeof value.label === "string" &&
+    (value.command === undefined || typeof value.command === "string") &&
+    (value.id === undefined || typeof value.id === "string") &&
+    (value.type === undefined || typeof value.type === "string")
+  );
+}
+
+function isHostWorkspaceRoot(
+  value: unknown,
+): value is AcpRelayHostMetadata["workspaceRoots"][number] {
+  return (
+    isRecord(value) &&
+    typeof value.path === "string" &&
+    (value.label === undefined || typeof value.label === "string")
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

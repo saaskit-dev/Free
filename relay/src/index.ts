@@ -322,7 +322,7 @@ export class AcpRelayShard {
     const now = Date.now();
     const ageMs = now - this.createdAt;
     console.log(
-      `[relay-do] alarm fired instance=${this.instanceId} age_ms=${ageMs} hosts=${this.broker.onlineHostIds().length}`,
+      `[relay-do] alarm fired instance=${this.instanceId} age_ms=${ageMs} active_host_routes=${this.broker.activeHostRouteIds().length}`,
     );
     this.broker.closeUnresponsiveHosts();
     this.broker.closeExpiredDisconnectedHosts();
@@ -384,12 +384,19 @@ export class AcpRelayShard {
         server.close(1008, "Missing host id.");
       } else {
         const hostMetadata = parseHostMetadataHeaders(request);
+        const hostAccountId = resolveVerifiedAccountId(request);
         this.updateSocketAttachment(server, {
+          accountId: hostAccountId,
           hostMetadata,
         });
         void (async () => {
           try {
-            await this.broker.registerHost(hostId, server, hostMetadata);
+            await this.broker.registerHost({
+              accountId: hostAccountId,
+              hostId,
+              metadata: hostMetadata,
+              socket: server,
+            });
             await this.writeAllClientStateSnapshots();
             await this.scheduleHeartbeat();
           } catch (error) {
@@ -583,11 +590,12 @@ export class AcpRelayShard {
         socket.close(1008, "Missing host id.");
         continue;
       }
-      await this.broker.registerHost(
-        attachment.hostId,
+      await this.broker.registerHost({
+        accountId: attachment.accountId,
+        hostId: attachment.hostId,
+        metadata: attachment.hostMetadata,
         socket,
-        attachment.hostMetadata,
-      );
+      });
     }
     for (const { attachment, socket } of restored) {
       if (attachment.endpoint !== AcpRemoteEndpointKind.Client) {
@@ -829,11 +837,27 @@ export class AcpRelayShard {
       });
     }
     const hostId = decodeURIComponent(match[1]);
-    const metadata = this.broker.getHostMetadata(hostId);
-    if (!metadata) {
-      return json({ error: "Host not found or has no metadata." }, { status: 404 });
+    const accountId = resolveVerifiedAccountId(request);
+    if (!accountId) {
+      return json({ error: "ACP relay account session is required." }, { status: 401 });
     }
-    return json(metadata);
+    const clientId =
+      request.headers.get("x-acp-verified-client-id") ??
+      request.headers.get("x-acp-verified-principal-id") ??
+      "";
+    const result = await this.broker.discoverableHosts({
+      accountId,
+      clientId,
+      hostId,
+    });
+    if (!result.ok) {
+      return json({ error: result.reason }, { status: 410 });
+    }
+    const host = result.hosts[0];
+    if (!host) {
+      return json({ error: "Host not found." }, { status: 404 });
+    }
+    return json(host);
   }
 
   private removeSocket(
@@ -861,7 +885,7 @@ export class AcpRelayShard {
   private async scheduleHeartbeat(): Promise<void> {
     if (
       !this.heartbeatIntervalMs ||
-      (this.broker.onlineHostIds().length === 0 &&
+      (this.broker.activeHostRouteIds().length === 0 &&
         !this.broker.hasPendingHostReconnects() &&
         !this.broker.hasPendingClientReconnects())
     ) {

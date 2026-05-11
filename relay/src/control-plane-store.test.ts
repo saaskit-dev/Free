@@ -150,6 +150,16 @@ describe("AcpRelayD1ControlPlaneStore", () => {
       clientId: "client-2",
     });
     await store.upsertHost({ accountId: "acct-2", hostId: "host-2" });
+    await store.updateHostRuntimeState({
+      accountId: "acct-2",
+      connectedAt: "2026-05-11T10:00:00.000Z",
+      hostId: "host-2",
+      metadata: {
+        agentTypes: [{ id: "codex-acp", label: "Codex" }],
+        machine: "dev.local",
+        workspaceRoots: [{ path: "/work/project" }],
+      },
+    });
     await store.upsertGrant({
       accountId: "acct-2",
       clientId: "client-2",
@@ -166,6 +176,21 @@ describe("AcpRelayD1ControlPlaneStore", () => {
       hostId: "host-2",
       sessionId: "session-2",
       workspaceRoots: ["/work/project"],
+    });
+
+    await expect(
+      store.getHost({
+        accountId: "acct-2",
+        hostId: "host-2",
+      }),
+    ).resolves.toMatchObject({
+      accountId: "acct-2",
+      hostId: "host-2",
+      lastConnectedAt: "2026-05-11T10:00:00.000Z",
+      metadata: {
+        machine: "dev.local",
+        workspaceRoots: [{ path: "/work/project" }],
+      },
     });
 
     await expect(
@@ -240,6 +265,9 @@ type FakeHostRow = {
   account_id: string;
   disabled: number;
   host_id: string;
+  last_connected_at?: string | null;
+  last_disconnected_at?: string | null;
+  metadata_json?: string | null;
   previous_public_key?: string | null;
   public_key?: string | null;
 };
@@ -340,6 +368,9 @@ class FakeD1PreparedStatement implements D1PreparedStatementLike {
         account_id: this.readStringBinding(0),
         disabled: this.readNumberBinding(4),
         host_id: this.readStringBinding(1),
+        last_connected_at: this.readNullableStringBinding(6),
+        last_disconnected_at: this.readNullableStringBinding(7),
+        metadata_json: this.readNullableStringBinding(5),
         previous_public_key: this.readNullableStringBinding(3),
         public_key: this.readNullableStringBinding(2),
       };
@@ -347,6 +378,24 @@ class FakeD1PreparedStatement implements D1PreparedStatementLike {
         candidate.account_id === row.account_id &&
         candidate.host_id === row.host_id,
       );
+      return { success: true };
+    }
+
+    if (query.includes("update acp_hosts")) {
+      const accountId = this.readStringBinding(0);
+      const hostId = this.readStringBinding(1);
+      const row = this.rows.hosts.find(
+        (candidate) =>
+          candidate.account_id === accountId && candidate.host_id === hostId,
+      );
+      if (row) {
+        row.last_connected_at =
+          this.readNullableStringBinding(2) ?? row.last_connected_at;
+        row.last_disconnected_at =
+          this.readNullableStringBinding(3) ?? row.last_disconnected_at;
+        row.metadata_json =
+          this.readNullableStringBinding(4) ?? row.metadata_json;
+      }
       return { success: true };
     }
 

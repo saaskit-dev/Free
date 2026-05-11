@@ -33,9 +33,13 @@ describe("AcpRelayBroker", () => {
         hostFrames.push(JSON.parse(event.data));
       }
     });
-    await broker.registerHost("host-1", relayHostSocket, {
-      agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
-      workspaceRoots: [{ path: "/workspace" }],
+    await broker.registerHost({
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: relayHostSocket,
     });
 
     const [, relayClientSocket] = createMemoryWebSocketPair();
@@ -78,9 +82,13 @@ describe("AcpRelayBroker", () => {
     const identity = await createProofFixture();
     const broker = createBroker();
     const [, firstRelayHostSocket] = createMemoryWebSocketPair();
-    await broker.registerHost("host-1", firstRelayHostSocket, {
-      agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
-      workspaceRoots: [{ path: "/workspace" }],
+    await broker.registerHost({
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: firstRelayHostSocket,
     });
     const [, relayClientSocket] = createMemoryWebSocketPair();
     broker.registerClient({
@@ -105,9 +113,13 @@ describe("AcpRelayBroker", () => {
         frames.push(JSON.parse(event.data));
       }
     });
-    await broker.registerHost("host-1", secondRelayHostSocket, {
-      agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
-      workspaceRoots: [{ path: "/workspace" }],
+    await broker.registerHost({
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: secondRelayHostSocket,
     });
 
     await waitFor(() =>
@@ -154,9 +166,13 @@ describe("AcpRelayBroker", () => {
         hostFrames.push(JSON.parse(event.data));
       }
     });
-    await broker.registerHost("host-1", relayHostSocket, {
-      agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
-      workspaceRoots: [{ path: "/workspace" }],
+    await broker.registerHost({
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: relayHostSocket,
     });
 
     await waitFor(() =>
@@ -179,9 +195,13 @@ describe("AcpRelayBroker", () => {
         hostFrames.push(JSON.parse(event.data));
       }
     });
-    await broker.registerHost("host-1", relayHostSocket, {
-      agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
-      workspaceRoots: [{ path: "/workspace" }],
+    await broker.registerHost({
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: relayHostSocket,
     });
 
     const [clientSocket, relayClientSocket] = createMemoryWebSocketPair();
@@ -250,10 +270,15 @@ describe("AcpRelayBroker", () => {
       }),
     });
     const [, relayHostSocket] = createMemoryWebSocketPair();
-    await broker.registerHost("host-1", relayHostSocket, {
-      agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
-      machine: "online-machine",
-      workspaceRoots: [{ path: "/workspace" }],
+    await broker.registerHost({
+      accountId: "acct-1",
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        machine: "online-machine",
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: relayHostSocket,
     });
 
     await expect(
@@ -325,9 +350,13 @@ describe("AcpRelayBroker", () => {
         hostFrames.push(JSON.parse(event.data));
       }
     });
-    await broker.registerHost("host-1", relayHostSocket, {
-      agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
-      workspaceRoots: [{ path: "/workspace" }],
+    await broker.registerHost({
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: relayHostSocket,
     });
 
     const [, relayClientSocket] = createMemoryWebSocketPair();
