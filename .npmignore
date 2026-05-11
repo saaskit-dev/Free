@@ -1,0 +1,10 @@
+node_modules
+.tmp
+*.tgz
+
+relay/.wrangler
+relay/node_modules
+relay/.dev.vars
+
+**/.DS_Store
+**/*.log

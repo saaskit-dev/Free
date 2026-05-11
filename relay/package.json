@@ -1,0 +1,15 @@
+{
+  "name": "@saaskit-dev/free-relay",
+  "version": "0.1.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "make -C .. relay-typecheck",
+    "db:migrations:apply:local": "make -C .. relay-migrate-local",
+    "db:migrations:apply:remote": "make -C .. relay-migrate-remote",
+    "deploy": "make -C .. relay-deploy",
+    "dev": "make -C .. relay-dev",
+    "test": "make -C .. test",
+    "typecheck": "make -C .. relay-typecheck"
+  }
+}
