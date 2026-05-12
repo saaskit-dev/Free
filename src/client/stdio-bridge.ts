@@ -1061,6 +1061,11 @@ async function resolveSingleHostId(input: {
       "ACP relay host discovery found no online hosts.",
     );
   }
+  if (onlineHosts.length > 1) {
+    throw new Error(
+      "ACP relay auto authorization requires an explicit host id when multiple online hosts are available.",
+    );
+  }
   return onlineHosts
     .sort((left, right) => left.hostId.localeCompare(right.hostId))[0].hostId;
 }
