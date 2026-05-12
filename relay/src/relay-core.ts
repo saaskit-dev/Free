@@ -518,7 +518,16 @@ export class AcpRelayBroker {
       this.canResumeClient(input, existing, clientId, transport)
     ) {
       const previousSocket = existing.socket;
+      const mergedConnectionProofs = connectionProofMap([
+        ...existing.connectionProofs.values(),
+        ...(input.connectionProofs ?? []),
+        ...(input.connectionProof ? [input.connectionProof] : []),
+      ]);
       existing.authUrl = input.authUrl;
+      existing.connectionProofs = mergedConnectionProofs;
+      existing.connectionProof = existing.hostId
+        ? mergedConnectionProofs.get(existing.hostId) ?? existing.connectionProof
+        : input.connectionProof ?? existing.connectionProof;
       existing.disconnectedAtMs = undefined;
       existing.socket = input.socket;
       this.logRelayLifecycle({

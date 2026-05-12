@@ -423,6 +423,84 @@ describe("AcpRelayBroker", () => {
     });
   });
 
+  it("merges fresh connection proofs when a client connection resumes", async () => {
+    const authority = await createEd25519KeyPair();
+    const client = await createEd25519KeyPair();
+    const accountSession = await createAcpRemoteAccountSession({
+      accountId: "acct-1",
+      principalId: "client-1",
+      principalPublicKey: client.publicKey,
+      principalType: "client",
+      signingKey: { kid: "authority-1", privateKey: authority.privateKey },
+    });
+    const credential = { accountSession, privateKey: client.privateKey };
+    const broker = new AcpRelayBroker({
+      controlPlaneStore: new AcpRelayInMemoryControlPlaneStore({
+        accounts: [{ accountId: "acct-1" }],
+        clientDevices: [{ accountId: "acct-1", clientId: "client-1" }],
+        grants: [
+          {
+            accountId: "acct-1",
+            clientId: "client-1",
+            hostId: "host-1",
+            policyVersion: 1,
+            scopes: ["acp:connect"],
+          },
+          {
+            accountId: "acct-1",
+            clientId: "client-1",
+            hostId: "host-2",
+            policyVersion: 1,
+            scopes: ["acp:connect"],
+          },
+        ],
+        hosts: [
+          { accountId: "acct-1", hostId: "host-1" },
+          { accountId: "acct-1", hostId: "host-2" },
+        ],
+      }),
+    });
+    const [, relayHostSocket1] = createMemoryWebSocketPair();
+    await broker.registerHost({ hostId: "host-1", socket: relayHostSocket1 });
+    const [, relayHostSocket2] = createMemoryWebSocketPair();
+    await broker.registerHost({ hostId: "host-2", socket: relayHostSocket2 });
+
+    const proof1 = await createAcpRemoteConnectionProof({
+      connectionId: "conn-1",
+      credential,
+      hostId: "host-1",
+    });
+    const proof2 = await createAcpRemoteConnectionProof({
+      connectionId: "conn-1",
+      credential,
+      hostId: "host-2",
+    });
+    const [, firstRelayClientSocket] = createMemoryWebSocketPair();
+    broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      connectionProof: proof1,
+      socket: firstRelayClientSocket,
+    });
+
+    const [, secondRelayClientSocket] = createMemoryWebSocketPair();
+    broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      connectionProof: proof1,
+      connectionProofs: [proof1, proof2],
+      socket: secondRelayClientSocket,
+    });
+
+    await expect(
+      broker.activeAuthorizableHostRouteIds("conn-1"),
+    ).resolves.toEqual(["host-1", "host-2"]);
+  });
+
   it("renders offline hosts as disabled authorization choices", () => {
     const page = createRelayAuthorizationPage({
       accountId: "acct-1",
