@@ -42,10 +42,12 @@ build:
 	pnpm --dir ../acp-runtime run build:lib
 	rm -rf dist
 	pnpm exec tsc -p tsconfig.json
+	chmod +x dist/bin.js
 
 build-self:
 	rm -rf dist
 	pnpm exec tsc -p tsconfig.json
+	chmod +x dist/bin.js
 
 dev:
 	pnpm exec tsc -p tsconfig.json --watch
@@ -118,6 +120,7 @@ package-install-check: $(TARBALL)
 	rm -rf "$(INSTALL_DIR)"
 	mkdir -p "$(INSTALL_DIR)"
 	npm install --prefix "$(INSTALL_DIR)" "$(TARBALL)" --ignore-scripts
+	test -x "$(FREE_BIN)"
 	"$(FREE_BIN)" --help >/dev/null
 	"$(FREE_BIN)" host --help >/dev/null
 	"$(FREE_BIN)" bridge config --relay-url ws://127.0.0.1:8787 --command "$(FREE_BIN)" --format generic >/dev/null

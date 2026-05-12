@@ -1,7 +1,16 @@
 #!/usr/bin/env node
 
 const { execFileSync } = require("node:child_process");
-const { existsSync, lstatSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } = require("node:fs");
+const {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} = require("node:fs");
 const { dirname, join, resolve } = require("node:path");
 const { homedir } = require("node:os");
 
@@ -13,7 +22,11 @@ function main() {
   if (!installedBin || !packageRoot) {
     return;
   }
+  ensureExecutableBins(packageRoot);
   ensureManagedShadowLaunchers(installedBin);
+  if (!shouldUpdateLaunchdService(packageRoot)) {
+    return;
+  }
   updateLaunchdService({
     hostBinPath: join(packageRoot, "dist", "host", "bin.js"),
     nodePath: process.execPath,
@@ -112,6 +125,25 @@ function isManagedFreeLauncher(path) {
   } catch {
     return false;
   }
+}
+
+function ensureExecutableBins(packageRoot) {
+  for (const relativePath of [
+    "dist/bin.js",
+  ]) {
+    const binPath = join(packageRoot, relativePath);
+    if (!existsSync(binPath)) {
+      continue;
+    }
+    chmodSync(binPath, 0o755);
+  }
+}
+
+function shouldUpdateLaunchdService(packageRoot) {
+  if (process.env.FREE_PACKAGE_ROOT) {
+    return true;
+  }
+  return packageRoot.split(/[\\/]/).includes("node_modules");
 }
 
 function updateLaunchdService(input) {
