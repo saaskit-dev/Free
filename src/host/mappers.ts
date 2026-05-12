@@ -291,15 +291,11 @@ export function mapRuntimeHistoryEntryToAcpNotifications(
   entry: AcpRuntimeHistoryEntry,
 ): SessionNotification[] {
   if (entry.type === AcpRuntimePromptMessageRole.User) {
-    return [
-      {
-        sessionId,
-        update: {
-          content: { text: entry.text, type: "text" },
-          sessionUpdate: "user_message_chunk",
-        },
-      },
-    ];
+    return mapRuntimeUserMessageToAcpNotifications(
+      sessionId,
+      entry.content,
+      entry.text,
+    );
   }
   return mapRuntimeTurnEventToAcpNotifications(sessionId, entry);
 }
@@ -310,15 +306,11 @@ export function mapRuntimeThreadEntryToAcpNotifications(
 ): SessionNotification[] {
   switch (entry.kind) {
     case AcpRuntimeThreadEntryKind.UserMessage:
-      return [
-        {
-          sessionId,
-          update: {
-            content: { text: entry.text, type: "text" },
-            sessionUpdate: "user_message_chunk",
-          },
-        },
-      ];
+      return mapRuntimeUserMessageToAcpNotifications(
+        sessionId,
+        entry.content,
+        entry.text,
+      );
     case AcpRuntimeThreadEntryKind.AssistantMessage:
       return [
         {
@@ -358,6 +350,23 @@ export function mapRuntimeThreadEntryToAcpNotifications(
     default:
       return assertNever(entry);
   }
+}
+
+function mapRuntimeUserMessageToAcpNotifications(
+  sessionId: string,
+  content: readonly AcpRuntimePromptPart[] | undefined,
+  fallbackText: string,
+): SessionNotification[] {
+  const blocks = content && content.length > 0
+    ? content.map((part) => mapRuntimeOutputPartToAcpContent(part))
+    : [{ text: fallbackText, type: "text" } satisfies ContentBlock];
+  return blocks.map((block) => ({
+    sessionId,
+    update: {
+      content: block,
+      sessionUpdate: "user_message_chunk",
+    },
+  }));
 }
 
 function mapRuntimeThreadToolCallToAcpNotifications(

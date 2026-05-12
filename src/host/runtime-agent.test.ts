@@ -465,6 +465,17 @@ describe("AcpRemoteRuntimeAgent", () => {
       history: [
         { text: "previous user message", type: "user" },
         {
+          content: [
+            {
+              mediaType: "image/png",
+              type: "image",
+              uri: "data:image/png;base64,aGVsbG8=",
+            },
+          ],
+          text: "Image content (image/png)",
+          type: "user",
+        },
+        {
           text: "previous assistant message",
           turnId: "turn-history",
           type: AcpRuntimeTurnEventType.Text,
@@ -552,6 +563,17 @@ describe("AcpRemoteRuntimeAgent", () => {
       {
         sessionId: "zed-history-session",
         update: {
+          content: {
+            data: "aGVsbG8=",
+            mimeType: "image/png",
+            type: "image",
+          },
+          sessionUpdate: "user_message_chunk",
+        },
+      },
+      {
+        sessionId: "zed-history-session",
+        update: {
           content: { text: "previous assistant message", type: "text" },
           sessionUpdate: "agent_message_chunk",
         },
@@ -568,9 +590,17 @@ describe("AcpRemoteRuntimeAgent", () => {
       onPrompt() {},
       threadEntries: [
         {
+          content: [
+            { text: "active user message", type: "text" },
+            {
+              mediaType: "image/png",
+              type: "image",
+              uri: "data:image/png;base64,aGVsbG8=",
+            },
+          ],
           id: "user-1",
           kind: AcpRuntimeThreadEntryKind.UserMessage,
-          text: "active user message",
+          text: "active user message\nImage content (image/png)",
           turnId: "turn-active",
         },
         {
@@ -688,6 +718,17 @@ describe("AcpRemoteRuntimeAgent", () => {
         sessionId: "zed-active-session",
         update: {
           content: { text: "active user message", type: "text" },
+          sessionUpdate: "user_message_chunk",
+        },
+      },
+      {
+        sessionId: "zed-active-session",
+        update: {
+          content: {
+            data: "aGVsbG8=",
+            mimeType: "image/png",
+            type: "image",
+          },
           sessionUpdate: "user_message_chunk",
         },
       },
