@@ -501,6 +501,80 @@ describe("AcpRelayBroker", () => {
     ).resolves.toEqual(["host-1", "host-2"]);
   });
 
+  it("requires the matching authorization page selection for a new session on an authorized connection", async () => {
+    const identity = await createProofFixture();
+    const broker = createBroker({ authWaitMs: 5 });
+    const [hostSocket, relayHostSocket] = createMemoryWebSocketPair();
+    const hostFrames: unknown[] = [];
+    hostSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        hostFrames.push(JSON.parse(event.data));
+      }
+    });
+    await broker.registerHost({
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: relayHostSocket,
+    });
+
+    const [clientSocket, relayClientSocket] = createMemoryWebSocketPair();
+    const clientMessages: unknown[] = [];
+    clientSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        clientMessages.push(JSON.parse(event.data));
+      }
+    });
+    broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      connectionProof: identity.proof,
+      socket: relayClientSocket,
+    });
+
+    await expect(
+      broker.authorizeClient({
+        clientAgent: { id: "fake-agent" },
+        connectionId: "conn-1",
+        hostId: "host-1",
+        skipHostBootstrapInitialize: true,
+        workspaceRoots: ["/workspace"],
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    hostFrames.length = 0;
+
+    await broker.handleClientText(
+      "conn-1",
+      JSON.stringify({
+        id: 1,
+        jsonrpc: "2.0",
+        method: "session/new",
+        params: {
+          _meta: {
+            "acp-runtime/remote/sessionSelectionId": "conn-1:1:selection-1",
+          },
+          cwd: "/workspace/project",
+          mcpServers: [],
+        },
+      }),
+    );
+
+    expect(hostFrames).toEqual([]);
+    expect(clientMessages).toEqual([
+      expect.objectContaining({
+        error: expect.objectContaining({
+          message:
+            "Authentication required: session selection was not completed.",
+        }),
+        id: 1,
+      }),
+    ]);
+  });
+
   it("renders offline hosts as disabled authorization choices", () => {
     const page = createRelayAuthorizationPage({
       accountId: "acct-1",

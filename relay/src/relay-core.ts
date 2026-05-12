@@ -1931,10 +1931,13 @@ export class AcpRelayBroker {
     client: ConnectedRelayClient,
     payload: RelayJsonRpcRequest,
   ): Promise<RelayJsonRpcRequest | undefined> {
-    const sessionSelectionId = readSessionSelectionId(payload);
+    const explicitSessionSelectionId = readExplicitSessionSelectionId(payload);
+    const sessionSelectionId = normalizeSessionSelectionId(
+      explicitSessionSelectionId,
+    );
     const selection = isSessionNewRequest(payload)
       ? this.consumePendingSessionSelection(client, sessionSelectionId) ??
-        client.lastAuthorization ??
+        (explicitSessionSelectionId ? undefined : client.lastAuthorization) ??
         await this.waitForNextSessionSelection(client, sessionSelectionId)
       : this.consumePendingSessionSelection(client, sessionSelectionId);
     if (!selection && !isSessionNewRequest(payload)) {
@@ -4570,12 +4573,12 @@ function isSessionNewRequest(
   return message.method === "session/new";
 }
 
-function readSessionSelectionId(request: RelayJsonRpcRequest): string {
+function readExplicitSessionSelectionId(
+  request: RelayJsonRpcRequest,
+): string | undefined {
   const params = isRecord(request.params) ? request.params : undefined;
   const meta = isRecord(params?._meta) ? params._meta : undefined;
-  return normalizeSessionSelectionId(
-    readString(meta?.[ACP_REMOTE_SESSION_SELECTION_ID_META]),
-  );
+  return readString(meta?.[ACP_REMOTE_SESSION_SELECTION_ID_META]);
 }
 
 function readRequestSessionId(request: RelayJsonRpcRequest): string | undefined {
