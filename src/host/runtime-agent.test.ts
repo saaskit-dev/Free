@@ -131,13 +131,23 @@ describe("AcpRemoteRuntimeAgent", () => {
 
     const response = await clientConnection.prompt({
       messageId: "client-message-1",
-      prompt: [{ text: "hello", type: "text" }],
+      prompt: [
+        { text: "hello", type: "text" },
+        { data: "aGVsbG8=", mimeType: "image/png", type: "image" },
+      ],
       sessionId: created.sessionId,
     });
 
     expect(response.stopReason).toBe("end_turn");
     expect(response.userMessageId).toBe("client-message-1");
-    expect(receivedPrompt).toEqual([{ text: "hello", type: "text" }]);
+    expect(receivedPrompt).toEqual([
+      { text: "hello", type: "text" },
+      {
+        mediaType: "image/png",
+        type: "image",
+        uri: "data:image/png;base64,aGVsbG8=",
+      },
+    ]);
     expect(receivedTurnOptions?._traceContext).toBeDefined();
     expect(notifications).toEqual([
       {
@@ -146,6 +156,18 @@ describe("AcpRemoteRuntimeAgent", () => {
           content: {
             text: "hello",
             type: "text",
+          },
+          messageId: "client-message-1",
+          sessionUpdate: "user_message_chunk",
+        },
+      },
+      {
+        sessionId: "runtime-session-1",
+        update: {
+          content: {
+            data: "aGVsbG8=",
+            mimeType: "image/png",
+            type: "image",
           },
           messageId: "client-message-1",
           sessionUpdate: "user_message_chunk",
@@ -566,6 +588,15 @@ describe("AcpRemoteRuntimeAgent", () => {
               text: "tool output",
             },
             {
+              id: "content-2",
+              kind: "content",
+              part: {
+                mediaType: "image/png",
+                type: "image",
+                uri: "data:image/png;base64,aGVsbG8=",
+              },
+            },
+            {
               changeType: "update",
               id: "diff-1",
               kind: "diff",
@@ -686,6 +717,14 @@ describe("AcpRemoteRuntimeAgent", () => {
           content: [
             {
               content: { text: "tool output", type: "text" },
+              type: "content",
+            },
+            {
+              content: {
+                data: "aGVsbG8=",
+                mimeType: "image/png",
+                type: "image",
+              },
               type: "content",
             },
             {

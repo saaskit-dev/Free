@@ -4,6 +4,7 @@ import {
   exportEd25519PublicKey,
   readAcpRemoteAccountSessionVerificationKeys,
   verifyAcpRemoteConnectionProof,
+  type AcpRemoteConnectionProofVerificationResult,
   type AcpRemoteAccountSessionSigningKey,
   type AcpRemoteAccountSessionVerificationKey,
   type AcpRemoteScope,
@@ -42,7 +43,12 @@ import {
   handleRelayOtlpProxyRequest,
 } from "./log-upload-http.js";
 import {
+  createFreeProductAppPage,
+  isFreeProductAppPath,
+} from "./product-ui.js";
+import {
   AcpRelayBroker,
+  type AcpRelayAttachmentForwardInput,
   createRelayAuthorizationPage,
   type AcpRelayClientStateSnapshot,
   type AcpRelayClientTransport,
@@ -82,11 +88,17 @@ const DEFAULT_AUTOMATIC_GRANT_SCOPES = [
   "acp:turn:cancel",
 ] as const satisfies readonly AcpRemoteScope[];
 
+const MAX_RELAY_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/health") {
       return json({ ok: true });
+    }
+
+    if (request.method === "GET" && isFreeProductAppPath(url.pathname)) {
+      return html(createFreeProductAppPage(url.pathname));
     }
 
     if (
@@ -108,6 +120,7 @@ export default {
       url.pathname !== "/api/otel/logs" &&
       url.pathname !== "/api/otel/traces" &&
       url.pathname !== "/api/session" &&
+      url.pathname !== "/attachments" &&
       url.pathname !== "/host" &&
       !url.pathname.startsWith("/api/hosts/") &&
       url.pathname !== "/authorize"
@@ -153,6 +166,33 @@ export default {
         expiresAt: accountSession.session.expiresAt,
         sessionId: accountSession.session.sessionId,
       });
+    }
+
+    if (url.pathname === "/attachments") {
+      const connectionProof = readConnectionProof(request, url);
+      if (!connectionProof) {
+        return new Response("Missing connection proof.", { status: 401 });
+      }
+      const verificationKeys = readAccountSessionVerificationKeys(env);
+      if (!verificationKeys.ok) {
+        return new Response(verificationKeys.reason, { status: 503 });
+      }
+      const proof = await verifyAcpRemoteConnectionProof(
+        connectionProof,
+        verificationKeys.keys,
+        {
+          clientId: resolveClientId(request, url),
+          connectionId: url.searchParams.get("connectionId") ?? undefined,
+          hostId: resolveHostId(request, url),
+        },
+      );
+      if (!proof.ok) {
+        return new Response(proof.reason, { status: 401 });
+      }
+      const shardId = env.ACP_RELAY_SHARDS.idFromName(`account:${proof.accountId}`);
+      return env.ACP_RELAY_SHARDS.get(shardId).fetch(
+        withVerifiedConnectionProof(request, proof),
+      );
     }
 
     if (url.pathname === "/api/hosts" || url.pathname.startsWith("/api/hosts/")) {
@@ -363,6 +403,10 @@ export class AcpRelayShard {
     }
     if (url.pathname === "/authorize") {
       return this.authorize(request, url);
+    }
+
+    if (url.pathname === "/attachments") {
+      return this.handleAttachmentUpload(request, url);
     }
 
     if (url.pathname === "/api/hosts" || url.pathname.startsWith("/api/hosts/")) {
@@ -882,6 +926,73 @@ export class AcpRelayShard {
     return json(host);
   }
 
+  private async handleAttachmentUpload(
+    request: Request,
+    url: URL,
+  ): Promise<Response> {
+    if (request.method !== "POST") {
+      return new Response("Method not allowed.", {
+        headers: { allow: "POST" },
+        status: 405,
+      });
+    }
+    const accountId = resolveVerifiedAccountId(request);
+    const clientId =
+      request.headers.get("x-acp-verified-client-id") ??
+      request.headers.get("x-acp-verified-principal-id") ??
+      undefined;
+    if (!accountId || !clientId) {
+      return json({ ok: false, reason: "Connection proof is required." }, { status: 401 });
+    }
+    const connectionId = url.searchParams.get("connectionId");
+    const hostId = resolveHostId(request, url);
+    const attachmentId =
+      request.headers.get("x-free-attachment-id") ??
+      url.searchParams.get("attachmentId");
+    const messageId =
+      request.headers.get("x-free-message-id") ??
+      url.searchParams.get("messageId");
+    if (!connectionId || !hostId || !attachmentId || !messageId) {
+      return json(
+        { ok: false, reason: "Missing connectionId, hostId, messageId, or attachmentId." },
+        { status: 400 },
+      );
+    }
+    const mimeType = request.headers.get("content-type")?.split(";")[0]?.trim();
+    if (!mimeType?.startsWith("image/")) {
+      return json({ ok: false, reason: "Only image attachments are supported." }, { status: 415 });
+    }
+    const declaredLength = readContentLength(request);
+    if (declaredLength !== undefined && declaredLength > MAX_RELAY_ATTACHMENT_BYTES) {
+      return json({ ok: false, reason: "Attachment body is too large." }, { status: 413 });
+    }
+    const body = new Uint8Array(await request.arrayBuffer());
+    if (body.byteLength === 0) {
+      return json({ ok: false, reason: "Attachment body is empty." }, { status: 400 });
+    }
+    if (body.byteLength > MAX_RELAY_ATTACHMENT_BYTES) {
+      return json({ ok: false, reason: "Attachment body is too large." }, { status: 413 });
+    }
+    const expectedSha256 = request.headers.get("x-free-attachment-sha256");
+    const sha256 = await sha256Hex(body);
+    if (expectedSha256 && expectedSha256 !== sha256) {
+      return json({ ok: false, reason: "Attachment checksum mismatch." }, { status: 400 });
+    }
+    const input: AcpRelayAttachmentForwardInput = {
+      accountId,
+      attachmentId,
+      body,
+      clientId,
+      connectionId,
+      hostId,
+      messageId,
+      mimeType,
+      sha256,
+    };
+    const result = await this.broker.forwardClientAttachment(input);
+    return json(result, { status: result.ok ? 200 : 404 });
+  }
+
   private removeSocket(
     endpoint: AcpRemoteEndpointKind,
     connectionId: string,
@@ -1021,6 +1132,36 @@ function createAuthorizationSessionFailureResponse(input: {
     }),
     { status: input.failure.status },
   );
+}
+
+function withVerifiedConnectionProof(
+  request: Request,
+  proof: Extract<AcpRemoteConnectionProofVerificationResult, { ok: true }>,
+): Request {
+  const headers = new Headers(request.headers);
+  headers.set("x-acp-verified-account-id", proof.accountId);
+  headers.set("x-acp-verified-client-id", proof.clientId);
+  headers.set("x-acp-verified-principal-id", proof.clientId);
+  headers.set("x-acp-verified-principal-type", "client");
+  return new Request(request, { headers });
+}
+
+function readContentLength(request: Request): number | undefined {
+  const raw = request.headers.get("content-length");
+  if (!raw) {
+    return undefined;
+  }
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+async function sha256Hex(data: Uint8Array): Promise<string> {
+  const bytes: Uint8Array<ArrayBuffer> = new Uint8Array(data.byteLength);
+  bytes.set(data);
+  const digest = await crypto.subtle.digest("SHA-256", bytes.buffer);
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 function createRelayAccountSessionRequiredPage(input: {

@@ -3,6 +3,10 @@ import {
   PROTOCOL_VERSION,
   type Client,
 } from "@agentclientprotocol/sdk";
+import { createHash } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
   AcpRuntimePrompt,
   AcpRuntimeSession,
@@ -28,6 +32,8 @@ import {
 describe("remote ACP end-to-end", () => {
   it("uses the ACP client SDK through relay and host without exposing remote auth churn", async () => {
     const identity = await createProofFixture();
+    const attachmentRootDir = await mkdtemp(join(tmpdir(), "free-e2e-attachments-"));
+    let receivedPrompt: AcpRuntimePrompt | undefined;
     const broker = new AcpRelayBroker({
       controlPlaneStore: new AcpRelayInMemoryControlPlaneStore({
         accounts: [{ accountId: "acct-1" }],
@@ -58,9 +64,14 @@ describe("remote ACP end-to-end", () => {
         { kid: "authority-1", publicKey: identity.authorityPublicKey },
       ],
       agent: "fake-agent",
+      attachmentRootDir,
       hostId: "host-1",
       now: () => new Date("2026-05-10T00:00:02.000Z"),
-      runtime: createFakeRuntime(),
+      runtime: createFakeRuntime({
+        onPrompt(prompt) {
+          receivedPrompt = prompt;
+        },
+      }),
       socket: hostSocket,
       workspaceRoots: ["/workspace"],
     });
@@ -133,9 +144,48 @@ describe("remote ACP end-to-end", () => {
     });
     expect(JSON.stringify(notifications)).toContain("hello from runtime");
 
+    const imageBody = new TextEncoder().encode("image-bytes");
+    const attachment = await broker.forwardClientAttachment({
+      accountId: "acct-1",
+      attachmentId: "att-1",
+      body: imageBody,
+      clientId: "client-1",
+      connectionId: "conn-1",
+      hostId: "host-1",
+      messageId: "client-message-1",
+      mimeType: "image/png",
+      sha256: sha256Hex(imageBody),
+    });
+    expect(attachment).toMatchObject({ ok: true });
+    if (!attachment.ok) {
+      throw new Error(attachment.reason);
+    }
+
+    const imageResponse = await client.prompt({
+      messageId: "client-message-1",
+      prompt: [{
+        mimeType: "image/png",
+        type: "resource_link",
+        uri: attachment.uri,
+      } as never],
+      sessionId: session.sessionId,
+    });
+    expect(imageResponse).toMatchObject({
+      stopReason: "end_turn",
+      userMessageId: "client-message-1",
+    });
+    expect(receivedPrompt).toEqual([
+      {
+        mediaType: "image/png",
+        type: "image",
+        uri: `data:image/png;base64,${Buffer.from(imageBody).toString("base64")}`,
+      },
+    ]);
+
     await client.closeSession({ sessionId: session.sessionId });
     host.close();
     nativeClientSocket.close();
+    await rm(attachmentRootDir, { force: true, recursive: true });
   });
 });
 
@@ -202,7 +252,9 @@ async function createEd25519KeyPair(): Promise<{
   };
 }
 
-function createFakeRuntime(): {
+function createFakeRuntime(options: {
+  onPrompt?: (prompt: AcpRuntimePrompt) => void;
+} = {}): {
   sessions: {
     list(): Promise<{ entries: [] }>;
     load(): Promise<AcpRuntimeSession>;
@@ -210,7 +262,7 @@ function createFakeRuntime(): {
     start(): Promise<AcpRuntimeSession>;
   };
 } {
-  const session = createFakeRuntimeSession();
+  const session = createFakeRuntimeSession(options);
   return {
     sessions: {
       async list() {
@@ -229,7 +281,9 @@ function createFakeRuntime(): {
   };
 }
 
-function createFakeRuntimeSession(): AcpRuntimeSession {
+function createFakeRuntimeSession(options: {
+  onPrompt?: (prompt: AcpRuntimePrompt) => void;
+} = {}): AcpRuntimeSession {
   const id = "runtime-session-1";
   return {
     agent: {
@@ -279,15 +333,18 @@ function createFakeRuntimeSession(): AcpRuntimeSession {
         outputText: "hello from runtime",
         turnId: "turn-1",
       }),
-      start: () => ({
-        completion: Promise.resolve({
-          output: [{ text: "hello from runtime", type: "text" }],
-          outputText: "hello from runtime",
+      start: (prompt: AcpRuntimePrompt) => {
+        options.onPrompt?.(prompt);
+        return {
+          completion: Promise.resolve({
+            output: [{ text: "hello from runtime", type: "text" }],
+            outputText: "hello from runtime",
+            turnId: "turn-1",
+          }),
+          events: createTurnEvents(),
           turnId: "turn-1",
-        }),
-        events: createTurnEvents(),
-        turnId: "turn-1",
-      }),
+        };
+      },
       stream: () => createTurnEvents(),
     },
   } as unknown as AcpRuntimeSession;
@@ -310,4 +367,8 @@ async function* createTurnEvents() {
     turnId: "turn-1",
     type: AcpRuntimeTurnEventType.Completed,
   };
+}
+
+function sha256Hex(data: Uint8Array): string {
+  return createHash("sha256").update(data).digest("hex");
 }

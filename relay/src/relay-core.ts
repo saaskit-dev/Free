@@ -14,6 +14,11 @@ import {
   type AcpRemotePingFrame,
 } from "../../src/protocol/index.js";
 import {
+  createFreeAttachmentUri,
+  encodeAcpRemoteAttachmentUpload,
+  isAcpRemoteAttachmentAckFrame,
+} from "../../src/protocol/attachments.js";
+import {
   AcpRelayInMemoryControlPlaneStore,
   type AcpRelayHostMetadata,
   type AcpRelayWritableControlPlaneStore,
@@ -27,7 +32,7 @@ import { logRelayLifecycle as writeRelayLifecycleEvent } from "./relay-events.js
 
 export type RelaySocket = {
   close(code?: number, reason?: string): void;
-  send(data: string): void;
+  send(data: ArrayBuffer | ArrayBufferView | string): void;
 };
 
 export type AcpRelayBrokerOptions = {
@@ -52,6 +57,32 @@ export type AcpRelayTraceSpanInput = {
   name: string;
   parent: AcpRemoteTraceContext;
 };
+
+export type AcpRelayAttachmentForwardInput = {
+  accountId: string;
+  attachmentId: string;
+  body: Uint8Array;
+  clientId: string;
+  connectionId: string;
+  hostId: string;
+  messageId: string;
+  mimeType: string;
+  sha256: string;
+};
+
+export type AcpRelayAttachmentForwardResult =
+  | {
+      attachmentId: string;
+      mimeType: string;
+      ok: true;
+      sha256: string;
+      size: number;
+      uri: string;
+    }
+  | {
+      ok: false;
+      reason: string;
+    };
 
 export type AcpRelayClientTransport = "native-acp";
 
@@ -254,7 +285,15 @@ type PendingHostWorkspaceListRequest = {
   timeout: ReturnType<typeof setTimeout>;
 };
 
+type PendingAttachmentForward = {
+  hostId: string;
+  reject(error: Error): void;
+  resolve(result: AcpRelayAttachmentForwardResult): void;
+  timeout: ReturnType<typeof setTimeout>;
+};
+
 const WORKSPACE_LIST_TIMEOUT_MS = 5 * 1000;
+const ATTACHMENT_FORWARD_TIMEOUT_MS = 30 * 1000;
 const REMOTE_SESSION_AGENT_META = "acp-runtime/remote/sessionAgent";
 const REMOTE_SESSION_WORKSPACE_ROOTS_META =
   "acp-runtime/remote/sessionWorkspaceRoots";
@@ -410,6 +449,8 @@ export class AcpRelayBroker {
   private readonly hostReconnectGraceMs: number;
   private readonly hostWorkspaceListRequests =
     new Map<string, PendingHostWorkspaceListRequest>();
+  private readonly pendingAttachmentForwards =
+    new Map<string, PendingAttachmentForward>();
   private readonly heartbeatTimeoutMs: number;
   private readonly maxBufferedFramesPerConnection: number;
   private readonly maxQueuedFramesPerConnection: number;
@@ -632,7 +673,7 @@ export class AcpRelayBroker {
       !this.isHostRouteAvailable(hostId, { allowPendingReconnect: true }) &&
       transport === "native-acp"
     ) {
-      this.markHostDisconnected(hostId, "Host host is not online.");
+      this.markHostDisconnected(hostId, "Host is not online.");
       this.logRelayLifecycle({
         accountId: input.accountId,
         clientId,
@@ -672,9 +713,13 @@ export class AcpRelayBroker {
       void this.persistHostDisconnected(hostId);
       this.rejectHostWorkspaceListRequests(
         hostId,
-        "Host host disconnected.",
+        "Host disconnected.",
       );
-      this.markHostDisconnected(hostId, "Host host disconnected.");
+      this.rejectPendingAttachmentForwards(
+        hostId,
+        "Host disconnected.",
+      );
+      this.markHostDisconnected(hostId, "Host disconnected.");
     }
   }
 
@@ -766,7 +811,7 @@ export class AcpRelayBroker {
       this.closeClientsForHost(
         hostId,
         1013,
-        "Host host reconnect grace expired.",
+        "Host reconnect grace expired.",
       );
       expiredHostIds.push(hostId);
     }
@@ -845,11 +890,11 @@ export class AcpRelayBroker {
     const route = this.hostRouteState(input.hostId);
     const host = route.host;
     if (!host) {
-      return { ok: false, reason: "Host host is not online." };
+      return { ok: false, reason: "Host is not online." };
     }
     const hosts = await this.activeAuthorizableHosts(input.connectionId);
     if (!hosts.ok || !hosts.hosts.some((host) => host.hostId === input.hostId)) {
-      return { ok: false, reason: "Host host is not authorized for this connection." };
+      return { ok: false, reason: "Host is not authorized for this connection." };
     }
     const metadata = route.metadata;
     const allowedRoot = metadata?.workspaceRoots.some(
@@ -890,6 +935,69 @@ export class AcpRelayBroker {
         seq: 1,
       } satisfies AcpRemoteDataFrame),
     );
+    return result;
+  }
+
+  async forwardClientAttachment(
+    input: AcpRelayAttachmentForwardInput,
+  ): Promise<AcpRelayAttachmentForwardResult> {
+    const client = this.clients.get(input.connectionId);
+    if (!client) {
+      return { ok: false, reason: "Client connection is no longer active." };
+    }
+    if (client.accountId !== input.accountId || client.clientId !== input.clientId) {
+      return { ok: false, reason: "Attachment upload principal mismatch." };
+    }
+    if (!client.routeReady || client.hostId !== input.hostId) {
+      return { ok: false, reason: "Client route is not authorized for this host." };
+    }
+    const host = this.activeHostRoutes.get(input.hostId);
+    if (!host) {
+      return { ok: false, reason: "Host is not online." };
+    }
+    const hostAccountId = this.activeHostAccountIds.get(input.hostId);
+    if (hostAccountId && hostAccountId !== input.accountId) {
+      return { ok: false, reason: "Attachment host account mismatch." };
+    }
+
+    const requestId = crypto.randomUUID();
+    const uri = createFreeAttachmentUri({
+      attachmentId: input.attachmentId,
+      connectionId: input.connectionId,
+      hostId: input.hostId,
+      messageId: input.messageId,
+    });
+    const result = new Promise<AcpRelayAttachmentForwardResult>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingAttachmentForwards.delete(requestId);
+        resolve({ ok: false, reason: "Attachment transfer to host timed out." });
+      }, ATTACHMENT_FORWARD_TIMEOUT_MS);
+      this.pendingAttachmentForwards.set(requestId, {
+        hostId: input.hostId,
+        reject,
+        resolve,
+        timeout,
+      });
+    });
+
+    host.send(encodeAcpRemoteAttachmentUpload(
+      {
+        accountId: input.accountId,
+        attachmentId: input.attachmentId,
+        connectionId: input.connectionId,
+        createdAt: new Date().toISOString(),
+        hostId: input.hostId,
+        kind: "attachment/upload",
+        messageId: input.messageId,
+        mimeType: input.mimeType,
+        requestId,
+        sha256: input.sha256,
+        size: input.body.byteLength,
+        uri,
+        version: 1,
+      },
+      input.body,
+    ));
     return result;
   }
 
@@ -1010,11 +1118,11 @@ export class AcpRelayBroker {
       }
 
       const host = this.activeHostRoutes.get(hostId);
-      host?.close(1011, "Host host heartbeat timed out.");
+      host?.close(1011, "Host heartbeat timed out.");
       this.activeHostRoutes.delete(hostId);
       this.hostHeartbeats.delete(hostId);
       void this.persistHostDisconnected(hostId);
-      this.markHostDisconnected(hostId, "Host host heartbeat timed out.");
+      this.markHostDisconnected(hostId, "Host heartbeat timed out.");
       closedHostIds.push(hostId);
     }
     return closedHostIds;
@@ -1079,7 +1187,7 @@ export class AcpRelayBroker {
     }
     let route = this.hostRouteState(input.hostId);
     if (!route.host && !input.allowPendingHostReconnect) {
-      return { ok: false, reason: "Host host is not online." };
+      return { ok: false, reason: "Host is not online." };
     }
     const selectedProof = this.availableConnectionProofForHost(
       client,
@@ -1119,7 +1227,7 @@ export class AcpRelayBroker {
     if (shouldRestoreOfflineRoute) {
       this.markHostDisconnected(
         input.hostId,
-        "Host host is not online.",
+        "Host is not online.",
       );
       route = this.hostRouteState(input.hostId);
     }
@@ -1387,6 +1495,9 @@ export class AcpRelayBroker {
   }
 
   handleHostText(text: string): string | undefined {
+    if (this.handleHostAttachmentAck(text)) {
+      return undefined;
+    }
     const frame = parseFrame(text);
     if (frame?.frameType === AcpRemoteFrameType.Ack) {
       this.handleHostAck(frame);
@@ -1541,6 +1652,37 @@ export class AcpRelayBroker {
     return undefined;
   }
 
+  private handleHostAttachmentAck(text: string): boolean {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return false;
+    }
+    if (!isAcpRemoteAttachmentAckFrame(parsed)) {
+      return false;
+    }
+    const pending = this.pendingAttachmentForwards.get(parsed.requestId);
+    if (!pending) {
+      return true;
+    }
+    this.pendingAttachmentForwards.delete(parsed.requestId);
+    clearTimeout(pending.timeout);
+    if (parsed.ok) {
+      pending.resolve({
+        attachmentId: parsed.attachmentId,
+        mimeType: parsed.mimeType,
+        ok: true,
+        sha256: parsed.sha256,
+        size: parsed.size,
+        uri: parsed.uri,
+      });
+      return true;
+    }
+    pending.resolve({ ok: false, reason: parsed.error });
+    return true;
+  }
+
   private resolveHostWorkspaceListRequest(frame: AcpRemoteDataFrame): boolean {
     const pending = this.hostWorkspaceListRequests.get(frame.connectionId);
     if (!pending) {
@@ -1573,6 +1715,20 @@ export class AcpRelayBroker {
     }
   }
 
+  private rejectPendingAttachmentForwards(
+    hostId: string,
+    reason: string,
+  ): void {
+    for (const [requestId, pending] of this.pendingAttachmentForwards) {
+      if (pending.hostId !== hostId) {
+        continue;
+      }
+      this.pendingAttachmentForwards.delete(requestId);
+      clearTimeout(pending.timeout);
+      pending.resolve({ ok: false, reason });
+    }
+  }
+
   private async handleBootstrapMessage(
     connectionId: string,
     client: ConnectedRelayClient,
@@ -1588,6 +1744,15 @@ export class AcpRelayBroker {
         agentCapabilities: {
           auth: {},
           loadSession: true,
+          mcpCapabilities: {
+            http: true,
+            sse: true,
+          },
+          promptCapabilities: {
+            audio: true,
+            embeddedContext: true,
+            image: true,
+          },
           sessionCapabilities: {
             close: {},
             list: {},
@@ -3272,29 +3437,35 @@ export function createRelayAuthorizationPage(input: {
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Free — Authorize</title>
+    <title>Free - Authorize</title>
     <style>
       :root {
         color-scheme: light;
-        --bg: #f4f1ea;
-        --surface: #fbfaf6;
-        --surface-2: #f0eee7;
-        --ink: #1f2520;
-        --muted: #687066;
-        --line: #d8d4c8;
-        --line-strong: #a9a393;
-        --accent: #176b56;
-        --accent-ink: #eef8f3;
-        --danger: #9f2f2a;
-        --focus: #d89b31;
+        --bg: oklch(0.982 0.004 250);
+        --surface: oklch(0.996 0.003 250);
+        --surface-subtle: oklch(0.962 0.006 250);
+        --surface-selected: oklch(0.948 0.018 158);
+        --ink: oklch(0.202 0.018 250);
+        --muted: oklch(0.49 0.018 250);
+        --soft: oklch(0.63 0.017 250);
+        --line: oklch(0.884 0.011 250);
+        --line-strong: oklch(0.724 0.022 250);
+        --accent: oklch(0.45 0.12 158);
+        --accent-strong: oklch(0.38 0.13 158);
+        --accent-ink: oklch(0.982 0.01 158);
+        --amber: oklch(0.67 0.16 76);
+        --danger: oklch(0.52 0.16 28);
+        --focus: oklch(0.68 0.15 76);
+        --shadow: 0 18px 44px rgb(32 42 54 / 0.08);
       }
       * { box-sizing: border-box; }
+      html { min-height: 100%; }
       body {
         margin: 0;
         min-height: 100vh;
         background: var(--bg);
         color: var(--ink);
-        font: 14px/1.45 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font: 13px/1.45 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
       button, select { font: inherit; }
       button { cursor: pointer; }
@@ -3308,58 +3479,110 @@ export function createRelayAuthorizationPage(input: {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        gap: 1rem;
-        padding: 18px clamp(18px, 4vw, 40px);
+        gap: 18px;
+        min-height: 56px;
+        padding: 0 22px;
         border-bottom: 1px solid var(--line);
-        background: color-mix(in oklch, var(--surface) 88%, var(--bg));
+        background: color-mix(in oklch, var(--surface) 92%, var(--bg));
       }
-      .title { display: grid; gap: 2px; min-width: 0; }
-      h1 { margin: 0; font-size: 1rem; font-weight: 650; letter-spacing: 0; }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 190px;
+      }
+      .mark {
+        display: grid;
+        place-items: center;
+        width: 26px;
+        height: 26px;
+        border-radius: 7px;
+        background: oklch(0.936 0.03 282);
+        color: oklch(0.42 0.18 282);
+        font-weight: 760;
+      }
+      .title { display: grid; gap: 1px; min-width: 0; }
+      h1 { margin: 0; font-size: 0.96rem; font-weight: 700; letter-spacing: 0; }
       .connection {
         color: var(--muted);
-        font-size: 0.82rem;
+        font-size: 0.76rem;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
-        max-width: min(64vw, 720px);
+        max-width: min(42vw, 520px);
       }
       code {
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        font-size: 0.78rem;
+        font-size: 0.74rem;
       }
-      .status-pill {
-        border: 1px solid var(--line);
-        border-radius: 999px;
+      .top-meta {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        min-width: 0;
+      }
+      .status-pill, .live-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
         color: var(--muted);
-        padding: 6px 10px;
+        font-size: 0.8rem;
         white-space: nowrap;
       }
+      .status-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--amber);
+      }
+      .live-pill .status-dot { background: var(--accent); }
       .workspace {
         display: grid;
-        grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+        grid-template-columns: minmax(240px, 280px) minmax(0, 1fr) minmax(280px, 320px);
         min-height: 0;
       }
       .hosts {
         border-right: 1px solid var(--line);
-        padding: 22px clamp(16px, 3vw, 28px);
-        background: var(--surface-2);
+        padding: 16px 14px 18px;
+        background: var(--surface-subtle);
+        overflow: auto;
+      }
+      .main, .context {
+        min-width: 0;
+        overflow: auto;
       }
       .main {
-        padding: 22px clamp(18px, 4vw, 44px) 30px;
+        padding: 22px clamp(22px, 3vw, 42px) 30px;
         min-width: 0;
+      }
+      .context {
+        border-left: 1px solid var(--line);
+        background: color-mix(in oklch, var(--surface) 80%, var(--bg));
+        padding: 16px 16px 18px;
       }
       .section-head {
         display: flex;
-        align-items: end;
+        align-items: center;
         justify-content: space-between;
-        gap: 1rem;
-        margin-bottom: 12px;
+        gap: 10px;
+        margin-bottom: 10px;
       }
-      h2 { margin: 0; font-size: 0.86rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; }
-      .count { color: var(--muted); font-size: 0.82rem; }
+      h2, h3 {
+        margin: 0;
+        font-size: 0.74rem;
+        font-weight: 720;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+      }
+      h3 {
+        font-size: 0.72rem;
+        margin-bottom: 9px;
+      }
+      .count { color: var(--soft); font-size: 0.78rem; }
       .host-list, .agent-list, .workspace-roots, .workspace-entries {
         display: grid;
-        gap: 8px;
+        gap: 6px;
         margin: 0;
         padding: 0;
         list-style: none;
@@ -3371,14 +3594,18 @@ export function createRelayAuthorizationPage(input: {
         background: var(--surface);
         color: var(--ink);
         display: grid;
-        gap: 4px;
-        padding: 11px 12px;
+        gap: 3px;
+        padding: 10px 11px;
         text-align: left;
-        transition: background 140ms ease, border-color 140ms ease, transform 140ms ease;
+        transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
       }
-      .choice:hover { border-color: var(--line-strong); background: #fffdf8; transform: translateY(-1px); }
-      .choice.selected { border-color: var(--accent); background: #e8f1eb; }
-      .choice:disabled { opacity: 0.68; transform: none; }
+      .choice:hover { border-color: var(--line-strong); background: var(--surface); }
+      .choice.selected {
+        border-color: color-mix(in oklch, var(--accent) 58%, var(--line));
+        background: var(--surface-selected);
+        box-shadow: 0 0 0 1px color-mix(in oklch, var(--accent) 18%, transparent);
+      }
+      .choice:disabled { opacity: 0.58; }
       .choice:disabled:hover { border-color: var(--line); background: var(--surface); }
       .choice-title {
         display: flex;
@@ -3389,7 +3616,7 @@ export function createRelayAuthorizationPage(input: {
         min-width: 0;
       }
       .choice-title span:first-child, .path { overflow-wrap: anywhere; }
-      .meta { color: var(--muted); font-size: 0.8rem; }
+      .meta { color: var(--muted); font-size: 0.78rem; }
       .dot {
         width: 8px;
         height: 8px;
@@ -3397,30 +3624,47 @@ export function createRelayAuthorizationPage(input: {
         background: var(--accent);
         flex: none;
       }
-      .dot.offline { background: var(--line-strong); }
+      .dot.offline { background: var(--soft); }
+      .canvas-title {
+        display: grid;
+        gap: 6px;
+        margin-bottom: 24px;
+      }
+      .canvas-title h2 {
+        color: var(--ink);
+        font-size: clamp(1.28rem, 1.8vw, 1.72rem);
+        text-transform: none;
+        letter-spacing: 0;
+        font-weight: 720;
+      }
+      .canvas-copy {
+        max-width: 760px;
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
       .config-grid {
         display: grid;
-        grid-template-columns: minmax(240px, 360px) minmax(0, 1fr);
-        gap: clamp(18px, 4vw, 34px);
+        grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+        gap: clamp(18px, 3vw, 32px);
         align-items: start;
       }
       .panel {
         display: grid;
-        gap: 12px;
+        gap: 10px;
         min-width: 0;
       }
-      .panel + .panel { margin-top: 24px; }
+      .panel + .panel { margin-top: 22px; }
       .field-label {
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 1rem;
-        font-size: 0.82rem;
+        font-size: 0.78rem;
         color: var(--muted);
       }
       select {
         width: 100%;
-        min-height: 42px;
+        min-height: 38px;
         border: 1px solid var(--line);
         border-radius: 7px;
         background: var(--surface);
@@ -3429,22 +3673,22 @@ export function createRelayAuthorizationPage(input: {
       }
       .workspace-browser {
         display: grid;
-        gap: 12px;
+        gap: 10px;
         min-width: 0;
       }
       .workspace-toolbar {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        gap: 12px;
+        gap: 10px;
         border: 1px solid var(--line);
         border-radius: 7px;
         background: var(--surface);
-        min-height: 42px;
+        min-height: 40px;
         padding: 8px 10px;
       }
       .workspace-current { min-width: 0; }
-      .workspace-current .path { color: var(--ink); font-size: 0.82rem; }
+      .workspace-current .path { color: var(--ink); font-size: 0.8rem; }
       .ghost {
         border: 1px solid transparent;
         background: transparent;
@@ -3453,7 +3697,7 @@ export function createRelayAuthorizationPage(input: {
         padding: 6px 8px;
         white-space: nowrap;
       }
-      .ghost:hover { background: #e8f1eb; }
+      .ghost:hover { background: var(--surface-selected); }
       .tree {
         border: 1px solid var(--line);
         border-radius: 7px;
@@ -3468,21 +3712,20 @@ export function createRelayAuthorizationPage(input: {
         padding: 8px 10px;
         border-bottom: 1px solid var(--line);
         color: var(--muted);
-        font-size: 0.82rem;
+        font-size: 0.78rem;
       }
-      .workspace-entries { max-height: 330px; overflow: auto; gap: 0; }
+      .workspace-entries { max-height: min(46vh, 420px); overflow: auto; gap: 0; }
       .workspace-entries .choice {
         border: 0;
         border-radius: 0;
         border-bottom: 1px solid var(--line);
         background: transparent;
-        transform: none;
       }
       .workspace-entries .choice:last-child { border-bottom: 0; }
       .empty, .error {
         padding: 12px;
         color: var(--muted);
-        font-size: 0.86rem;
+        font-size: 0.82rem;
       }
       .error { color: var(--danger); }
       .notice {
@@ -3497,19 +3740,47 @@ export function createRelayAuthorizationPage(input: {
         display: block;
         margin-bottom: 3px;
       }
+      .context-block {
+        padding: 0 0 16px;
+        border-bottom: 1px solid var(--line);
+        margin-bottom: 16px;
+      }
+      .context-block:last-child {
+        border-bottom: 0;
+        margin-bottom: 0;
+        padding-bottom: 0;
+      }
+      .context-value {
+        min-width: 0;
+        color: var(--ink);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .context-row {
+        display: grid;
+        grid-template-columns: 76px minmax(0, 1fr);
+        gap: 10px;
+        align-items: baseline;
+        min-height: 25px;
+      }
+      .context-label {
+        color: var(--soft);
+        font-size: 0.74rem;
+      }
       .footer {
         display: grid;
         grid-template-columns: minmax(0, 1fr) auto;
         align-items: stretch;
         justify-content: space-between;
-        gap: 1rem;
-        padding: 14px clamp(18px, 4vw, 40px);
+        gap: 14px;
+        padding: 12px 22px;
         border-top: 1px solid var(--line);
         background: color-mix(in oklch, var(--surface) 92%, var(--bg));
       }
       .selection-strip {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+        display: flex;
+        align-items: center;
         gap: 10px;
         min-width: 0;
       }
@@ -3519,6 +3790,7 @@ export function createRelayAuthorizationPage(input: {
         background: var(--surface);
         min-width: 0;
         padding: 8px 10px;
+        width: min(360px, 46vw);
       }
       .selection-label {
         color: var(--muted);
@@ -3544,7 +3816,7 @@ export function createRelayAuthorizationPage(input: {
         font-weight: 650;
         white-space: nowrap;
       }
-      .primary:hover { background: #0f604b; }
+      .primary:hover { background: var(--accent-strong); }
       .result {
         position: fixed;
         inset: 0;
@@ -3560,6 +3832,7 @@ export function createRelayAuthorizationPage(input: {
         border-radius: 8px;
         background: var(--surface);
         padding: 22px;
+        box-shadow: var(--shadow);
       }
       .result-box h2 {
         color: var(--ink);
@@ -3568,12 +3841,20 @@ export function createRelayAuthorizationPage(input: {
         text-transform: none;
         margin-bottom: 8px;
       }
-      @media (max-width: 780px) {
+      @media (max-width: 980px) {
+        .workspace { grid-template-columns: minmax(220px, 280px) minmax(0, 1fr); }
+        .context { display: none; }
+      }
+      @media (max-width: 760px) {
+        .topbar { align-items: flex-start; flex-direction: column; justify-content: center; padding: 12px 16px; }
+        .brand { min-width: 0; }
+        .top-meta { width: 100%; justify-content: space-between; }
         .workspace { grid-template-columns: 1fr; }
         .hosts { border-right: 0; border-bottom: 1px solid var(--line); }
         .config-grid { grid-template-columns: 1fr; }
         .footer { grid-template-columns: 1fr; }
-        .selection-strip { grid-template-columns: 1fr; }
+        .selection-strip { align-items: stretch; flex-direction: column; }
+        .selection-card { width: 100%; }
         .selection-value { white-space: normal; }
       }
     </style>
@@ -3581,23 +3862,33 @@ export function createRelayAuthorizationPage(input: {
   <body>
     <div class="shell">
       <header class="topbar">
-        <div class="title">
-          <h1>ACP Relay Authorization</h1>
-          <div class="connection">Connection <code>${escapeHtml(input.connectionId)}</code></div>
+        <div class="brand">
+          <div class="mark">F</div>
+          <div class="title">
+            <h1>Free</h1>
+            <div class="connection">Connection <code>${escapeHtml(input.connectionId)}</code></div>
+          </div>
         </div>
-        <div class="status-pill" id="connectionState">Waiting for selection</div>
+        <div class="top-meta">
+          <div class="status-pill"><span class="status-dot"></span><span id="connectionState">Waiting for selection</span></div>
+          <div class="live-pill"><span class="status-dot"></span><span>Live relay</span></div>
+        </div>
       </header>
 
       <main class="workspace">
         <aside class="hosts">
           <div class="section-head">
-            <h2>Host</h2>
+            <h2>Session start</h2>
             <span class="count" id="hostCount"></span>
           </div>
           <ul class="host-list" id="hostList"></ul>
         </aside>
 
         <section class="main">
+          <div class="canvas-title">
+            <h2>Authorize remote coding workflow</h2>
+            <div class="canvas-copy">Select the machine, agent, and workspace that should serve this session. Free will return the approved workflow route to the ACP client.</div>
+          </div>
           <div class="config-grid">
             <div>
               <div class="panel" id="agentSection">
@@ -3637,6 +3928,28 @@ export function createRelayAuthorizationPage(input: {
             </div>
           </div>
         </section>
+
+        <aside class="context">
+          <div class="context-block">
+            <h3>Authorization scope</h3>
+            <div class="context-row">
+              <div class="context-label">Machine</div>
+              <div class="context-value" id="contextMachine">No host selected</div>
+            </div>
+            <div class="context-row">
+              <div class="context-label">Agent</div>
+              <div class="context-value" id="contextAgent">No agent selected</div>
+            </div>
+            <div class="context-row">
+              <div class="context-label">Workspace</div>
+              <div class="context-value" id="contextWorkspace">No workspace selected</div>
+            </div>
+          </div>
+          <div class="context-block">
+            <h3>Runtime boundary</h3>
+            <div class="meta">This approval binds the selected machine, launch target, and workspace scope for the remote session. Relay route details stay internal.</div>
+          </div>
+        </aside>
       </main>
 
       <footer class="footer">
@@ -3677,6 +3990,9 @@ export function createRelayAuthorizationPage(input: {
       const connectionState = document.getElementById("connectionState");
       const machineAgentSummary = document.getElementById("machineAgentSummary");
       const workspaceSummary = document.getElementById("workspaceSummary");
+      const contextMachine = document.getElementById("contextMachine");
+      const contextAgent = document.getElementById("contextAgent");
+      const contextWorkspace = document.getElementById("contextWorkspace");
       document.getElementById("hostCount").textContent = hosts.length + (hosts.length === 1 ? " host" : " hosts");
 
       if (unavailableReason) {
@@ -3685,6 +4001,9 @@ export function createRelayAuthorizationPage(input: {
         document.getElementById("workspaceEntries").innerHTML = '<div class="empty">Restart the remote session in your ACP client to create a fresh connection.</div>';
         machineAgentSummary.textContent = "No active client connection";
         workspaceSummary.textContent = "No workspace selected";
+        contextMachine.textContent = "No active client connection";
+        contextAgent.textContent = "No agent selected";
+        contextWorkspace.textContent = "No workspace selected";
         return;
       }
 
@@ -3919,11 +4238,17 @@ export function createRelayAuthorizationPage(input: {
         if (!selectedHost) {
           machineAgentSummary.textContent = "No host selected";
           workspaceSummary.textContent = "No workspace selected";
+          contextMachine.textContent = "No host selected";
+          contextAgent.textContent = "No agent selected";
+          contextWorkspace.textContent = "No workspace selected";
           return;
         }
         var agentLabel = agentSelect.options[agentSelect.selectedIndex] ? agentSelect.options[agentSelect.selectedIndex].textContent : "Default agent";
         machineAgentSummary.textContent = displayMachine(selectedHost) + " · " + agentLabel;
         workspaceSummary.textContent = selectedWorkspaceRoot || "No workspace preference";
+        contextMachine.textContent = displayMachine(selectedHost);
+        contextAgent.textContent = agentLabel;
+        contextWorkspace.textContent = selectedWorkspaceRoot || "No workspace preference";
       }
 
       function displayMachine(host) {
@@ -3975,34 +4300,57 @@ export function createRelayAuthorizationResultPage(
   if (result.ok) {
     return `<!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Free</title>
-    <style>
-      body {
-        display: grid;
-        min-height: 100vh;
-        margin: 0;
-        place-items: center;
-        background: #f4f1ea;
-        color: #1f2520;
-        font: 14px/1.45 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      }
-      main {
-        width: min(420px, calc(100vw - 32px));
-        border: 1px solid #d8d4c8;
-        border-radius: 8px;
-        background: #fbfaf6;
-        padding: 22px;
-      }
-      h1 { margin: 0 0 8px; font-size: 1rem; }
-      p { margin: 0; color: #687066; }
-      code {
-        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        font-size: 0.78rem;
-      }
-    </style>
+	  <head>
+	    <meta charset="utf-8">
+	    <meta name="viewport" content="width=device-width, initial-scale=1">
+	    <title>Free</title>
+	    <style>
+	      :root {
+	        color-scheme: light;
+	        --bg: oklch(0.982 0.004 250);
+	        --surface: oklch(0.996 0.003 250);
+	        --ink: oklch(0.202 0.018 250);
+	        --muted: oklch(0.49 0.018 250);
+	        --line: oklch(0.884 0.011 250);
+	        --accent: oklch(0.45 0.12 158);
+	        --shadow: 0 18px 44px rgb(32 42 54 / 0.08);
+	      }
+	      * { box-sizing: border-box; }
+	      body {
+	        display: grid;
+	        min-height: 100vh;
+	        margin: 0;
+	        place-items: center;
+	        background: var(--bg);
+	        color: var(--ink);
+	        font: 13px/1.45 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+	      }
+	      main {
+	        width: min(440px, calc(100vw - 32px));
+	        border: 1px solid var(--line);
+	        border-radius: 8px;
+	        background: var(--surface);
+	        padding: 22px;
+	        box-shadow: var(--shadow);
+	      }
+	      .mark {
+	        display: grid;
+	        place-items: center;
+	        width: 28px;
+	        height: 28px;
+	        border-radius: 7px;
+	        background: oklch(0.936 0.03 282);
+	        color: oklch(0.42 0.18 282);
+	        font-weight: 760;
+	        margin-bottom: 16px;
+	      }
+	      h1 { margin: 0 0 8px; font-size: 1.08rem; letter-spacing: 0; }
+	      p { margin: 0; color: var(--muted); }
+	      code {
+	        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	        font-size: 0.74rem;
+	      }
+	    </style>
     <script>
       function closeAuthorizationWindow() {
         var attempts = 0;
@@ -4022,23 +4370,74 @@ export function createRelayAuthorizationResultPage(
       window.addEventListener("load", closeAuthorizationWindow);
     </script>
   </head>
-  <body>
-    <main>
-      <h1>Authorized</h1>
-      <p id="message">Returning to the client.</p>
-    </main>
+	  <body>
+	    <main>
+	      <div class="mark">F</div>
+	      <h1>Authorized</h1>
+	      <p id="message">Returning to the client.</p>
+	    </main>
   </body>
 </html>`;
   }
 
-  return `<!doctype html>
-<html lang="en">
-  <head><meta charset="utf-8"><title>Free</title></head>
-  <body>
-    <h1>Authorization failed</h1>
-    <p>${escapeHtml(result.reason)}</p>
-  </body>
-</html>`;
+	  return `<!doctype html>
+	<html lang="en">
+	  <head>
+	    <meta charset="utf-8">
+	    <meta name="viewport" content="width=device-width, initial-scale=1">
+	    <title>Free</title>
+	    <style>
+	      :root {
+	        color-scheme: light;
+	        --bg: oklch(0.982 0.004 250);
+	        --surface: oklch(0.996 0.003 250);
+	        --ink: oklch(0.202 0.018 250);
+	        --muted: oklch(0.49 0.018 250);
+	        --line: oklch(0.884 0.011 250);
+	        --danger: oklch(0.52 0.16 28);
+	        --shadow: 0 18px 44px rgb(32 42 54 / 0.08);
+	      }
+	      * { box-sizing: border-box; }
+	      body {
+	        display: grid;
+	        min-height: 100vh;
+	        margin: 0;
+	        place-items: center;
+	        background: var(--bg);
+	        color: var(--ink);
+	        font: 13px/1.45 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+	      }
+	      main {
+	        width: min(440px, calc(100vw - 32px));
+	        border: 1px solid var(--line);
+	        border-radius: 8px;
+	        background: var(--surface);
+	        padding: 22px;
+	        box-shadow: var(--shadow);
+	      }
+	      .mark {
+	        display: grid;
+	        place-items: center;
+	        width: 28px;
+	        height: 28px;
+	        border-radius: 7px;
+	        background: oklch(0.936 0.03 28);
+	        color: var(--danger);
+	        font-weight: 760;
+	        margin-bottom: 16px;
+	      }
+	      h1 { margin: 0 0 8px; font-size: 1.08rem; letter-spacing: 0; }
+	      p { margin: 0; color: var(--muted); }
+	    </style>
+	  </head>
+	  <body>
+	    <main>
+	      <div class="mark">F</div>
+	      <h1>Authorization failed</h1>
+	      <p>${escapeHtml(result.reason)}</p>
+	    </main>
+	  </body>
+	</html>`;
 }
 
 function parseFrame(text: string): AcpRemoteFrame | undefined {

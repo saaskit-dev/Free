@@ -22,7 +22,7 @@ export type AcpWebSocketLike = {
     type: "message",
     listener: AcpWebSocketMessageListener,
   ): void;
-  send(data: string): void;
+  send(data: ArrayBuffer | ArrayBufferView | string): void;
 };
 
 export function createAcpJsonRpcWebSocketStream(

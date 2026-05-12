@@ -1,12 +1,13 @@
 import { PassThrough } from "node:stream";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type {
   AcpWebSocketEventListener,
   AcpWebSocketLike,
   AcpWebSocketMessageListener,
 } from "../protocol/websocket-stream.js";
+import type { AcpRemoteConnectionProof } from "../protocol/index.js";
 import { createAcpRemoteStdioBridge } from "./stdio-bridge.js";
 
 describe("createAcpRemoteStdioBridge", () => {
@@ -142,6 +143,224 @@ describe("createAcpRemoteStdioBridge", () => {
       expect(context?.promptTextPreview).toBe("why did the user bubble disappear?");
     } finally {
       bridge.close();
+    }
+  });
+
+  it("uploads prompt images before forwarding resource links over the relay socket", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const sockets: TestSocket[] = [];
+    const imageBody = Buffer.from("image-bytes");
+    const proof = createFakeConnectionProof();
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const requestUrl = new URL(String(url));
+      const headers = init?.headers as Record<string, string>;
+      const body = init?.body as Uint8Array;
+      const attachmentId = requestUrl.searchParams.get("attachmentId") ?? "";
+
+      expect(requestUrl.protocol).toBe("http:");
+      expect(requestUrl.pathname).toBe("/attachments");
+      expect(requestUrl.searchParams.get("connectionId")).toBe("connection-1");
+      expect(requestUrl.searchParams.get("hostId")).toBe("host-1");
+      expect(requestUrl.searchParams.get("messageId")).toBe("client-message-1");
+      expect(headers["content-type"]).toBe("image/png");
+      expect(headers["x-acp-client-id"]).toBe("client-1");
+      expect(headers["x-acp-connection-proof"]).toBeTruthy();
+      expect(headers["x-free-attachment-id"]).toBe(attachmentId);
+      expect(Buffer.from(body).toString("utf8")).toBe("image-bytes");
+
+      return new Response(JSON.stringify({
+        attachmentId,
+        mimeType: "image/png",
+        ok: true,
+        sha256: headers["x-free-attachment-sha256"],
+        size: imageBody.byteLength,
+        uri: `free-attachment://host-1/connection-1/client-message-1/${attachmentId}`,
+      }), {
+        headers: { "content-type": "application/json" },
+        status: 200,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const bridge = createAcpRemoteStdioBridge({
+      clientId: "client-1",
+      connectionId: "connection-1",
+      connectionProof: proof,
+      input,
+      output,
+      relayUrl: "ws://relay.test/socket",
+      socketFactory() {
+        const socket = new TestSocket();
+        sockets.push(socket);
+        return socket;
+      },
+    });
+
+    try {
+      input.write(
+        `${JSON.stringify({
+          id: 6,
+          jsonrpc: "2.0",
+          method: "session/prompt",
+          params: {
+            messageId: "client-message-1",
+            prompt: [
+              { text: "look", type: "text" },
+              {
+                data: imageBody.toString("base64"),
+                mimeType: "image/png",
+                type: "image",
+              },
+            ],
+            sessionId: "session-1",
+          },
+        })}\n`,
+      );
+
+      await waitFor(() => fetchMock.mock.calls.length === 1);
+      await waitFor(() => sockets[0]?.sent.length === 1);
+      const outbound = JSON.parse(sockets[0]!.sent[0]) as {
+        params?: { prompt?: unknown[] };
+      };
+
+      expect(outbound.params?.prompt?.[1]).toMatchObject({
+        mimeType: "image/png",
+        size: imageBody.byteLength,
+        type: "resource_link",
+      });
+      expect(JSON.stringify(outbound)).toContain("free-attachment://host-1");
+      expect(JSON.stringify(outbound)).not.toContain(imageBody.toString("base64"));
+    } finally {
+      bridge.close();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("uploads multiple prompt images concurrently before forwarding resource links", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const sockets: TestSocket[] = [];
+    const imageBodies = [
+      Buffer.from("image-one"),
+      Buffer.from("image-two"),
+    ];
+    const proof = createFakeConnectionProof();
+    const pendingResponses: Array<Deferred<Response>> = [];
+    const uploadRequests: Array<{
+      attachmentId: string;
+      body: string;
+      mimeType: string;
+      sha256: string;
+    }> = [];
+    const fetchMock = vi.fn((url: string | URL | Request, init?: RequestInit) => {
+      const requestUrl = new URL(String(url));
+      const headers = init?.headers as Record<string, string>;
+      const body = init?.body as Uint8Array;
+      const attachmentId = requestUrl.searchParams.get("attachmentId") ?? "";
+      const response = createDeferred<Response>();
+
+      uploadRequests.push({
+        attachmentId,
+        body: Buffer.from(body).toString("utf8"),
+        mimeType: headers["content-type"],
+        sha256: headers["x-free-attachment-sha256"],
+      });
+      pendingResponses.push(response);
+      return response.promise;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const bridge = createAcpRemoteStdioBridge({
+      clientId: "client-1",
+      connectionId: "connection-1",
+      connectionProof: proof,
+      input,
+      output,
+      relayUrl: "ws://relay.test/socket",
+      socketFactory() {
+        const socket = new TestSocket();
+        sockets.push(socket);
+        return socket;
+      },
+    });
+
+    try {
+      input.write(
+        `${JSON.stringify({
+          id: 7,
+          jsonrpc: "2.0",
+          method: "session/prompt",
+          params: {
+            messageId: "client-message-2",
+            prompt: [
+              { text: "compare", type: "text" },
+              {
+                data: imageBodies[0]!.toString("base64"),
+                mimeType: "image/png",
+                type: "image",
+              },
+              {
+                data: imageBodies[1]!.toString("base64"),
+                mimeType: "image/jpeg",
+                type: "image",
+              },
+            ],
+            sessionId: "session-1",
+          },
+        })}\n`,
+      );
+
+      await waitFor(() => fetchMock.mock.calls.length === 2);
+      expect(uploadRequests.map((request) => request.body)).toEqual([
+        "image-one",
+        "image-two",
+      ]);
+      expect(sockets[0]?.sent.length ?? 0).toBe(0);
+
+      pendingResponses[1]!.resolve(createAttachmentUploadResponse({
+        attachmentId: uploadRequests[1]!.attachmentId,
+        mimeType: uploadRequests[1]!.mimeType,
+        sha256: uploadRequests[1]!.sha256,
+        size: imageBodies[1]!.byteLength,
+        uri: `free-attachment://host-1/connection-1/client-message-2/${
+          uploadRequests[1]!.attachmentId
+        }`,
+      }));
+      expect(sockets[0]?.sent.length ?? 0).toBe(0);
+
+      pendingResponses[0]!.resolve(createAttachmentUploadResponse({
+        attachmentId: uploadRequests[0]!.attachmentId,
+        mimeType: uploadRequests[0]!.mimeType,
+        sha256: uploadRequests[0]!.sha256,
+        size: imageBodies[0]!.byteLength,
+        uri: `free-attachment://host-1/connection-1/client-message-2/${
+          uploadRequests[0]!.attachmentId
+        }`,
+      }));
+
+      await waitFor(() => sockets[0]?.sent.length === 1);
+      const outbound = JSON.parse(sockets[0]!.sent[0]) as {
+        params?: { prompt?: unknown[] };
+      };
+
+      expect(outbound.params?.prompt?.[1]).toMatchObject({
+        mimeType: "image/png",
+        type: "resource_link",
+        uri: `free-attachment://host-1/connection-1/client-message-2/${
+          uploadRequests[0]!.attachmentId
+        }`,
+      });
+      expect(outbound.params?.prompt?.[2]).toMatchObject({
+        mimeType: "image/jpeg",
+        type: "resource_link",
+        uri: `free-attachment://host-1/connection-1/client-message-2/${
+          uploadRequests[1]!.attachmentId
+        }`,
+      });
+      expect(JSON.stringify(outbound)).not.toContain(imageBodies[0]!.toString("base64"));
+      expect(JSON.stringify(outbound)).not.toContain(imageBodies[1]!.toString("base64"));
+    } finally {
+      bridge.close();
+      vi.unstubAllGlobals();
     }
   });
 
@@ -1085,8 +1304,10 @@ class TestSocket implements AcpWebSocketLike {
     }
   }
 
-  send(data: string): void {
-    this.sent.push(data);
+  send(data: ArrayBuffer | ArrayBufferView | string): void {
+    if (typeof data === "string") {
+      this.sent.push(data);
+    }
   }
 }
 
@@ -1098,4 +1319,63 @@ async function waitFor(predicate: () => boolean): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error("Timed out waiting for condition.");
+}
+
+type Deferred<T> = {
+  promise: Promise<T>;
+  reject(reason?: unknown): void;
+  resolve(value: T): void;
+};
+
+function createDeferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
+function createAttachmentUploadResponse(input: {
+  attachmentId: string;
+  mimeType: string;
+  sha256: string;
+  size: number;
+  uri: string;
+}): Response {
+  return new Response(JSON.stringify({
+    attachmentId: input.attachmentId,
+    mimeType: input.mimeType,
+    ok: true,
+    sha256: input.sha256,
+    size: input.size,
+    uri: input.uri,
+  }), {
+    headers: { "content-type": "application/json" },
+    status: 200,
+  });
+}
+
+function createFakeConnectionProof(): AcpRemoteConnectionProof {
+  return {
+    accountSession: {
+      accountId: "acct-1",
+      alg: "Ed25519",
+      expiresAt: "2026-06-12T00:00:00.000Z",
+      issuedAt: "2026-05-12T00:00:00.000Z",
+      kid: "authority-1",
+      principalId: "client-1",
+      principalType: "client",
+      publicKey: "public-key",
+      sessionId: "account-session-1",
+      signature: "session-signature",
+    },
+    clientId: "client-1",
+    connectionId: "connection-1",
+    hostId: "host-1",
+    nonce: "nonce-1",
+    signature: "proof-signature",
+    timestamp: "2026-05-12T00:00:00.000Z",
+  };
 }

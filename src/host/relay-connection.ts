@@ -9,13 +9,19 @@ import { basename, resolve } from "node:path";
 import {
   AcpRemoteEndpointKind,
   AcpRemoteChannelKind,
+  AcpRemoteAttachmentFrameType,
   AcpRemoteFrameType,
   type AcpRemoteAckFrame,
+  type AcpRemoteAttachmentAckFrame,
   type AcpRemoteAgentGrant,
   type AcpRemoteDataFrame,
   type AcpRemoteFrame,
   type AcpRemotePongFrame,
 } from "../protocol/types.js";
+import {
+  decodeAcpRemoteAttachmentUpload,
+  parseFreeAttachmentUri,
+} from "../protocol/attachments.js";
 import {
   verifyAcpRemoteConnectionProof,
   type AcpRemoteAccountSessionVerificationKey,
@@ -54,6 +60,10 @@ import {
   AcpRemoteRuntimeAgent,
   type AcpRemoteRuntimeAgentOptions,
 } from "./runtime-agent.js";
+import {
+  createAcpRemoteHostAttachmentStore,
+  type AcpRemoteHostAttachmentStore,
+} from "./attachments.js";
 import type { AcpRuntimeAgentInput } from "@saaskit-dev/acp-runtime";
 
 export type AcpRemoteHostConnectionOptions =
@@ -76,6 +86,8 @@ export type AcpRemoteHostConnectionOptions =
       AcpRemoteAccountSessionVerificationKey,
       ...AcpRemoteAccountSessionVerificationKey[],
     ];
+    attachmentRootDir?: string;
+    attachmentStore?: AcpRemoteHostAttachmentStore;
   };
 
 export type AcpRemoteHostDebugContext = {
@@ -215,6 +227,11 @@ export function createAcpRemoteHostConnection(
     options.maxQueuedFramesPerConnection ??
     DEFAULT_MAX_QUEUED_FRAMES_PER_CONNECTION;
   const debugLog = options.debugLog ?? (() => {});
+  const attachmentStore =
+    options.attachmentStore ??
+    createAcpRemoteHostAttachmentStore({
+      rootDir: options.attachmentRootDir,
+    });
   let disposed = false;
 
   const sendSocket = (data: string) => {
@@ -226,6 +243,12 @@ export function createAcpRemoteHostConnection(
   };
 
   const handleMessage = async (event: { data: unknown }) => {
+    const attachment = decodeAcpRemoteAttachmentUpload(event.data);
+    if (attachment) {
+      await handleAttachmentUpload(attachment);
+      return;
+    }
+
     const text = normalizeWebSocketMessageData(event.data);
     if (!text) {
       return;
@@ -322,10 +345,33 @@ export function createAcpRemoteHostConnection(
       sendRelayAck(frame.connectionId, frame.seq);
       return;
     }
+    let inboundPayload = frame.payload;
+    try {
+      inboundPayload = await resolveAttachmentReferencesInPayload(
+        inboundPayload,
+        authorization,
+        frame.connectionId,
+      );
+    } catch (error) {
+      const request = isJsonRpcRequest(inboundPayload) ? inboundPayload : undefined;
+      if (request) {
+        sendAcpPayloadDirect(frame.connectionId, {
+          error: {
+            code: -32602,
+            message: `Remote attachment could not be resolved: ${formatError(error)}`,
+          },
+          id: request.id,
+          jsonrpc: "2.0",
+        });
+      }
+      sendRelayAck(frame.connectionId, frame.seq);
+      return;
+    }
+
     const tracedInbound = startHostPayloadSpan(
       "relay_to_host",
       frame.connectionId,
-      frame.payload,
+      inboundPayload,
       {
         ack: frame.ack,
         seq: frame.seq,
@@ -452,6 +498,92 @@ export function createAcpRemoteHostConnection(
     tracedInbound.span?.span.end();
     entry.lastInboundSeq = frame.seq;
     sendRelayAck(frame.connectionId, frame.seq);
+  };
+
+  const handleAttachmentUpload = async (
+    upload: NonNullable<ReturnType<typeof decodeAcpRemoteAttachmentUpload>>,
+  ): Promise<void> => {
+    let ack: AcpRemoteAttachmentAckFrame;
+    try {
+      const record = await attachmentStore.writeUpload(upload);
+      ack = {
+        attachmentId: record.attachmentId,
+        connectionId: record.connectionId,
+        frameType: AcpRemoteAttachmentFrameType.Ack,
+        mimeType: record.mimeType,
+        ok: true,
+        requestId: upload.header.requestId,
+        sha256: record.sha256,
+        size: record.size,
+        uri: record.uri,
+        version: 1,
+      };
+    } catch (error) {
+      ack = {
+        attachmentId: upload.header.attachmentId,
+        connectionId: upload.header.connectionId,
+        error: formatError(error),
+        frameType: AcpRemoteAttachmentFrameType.Ack,
+        ok: false,
+        requestId: upload.header.requestId,
+        version: 1,
+      };
+    }
+    sendSocket(JSON.stringify(ack));
+  };
+
+  const resolveAttachmentReferencesInPayload = async (
+    payload: unknown,
+    authorization: AcpRemoteHostConnectionAuthorization,
+    connectionId: string,
+  ): Promise<unknown> => {
+    if (!isRecord(payload) || payload.method !== "session/prompt") {
+      return payload;
+    }
+    const params = isRecord(payload.params) ? payload.params : undefined;
+    const prompt = Array.isArray(params?.prompt) ? params.prompt : undefined;
+    if (!params || !prompt) {
+      return payload;
+    }
+
+    let changed = false;
+    const resolvedPrompt = await Promise.all(
+      prompt.map(async (block) => {
+        if (!isRecord(block) || block.type !== "resource_link") {
+          return block;
+        }
+        const uri = readString(block.uri);
+        const mimeType = readString(block.mimeType);
+        const ref = uri ? parseFreeAttachmentUri(uri) : undefined;
+        if (!uri || !ref || !mimeType?.startsWith("image/")) {
+          return block;
+        }
+        if (ref.connectionId !== connectionId) {
+          throw new Error("Attachment connection mismatch.");
+        }
+        const image = await attachmentStore.readImage(uri, {
+          accountId: authorization.accountId,
+          hostId: authorization.hostId,
+        });
+        changed = true;
+        return {
+          data: image.data,
+          mimeType: image.mimeType,
+          type: "image",
+        };
+      }),
+    );
+
+    if (!changed) {
+      return payload;
+    }
+    return {
+      ...payload,
+      params: {
+        ...params,
+        prompt: resolvedPrompt,
+      },
+    };
   };
 
   const validateClientHelloFrame = async (
@@ -1221,6 +1353,10 @@ function readJournalableJsonRpcRequest(
     id: payload.id,
     method: payload.method,
   };
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 class RelayAcpChannel {

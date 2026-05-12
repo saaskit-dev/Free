@@ -10,6 +10,10 @@ export const AcpRemoteChannelKind = {
   Filesystem: "fs",
 } as const;
 
+export const AcpRemoteAttachmentFrameType = {
+  Ack: "attachment_ack",
+} as const;
+
 export const AcpRemoteFrameType = {
   Ack: "ack",
   Close: "close",
@@ -24,6 +28,9 @@ export type AcpRemoteEndpointKind =
 
 export type AcpRemoteChannelKind =
   (typeof AcpRemoteChannelKind)[keyof typeof AcpRemoteChannelKind];
+
+export type AcpRemoteAttachmentFrameType =
+  (typeof AcpRemoteAttachmentFrameType)[keyof typeof AcpRemoteAttachmentFrameType];
 
 export type AcpRemoteFrameType =
   (typeof AcpRemoteFrameType)[keyof typeof AcpRemoteFrameType];
@@ -145,3 +152,42 @@ export type AcpRemoteConnectionRoute = {
   scopes: readonly AcpRemoteScope[];
   workspaceId?: AcpRemoteId;
 };
+
+export type AcpRemoteAttachmentUploadHeader = {
+  accountId: AcpRemoteId;
+  attachmentId: AcpRemoteId;
+  connectionId: AcpRemoteId;
+  createdAt: string;
+  hostId: AcpRemoteId;
+  kind: "attachment/upload";
+  messageId: AcpRemoteId;
+  mimeType: string;
+  requestId: AcpRemoteId;
+  sha256: string;
+  size: number;
+  uri: string;
+  version: 1;
+};
+
+export type AcpRemoteAttachmentAckFrame =
+  | {
+      attachmentId: AcpRemoteId;
+      connectionId: AcpRemoteId;
+      frameType: typeof AcpRemoteAttachmentFrameType.Ack;
+      mimeType: string;
+      ok: true;
+      requestId: AcpRemoteId;
+      sha256: string;
+      size: number;
+      uri: string;
+      version: 1;
+    }
+  | {
+      attachmentId?: AcpRemoteId;
+      connectionId: AcpRemoteId;
+      error: string;
+      frameType: typeof AcpRemoteAttachmentFrameType.Ack;
+      ok: false;
+      requestId: AcpRemoteId;
+      version: 1;
+    };

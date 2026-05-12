@@ -92,7 +92,7 @@ export class MemoryWebSocket {
     this.peer?.close(code, reason);
   }
 
-  send(data: string): void {
+  send(data: ArrayBuffer | ArrayBufferView | string): void {
     if (this.closed) {
       return;
     }
@@ -101,7 +101,7 @@ export class MemoryWebSocket {
     });
   }
 
-  private receive(data: string): void {
+  private receive(data: ArrayBuffer | ArrayBufferView | string): void {
     if (this.closed) {
       return;
     }

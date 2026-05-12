@@ -105,7 +105,7 @@ export function mapAcpPromptToRuntimePrompt(
         return {
           mediaType: block.mimeType,
           type: AcpRuntimeContentPartType.Image,
-          uri: block.uri ?? `data:${block.mimeType};base64,${block.data}`,
+          uri: imageDataUri(block.mimeType, block.data),
         };
       case "audio":
         return {
@@ -792,6 +792,16 @@ function mapRuntimeOutputPartToAcpContent(
     case AcpRuntimeContentPartType.Text:
       return { text: part.text, type: "text" };
     case AcpRuntimeContentPartType.Image:
+      {
+        const image = parseImageDataUri(part.uri);
+        if (image) {
+          return {
+            data: image.data,
+            mimeType: image.mimeType,
+            type: "image",
+          };
+        }
+      }
       return {
         mimeType: part.mediaType ?? "image/*",
         name: part.alt ?? part.uri,
@@ -853,6 +863,23 @@ function mapRuntimeConfigChoicesToAcp(option: AcpRuntimeAgentConfigOption) {
 
 function optionalNumber(value: unknown): number | undefined {
   return typeof value === "number" ? value : undefined;
+}
+
+function imageDataUri(mimeType: string, data: string): string {
+  return `data:${mimeType};base64,${data}`;
+}
+
+function parseImageDataUri(
+  uri: string,
+): { data: string; mimeType: string } | undefined {
+  const match = /^data:([^;,]+)(?:;[^,]*)*;base64,(.*)$/is.exec(uri);
+  if (!match || !match[1].startsWith("image/")) {
+    return undefined;
+  }
+  return {
+    data: match[2],
+    mimeType: match[1],
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

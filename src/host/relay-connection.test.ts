@@ -1,11 +1,19 @@
+import { createHash } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import {
   ACP_REMOTE_PROTOCOL_VERSION,
+  AcpRemoteAttachmentFrameType,
   AcpRemoteEndpointKind,
   AcpRemoteFrameType,
   createAcpRemoteAccountSession,
   createAcpRemoteConnectionProof,
+  createFreeAttachmentUri,
+  encodeAcpRemoteAttachmentUpload,
   exportEd25519PrivateKey,
   exportEd25519PublicKey,
   type AcpRemoteConnectionProof,
@@ -71,6 +79,70 @@ describe("createAcpRemoteHostConnection", () => {
       reason: "Invalid connection proof signature.",
     });
   });
+
+  it("persists binary image attachment uploads and acknowledges them", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "free-host-attachments-"));
+    const [hostSocket, relaySocket] = createMemoryWebSocketPair();
+    const outbound: unknown[] = [];
+    relaySocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        outbound.push(JSON.parse(event.data));
+      }
+    });
+    const body = new TextEncoder().encode("image-bytes");
+    const uri = createFreeAttachmentUri({
+      attachmentId: "att-1",
+      connectionId: "conn-1",
+      hostId: "host-1",
+      messageId: "msg-1",
+    });
+
+    const handle = createAcpRemoteHostConnection({
+      accountId: "acct-1",
+      attachmentRootDir: rootDir,
+      hostId: "host-1",
+      runtime: {} as never,
+      socket: hostSocket,
+    });
+
+    try {
+      relaySocket.send(encodeAcpRemoteAttachmentUpload(
+        {
+          accountId: "acct-1",
+          attachmentId: "att-1",
+          connectionId: "conn-1",
+          createdAt: "2026-05-12T00:00:00.000Z",
+          hostId: "host-1",
+          kind: "attachment/upload",
+          messageId: "msg-1",
+          mimeType: "image/png",
+          requestId: "request-1",
+          sha256: sha256Hex(body),
+          size: body.byteLength,
+          uri,
+          version: 1,
+        },
+        body,
+      ));
+
+      await waitFor(() => outbound.length > 0);
+      expect(outbound[0]).toMatchObject({
+        attachmentId: "att-1",
+        connectionId: "conn-1",
+        frameType: AcpRemoteAttachmentFrameType.Ack,
+        mimeType: "image/png",
+        ok: true,
+        requestId: "request-1",
+        sha256: sha256Hex(body),
+        size: body.byteLength,
+        uri,
+        version: 1,
+      });
+    } finally {
+      handle.close();
+      await rm(rootDir, { force: true, recursive: true });
+    }
+  });
 });
 
 function createHello(connectionId: string, proof: AcpRemoteConnectionProof): string {
@@ -128,4 +200,8 @@ async function createEd25519KeyPair(): Promise<{
     privateKey: await exportEd25519PrivateKey(pair.privateKey),
     publicKey: await exportEd25519PublicKey(pair.publicKey),
   };
+}
+
+function sha256Hex(data: Uint8Array): string {
+  return createHash("sha256").update(data).digest("hex");
 }

@@ -1,11 +1,15 @@
+import { createHash } from "node:crypto";
+
 import { describe, expect, it } from "vitest";
 
 import {
   ACP_REMOTE_PROTOCOL_VERSION,
+  AcpRemoteAttachmentFrameType,
   AcpRemoteEndpointKind,
   AcpRemoteFrameType,
   createAcpRemoteAccountSession,
   createAcpRemoteConnectionProof,
+  decodeAcpRemoteAttachmentUpload,
   exportEd25519PrivateKey,
   exportEd25519PublicKey,
 } from "../../src/protocol/index.js";
@@ -23,6 +27,202 @@ import {
 } from "./relay-core.js";
 
 describe("AcpRelayBroker", () => {
+  it("declares image prompt support in the bootstrap initialize response", async () => {
+    const broker = createBroker();
+    const [clientSocket, relayClientSocket] = createMemoryWebSocketPair();
+    const messages: unknown[] = [];
+    clientSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        messages.push(JSON.parse(event.data));
+      }
+    });
+    broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      socket: relayClientSocket,
+    });
+
+    await broker.handleClientText(
+      "conn-1",
+      JSON.stringify({
+        id: 1,
+        jsonrpc: "2.0",
+        method: "initialize",
+        params: { clientCapabilities: {}, protocolVersion: 1 },
+      }),
+    );
+
+    await waitFor(() => messages.length > 0);
+    expect(messages[0]).toMatchObject({
+      id: 1,
+      jsonrpc: "2.0",
+      result: {
+        agentCapabilities: {
+          promptCapabilities: {
+            image: true,
+          },
+        },
+      },
+    });
+  });
+
+  it("forwards client image attachments to the authorized host as binary frames", async () => {
+    const broker = createBroker();
+    const [hostSocket, relayHostSocket] = createMemoryWebSocketPair();
+    relayHostSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        broker.handleHostText(event.data);
+      }
+    });
+    await broker.registerHost({
+      accountId: "acct-1",
+      hostId: "host-1",
+      socket: relayHostSocket,
+    });
+
+    const [, relayClientSocket] = createMemoryWebSocketPair();
+    broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      hostId: "host-1",
+      routeReady: true,
+      socket: relayClientSocket,
+    });
+
+    const body = new TextEncoder().encode("image-bytes");
+    let decodedUpload: ReturnType<typeof decodeAcpRemoteAttachmentUpload>;
+    hostSocket.addEventListener("message", (event) => {
+      decodedUpload = decodeAcpRemoteAttachmentUpload(event.data);
+      if (!decodedUpload) {
+        return;
+      }
+      hostSocket.send(JSON.stringify({
+        attachmentId: decodedUpload.header.attachmentId,
+        connectionId: decodedUpload.header.connectionId,
+        frameType: AcpRemoteAttachmentFrameType.Ack,
+        mimeType: decodedUpload.header.mimeType,
+        ok: true,
+        requestId: decodedUpload.header.requestId,
+        sha256: decodedUpload.header.sha256,
+        size: decodedUpload.body.byteLength,
+        uri: decodedUpload.header.uri,
+        version: 1,
+      }));
+    });
+
+    const result = await broker.forwardClientAttachment({
+      accountId: "acct-1",
+      attachmentId: "att-1",
+      body,
+      clientId: "client-1",
+      connectionId: "conn-1",
+      hostId: "host-1",
+      messageId: "msg-1",
+      mimeType: "image/png",
+      sha256: sha256Hex(body),
+    });
+
+    expect(decodedUpload?.header).toMatchObject({
+      attachmentId: "att-1",
+      connectionId: "conn-1",
+      hostId: "host-1",
+      kind: "attachment/upload",
+      mimeType: "image/png",
+    });
+    expect(new TextDecoder().decode(decodedUpload?.body)).toBe("image-bytes");
+    expect(result).toEqual({
+      attachmentId: "att-1",
+      mimeType: "image/png",
+      ok: true,
+      sha256: sha256Hex(body),
+      size: body.byteLength,
+      uri: "free-attachment://host-1/conn-1/msg-1/att-1",
+    });
+  });
+
+  it("forwards multiple client image attachments concurrently", async () => {
+    const broker = createBroker();
+    const [hostSocket, relayHostSocket] = createMemoryWebSocketPair();
+    relayHostSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        broker.handleHostText(event.data);
+      }
+    });
+    await broker.registerHost({
+      accountId: "acct-1",
+      hostId: "host-1",
+      socket: relayHostSocket,
+    });
+
+    const [, relayClientSocket] = createMemoryWebSocketPair();
+    broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      hostId: "host-1",
+      routeReady: true,
+      socket: relayClientSocket,
+    });
+
+    const uploads: Array<NonNullable<ReturnType<typeof decodeAcpRemoteAttachmentUpload>>> = [];
+    hostSocket.addEventListener("message", (event) => {
+      const upload = decodeAcpRemoteAttachmentUpload(event.data);
+      if (upload) {
+        uploads.push(upload);
+      }
+    });
+
+    const firstBody = new TextEncoder().encode("image-one");
+    const secondBody = new TextEncoder().encode("image-two");
+    const firstForward = broker.forwardClientAttachment({
+      accountId: "acct-1",
+      attachmentId: "att-1",
+      body: firstBody,
+      clientId: "client-1",
+      connectionId: "conn-1",
+      hostId: "host-1",
+      messageId: "msg-1",
+      mimeType: "image/png",
+      sha256: sha256Hex(firstBody),
+    });
+    const secondForward = broker.forwardClientAttachment({
+      accountId: "acct-1",
+      attachmentId: "att-2",
+      body: secondBody,
+      clientId: "client-1",
+      connectionId: "conn-1",
+      hostId: "host-1",
+      messageId: "msg-1",
+      mimeType: "image/jpeg",
+      sha256: sha256Hex(secondBody),
+    });
+
+    await waitFor(() => uploads.length === 2);
+    expect(uploads.map((upload) => upload.header.attachmentId)).toEqual([
+      "att-1",
+      "att-2",
+    ]);
+
+    hostSocket.send(JSON.stringify(createAttachmentAck(uploads[1]!)));
+    await expect(secondForward).resolves.toMatchObject({
+      attachmentId: "att-2",
+      ok: true,
+      uri: "free-attachment://host-1/conn-1/msg-1/att-2",
+    });
+
+    hostSocket.send(JSON.stringify(createAttachmentAck(uploads[0]!)));
+    await expect(firstForward).resolves.toMatchObject({
+      attachmentId: "att-1",
+      ok: true,
+      uri: "free-attachment://host-1/conn-1/msg-1/att-1",
+    });
+  });
+
   it("authorizes a client route by forwarding the bridge proof to the host", async () => {
     const identity = await createProofFixture();
     const broker = createBroker();
@@ -830,4 +1030,25 @@ async function createEd25519KeyPair(): Promise<{
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function createAttachmentAck(
+  upload: NonNullable<ReturnType<typeof decodeAcpRemoteAttachmentUpload>>,
+) {
+  return {
+    attachmentId: upload.header.attachmentId,
+    connectionId: upload.header.connectionId,
+    frameType: AcpRemoteAttachmentFrameType.Ack,
+    mimeType: upload.header.mimeType,
+    ok: true,
+    requestId: upload.header.requestId,
+    sha256: upload.header.sha256,
+    size: upload.body.byteLength,
+    uri: upload.header.uri,
+    version: 1,
+  };
+}
+
+function sha256Hex(data: Uint8Array): string {
+  return createHash("sha256").update(data).digest("hex");
 }

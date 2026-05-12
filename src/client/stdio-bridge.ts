@@ -1,5 +1,6 @@
 import type { Readable, Writable } from "node:stream";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -26,6 +27,10 @@ import {
   summarizeAcpRemotePayloadForLog,
   type AcpRemotePayloadLogSummary,
 } from "../shared/payload-log-summary.js";
+import {
+  encodeAcpRemoteConnectionProof,
+  type AcpRemoteConnectionProof,
+} from "../protocol/account-session.js";
 
 export type AcpRemoteStdioBridgeOptions = Omit<
   ConnectAcpRemoteClientRelayOptions,
@@ -68,6 +73,8 @@ export type AcpRemoteStdioBridgeHandle = {
   close(): void;
   connection: ConnectedAcpRemoteClientRelay;
 };
+
+const MAX_BRIDGE_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 
 export function createAcpRemoteStdioBridge(
   options: AcpRemoteStdioBridgeOptions,
@@ -399,6 +406,99 @@ export function createAcpRemoteStdioBridge(
     options.onClose?.();
   };
 
+  const preparePromptAttachmentsForRelay = async (
+    message: string,
+  ): Promise<
+    | { ok: true; message: string }
+    | { ok: false; response: string }
+  > => {
+    const parsed = parseJson(message);
+    if (!parsed || parsed.method !== "session/prompt") {
+      return { ok: true, message };
+    }
+    const params = isRecord(parsed.params) ? parsed.params : undefined;
+    if (!params || !Array.isArray(params.prompt)) {
+      return { ok: true, message };
+    }
+    const prompt = params.prompt;
+    if (!prompt.some(isInlineImageBlock)) {
+      return { ok: true, message };
+    }
+    const requestId = isJsonRpcId(parsed.id) ? parsed.id : undefined;
+    const hostId =
+      readRemoteHostIdFromParams(params) ??
+      options.hostId ??
+      options.connectionProof?.hostId;
+    if (!hostId) {
+      return {
+        ok: false,
+        response: createJsonRpcErrorResponse(
+          requestId,
+          "Remote image attachments require an authorized host route.",
+        ),
+      };
+    }
+    const proof = selectConnectionProofForHost({
+      connectionProof: options.connectionProof,
+      connectionProofs: options.connectionProofs,
+      hostId,
+    });
+    if (!proof) {
+      return {
+        ok: false,
+        response: createJsonRpcErrorResponse(
+          requestId,
+          "Remote image attachments require a connection proof for the selected host.",
+        ),
+      };
+    }
+    const messageId = readString(params.messageId) ?? crypto.randomUUID();
+    try {
+      const preparedPrompt = await Promise.all(
+        prompt.map(async (block, index) => {
+          if (!isInlineImageBlock(block)) {
+            return block;
+          }
+          const attachment = await uploadPromptImageAttachment({
+            block,
+            connectionId,
+            hostId,
+            messageId,
+            proof,
+            relayUrl: options.relayUrl,
+          });
+          return {
+            mimeType: attachment.mimeType,
+            name: `image-${index + 1}`,
+            size: attachment.size,
+            title: `image-${index + 1}`,
+            type: "resource_link",
+            uri: attachment.uri,
+          };
+        }),
+      );
+      return {
+        ok: true,
+        message: JSON.stringify({
+          ...parsed,
+          params: {
+            ...params,
+            messageId,
+            prompt: preparedPrompt,
+          },
+        }),
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        response: createJsonRpcErrorResponse(
+          requestId,
+          `Remote image attachment upload failed: ${formatError(error)}`,
+        ),
+      };
+    }
+  };
+
   const isDuplicateDeliveredResponse = (id?: string | number): boolean => {
     if (id === undefined) {
       return false;
@@ -529,6 +629,14 @@ export function createAcpRemoteStdioBridge(
           writeOutput(output, `${remoteConfigResponse}\n`, () => close());
           continue;
         }
+        const attachmentPreparation = await preparePromptAttachmentsForRelay(
+          outbound,
+        );
+        if (!attachmentPreparation.ok) {
+          writeOutput(output, `${attachmentPreparation.response}\n`, () => close());
+          continue;
+        }
+        outbound = attachmentPreparation.message;
         outbound = startClientRequestSpan(outbound);
         logClientMessage(
           outbound,
@@ -1003,6 +1111,182 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isInlineImageBlock(value: unknown): value is {
+  data: string;
+  mimeType: string;
+  type: "image";
+} {
+  return (
+    isRecord(value) &&
+    value.type === "image" &&
+    typeof value.data === "string" &&
+    typeof value.mimeType === "string" &&
+    value.mimeType.startsWith("image/")
+  );
+}
+
+function readRemoteHostIdFromParams(params: Record<string, unknown>): string | undefined {
+  const meta = isRecord(params._meta) ? params._meta : undefined;
+  return readString(meta?.[REMOTE_HOST_ID_META]);
+}
+
+function selectConnectionProofForHost(input: {
+  connectionProof?: AcpRemoteConnectionProof;
+  connectionProofs?: readonly AcpRemoteConnectionProof[];
+  hostId: string;
+}): AcpRemoteConnectionProof | undefined {
+  const candidates = [
+    ...(input.connectionProof ? [input.connectionProof] : []),
+    ...(input.connectionProofs ?? []),
+  ];
+  return candidates.find((proof) => proof.hostId === input.hostId);
+}
+
+async function uploadPromptImageAttachment(input: {
+  block: { data: string; mimeType: string };
+  connectionId: string;
+  hostId: string;
+  messageId: string;
+  proof: AcpRemoteConnectionProof;
+  relayUrl: string | URL;
+}): Promise<{
+  attachmentId: string;
+  mimeType: string;
+  sha256: string;
+  size: number;
+  uri: string;
+}> {
+  const body = Buffer.from(input.block.data, "base64");
+  if (body.byteLength === 0) {
+    throw new Error("Image attachment body is empty.");
+  }
+  if (body.byteLength > MAX_BRIDGE_ATTACHMENT_BYTES) {
+    throw new Error("Image attachment body is too large.");
+  }
+  const attachmentId = crypto.randomUUID();
+  const sha256 = sha256Hex(body);
+  const url = createAttachmentUploadUrl({
+    attachmentId,
+    connectionId: input.connectionId,
+    hostId: input.hostId,
+    messageId: input.messageId,
+    relayUrl: input.relayUrl,
+  });
+  const response = await fetch(url, {
+    body,
+    headers: {
+      "content-type": input.block.mimeType,
+      "x-acp-client-id": input.proof.clientId,
+      "x-acp-connection-proof": encodeAcpRemoteConnectionProof(input.proof),
+      "x-free-attachment-id": attachmentId,
+      "x-free-attachment-sha256": sha256,
+      "x-free-message-id": input.messageId,
+    },
+    method: "POST",
+  });
+  const result = await readAttachmentUploadResponse(response);
+  if (!result.ok) {
+    throw new Error(result.reason);
+  }
+  return result.attachment;
+}
+
+function createAttachmentUploadUrl(input: {
+  attachmentId: string;
+  connectionId: string;
+  hostId: string;
+  messageId: string;
+  relayUrl: string | URL;
+}): string {
+  const url = new URL(String(input.relayUrl));
+  if (url.protocol === "ws:") {
+    url.protocol = "http:";
+  } else if (url.protocol === "wss:") {
+    url.protocol = "https:";
+  }
+  url.pathname = "/attachments";
+  url.search = "";
+  url.searchParams.set("attachmentId", input.attachmentId);
+  url.searchParams.set("connectionId", input.connectionId);
+  url.searchParams.set("hostId", input.hostId);
+  url.searchParams.set("messageId", input.messageId);
+  return url.toString();
+}
+
+async function readAttachmentUploadResponse(response: Response): Promise<
+  | {
+      ok: true;
+      attachment: {
+        attachmentId: string;
+        mimeType: string;
+        sha256: string;
+        size: number;
+        uri: string;
+      };
+    }
+  | { ok: false; reason: string }
+> {
+  let parsed: unknown;
+  let raw = "";
+  try {
+    raw = await response.text();
+    parsed = raw ? JSON.parse(raw) : undefined;
+  } catch {
+    return {
+      ok: false,
+      reason: raw || `Attachment upload failed with HTTP ${response.status}.`,
+    };
+  }
+  if (!response.ok) {
+    return {
+      ok: false,
+      reason: readString(isRecord(parsed) ? parsed.reason ?? parsed.error : undefined) ??
+        `Attachment upload failed with HTTP ${response.status}.`,
+    };
+  }
+  if (!isRecord(parsed) || parsed.ok !== true) {
+    return { ok: false, reason: "Attachment upload response was invalid." };
+  }
+  const attachment = parsed;
+  if (
+    typeof attachment.attachmentId !== "string" ||
+    typeof attachment.mimeType !== "string" ||
+    typeof attachment.sha256 !== "string" ||
+    typeof attachment.size !== "number" ||
+    typeof attachment.uri !== "string"
+  ) {
+    return { ok: false, reason: "Attachment upload response was invalid." };
+  }
+  return {
+    attachment: {
+      attachmentId: attachment.attachmentId,
+      mimeType: attachment.mimeType,
+      sha256: attachment.sha256,
+      size: attachment.size,
+      uri: attachment.uri,
+    },
+    ok: true,
+  };
+}
+
+function createJsonRpcErrorResponse(
+  id: string | number | undefined,
+  message: string,
+): string {
+  return JSON.stringify({
+    error: {
+      code: -32602,
+      message,
+    },
+    id: id ?? null,
+    jsonrpc: "2.0",
+  });
+}
+
+function sha256Hex(data: Uint8Array): string {
+  return createHash("sha256").update(data).digest("hex");
 }
 
 async function authorizeRelay(input: {

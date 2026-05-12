@@ -142,10 +142,37 @@ function summarizeConfigOptions(
 
 function serializePayload(payload: unknown): string {
   try {
-    return JSON.stringify(payload);
+    return JSON.stringify(redactBinaryContent(payload));
   } catch {
     return String(payload);
   }
+}
+
+function redactBinaryContent(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(redactBinaryContent);
+  }
+  if (!isRecord(value)) {
+    return value;
+  }
+  const output: Record<string, unknown> = {};
+  const contentType = typeof value.type === "string" ? value.type : undefined;
+  for (const [key, entry] of Object.entries(value)) {
+    if (
+      (contentType === "image" || contentType === "audio") &&
+      key === "data" &&
+      typeof entry === "string"
+    ) {
+      output[key] = `[redacted ${contentType} data chars=${entry.length}]`;
+      continue;
+    }
+    if (key === "blob" && typeof entry === "string") {
+      output[key] = `[redacted blob chars=${entry.length}]`;
+      continue;
+    }
+    output[key] = redactBinaryContent(entry);
+  }
+  return output;
 }
 
 function hashText(text: string): string {

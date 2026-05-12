@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createAcpRemoteAccountSession,
+  createAcpRemoteConnectionProof,
   decodeAcpRemoteAccountSession,
   encodeAcpRemoteAccountSession,
+  encodeAcpRemoteConnectionProof,
   type AcpRemoteAccountSessionSigningKey,
 } from "../../src/protocol/index.js";
 import worker, { type Env } from "./index.js";
@@ -17,6 +19,143 @@ describe("relay worker", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ ok: true });
+  });
+
+  it("requires a connection proof for attachment uploads", async () => {
+    const response = await worker.fetch(
+      new Request("https://relay.test/attachments", {
+        body: "image-bytes",
+        headers: { "content-type": "image/png" },
+        method: "POST",
+      }),
+      createEnv(),
+    );
+
+    expect(response.status).toBe(401);
+    await expect(response.text()).resolves.toBe("Missing connection proof.");
+  });
+
+  it("routes verified attachment uploads to the account shard", async () => {
+    const connectionProof = await createTestConnectionProof();
+    let routedName: string | undefined;
+    let routedRequest:
+      | {
+          body: string;
+          headers: Record<string, string>;
+          url: string;
+        }
+      | undefined;
+    const env = createEnv({
+      ACP_RELAY_SHARDS: {
+        idFromName(name: string) {
+          routedName = name;
+          return { name } as DurableObjectId;
+        },
+        get() {
+          return {
+            async fetch(request: Request) {
+              const headers: Record<string, string> = {};
+              request.headers.forEach((value, key) => {
+                headers[key] = value;
+              });
+              routedRequest = {
+                body: await request.text(),
+                headers,
+                url: request.url,
+              };
+              return Response.json({ ok: true });
+            },
+          };
+        },
+      } as unknown as DurableObjectNamespace,
+    });
+
+    const response = await worker.fetch(
+      new Request(
+        "https://relay.test/attachments?connectionId=conn-1&hostId=host-1&messageId=msg-1&attachmentId=att-1",
+        {
+          body: "image-bytes",
+          headers: {
+            "content-type": "image/png",
+            "x-acp-client-id": "client-1",
+            "x-acp-connection-proof": connectionProof,
+          },
+          method: "POST",
+        },
+      ),
+      env,
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true });
+    expect(routedName).toBe("account:acct-1");
+    expect(routedRequest).toMatchObject({
+      body: "image-bytes",
+      headers: {
+        "content-type": "image/png",
+        "x-acp-client-id": "client-1",
+        "x-acp-verified-account-id": "acct-1",
+        "x-acp-verified-client-id": "client-1",
+        "x-acp-verified-principal-id": "client-1",
+        "x-acp-verified-principal-type": "client",
+      },
+    });
+  });
+
+  it("serves the Free product app shell without auth", async () => {
+    const response = await worker.fetch(
+      new Request("https://relay.test/app"),
+      createEnv(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/html");
+    const body = await response.text();
+    expect(body).toContain("<title>Free</title>");
+    expect(body).toContain("Session Memory Surface");
+    expect(body).toContain("Workflow Canvas");
+    expect(body).toContain("Context Surface");
+    expect(body).toContain("Command Surface");
+    expect(body).toContain("Fix login race condition");
+    expect(body).toContain('data-context-tab="Diff"');
+    expect(body).toContain('data-command-mode="running"');
+  });
+
+  it("serves the attention entry on the home route", async () => {
+    const response = await worker.fetch(
+      new Request("https://relay.test/"),
+      createEnv(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/html");
+    const body = await response.text();
+    expect(body).toContain("Session Memory Surface");
+    expect(body).toContain("Deploy to production waiting approval");
+    expect(body).toContain("Approve once");
+    expect(body).toContain('data-command-mode="authorization"');
+  });
+
+  it("serves route-specific product surfaces", async () => {
+    const expectations = [
+      ["/authorization", "Authorization decisions", 'data-context-tab="Logs"'],
+      ["/sessions", "All session memory", "Idle · 3 failing tests"],
+      ["/settings", "Agent and workspace settings", "Runtime defaults"],
+      ["/system", "Relay, host, and runtime continuity", "Continuity state"],
+    ] as const;
+
+    for (const [path, title, marker] of expectations) {
+      const response = await worker.fetch(
+        new Request(`https://relay.test${path}`),
+        createEnv(),
+      );
+
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      expect(body).toContain(title);
+      expect(body).toContain(marker);
+      expect(body).toContain("Context Surface");
+    }
   });
 
   it("does not expose a separate refresh endpoint", async () => {
@@ -255,6 +394,25 @@ async function createTestAccountSession(): Promise<string> {
     signingKey: TEST_SIGNING_KEY,
   });
   return encodeAcpRemoteAccountSession(session);
+}
+
+async function createTestConnectionProof(): Promise<string> {
+  const accountSession = await createAcpRemoteAccountSession({
+    accountId: "acct-1",
+    principalId: "client-1",
+    principalPublicKey: TEST_PUBLIC_KEY,
+    principalType: "client",
+    signingKey: TEST_SIGNING_KEY,
+  });
+  const proof = await createAcpRemoteConnectionProof({
+    connectionId: "conn-1",
+    credential: {
+      accountSession,
+      privateKey: TEST_SIGNING_KEY.privateKey,
+    },
+    hostId: "host-1",
+  });
+  return encodeAcpRemoteConnectionProof(proof);
 }
 
 const TEST_SIGNING_KEY: AcpRemoteAccountSessionSigningKey = {
