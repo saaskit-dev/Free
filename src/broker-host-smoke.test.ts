@@ -64,9 +64,14 @@ describe("remote ACP end-to-end", () => {
       socket: hostSocket,
       workspaceRoots: ["/workspace"],
     });
-    await broker.registerHost("host-1", relayHostSocket, {
-      agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
-      workspaceRoots: [{ path: "/workspace" }],
+    await broker.registerHost({
+      accountId: "acct-1",
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: relayHostSocket,
     });
 
     const [nativeClientSocket, relayClientSocket] = createMemoryWebSocketPair();
