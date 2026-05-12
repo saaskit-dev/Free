@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 
@@ -36,6 +42,7 @@ const LOG_DIR = join(homedir(), ".free");
 const LOG_PATH = join(LOG_DIR, "bridge.log");
 const TEXT_LOG_PATH = join(LOG_DIR, "bridge.log.text.jsonl");
 const ERROR_LOG_PATH = join(LOG_DIR, "bridge.log.errors.jsonl");
+const BRIDGE_BINARY_CHANGE_CHECK_INTERVAL_MS = 60_000;
 
 let relayLogUploader: FreeLogUploader | undefined;
 let relayTelemetry: FreeTelemetry | undefined;
@@ -351,8 +358,24 @@ async function main(): Promise<void> {
   });
 
   log("stdio ACP bridge connected to relay.");
+  const stopWatchingBridgeBinary = watchBridgeBinaryForChanges({
+    bridgeBinPath: process.argv[1],
+    onChange() {
+      log(
+        "Bridge executable changed on disk. Exiting so the ACP client can restart with the updated code.",
+        "INFO",
+        {
+          eventName: "acp.remote.bridge.executable_changed",
+          freePhase: "install_update",
+        },
+      );
+      bridge.close();
+      exitAfterLogUpload(0);
+    },
+  });
   process.on("SIGINT", () => bridge.close());
   process.on("SIGTERM", () => bridge.close());
+  process.on("exit", () => stopWatchingBridgeBinary?.());
 }
 
 function printHelp(): void {
@@ -407,6 +430,37 @@ function isBrokenPipeError(error: unknown): boolean {
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function watchBridgeBinaryForChanges(input: {
+  bridgeBinPath: string | undefined;
+  onChange(input: { currentMtimeMs: number; initialMtimeMs: number }): void;
+}): (() => void) | undefined {
+  const initialMtimeMs = readFileMtimeMs(input.bridgeBinPath);
+  if (initialMtimeMs === undefined) {
+    return undefined;
+  }
+  const timer = setInterval(() => {
+    const currentMtimeMs = readFileMtimeMs(input.bridgeBinPath);
+    if (currentMtimeMs === undefined || currentMtimeMs === initialMtimeMs) {
+      return;
+    }
+    clearInterval(timer);
+    input.onChange({ currentMtimeMs, initialMtimeMs });
+  }, BRIDGE_BINARY_CHANGE_CHECK_INTERVAL_MS);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
+
+function readFileMtimeMs(path: string | undefined): number | undefined {
+  if (!path) {
+    return undefined;
+  }
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return undefined;
+  }
 }
 
 function appendClassifiedLog(

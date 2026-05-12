@@ -10,6 +10,7 @@ import {
   validateRelaySession,
 } from "./host/host-login.js";
 import {
+  acpRemoteHostServiceUsesExecutable,
   getAcpRemoteHostUserServiceStatus,
   installAcpRemoteHostUserService,
   restartAcpRemoteHostUserService,
@@ -202,7 +203,28 @@ async function ensureDefaultHostInstalled(
   if (systemStatus.installed && !userStatus.installed) {
     return reinstallSystemHostService(relayUrl);
   }
+  const hostBinPath = join(dirname(fileURLToPath(import.meta.url)), "host", "bin.js");
   if (userStatus.installed && !options.reinstall) {
+    const usesCurrentExecutable = await acpRemoteHostServiceUsesExecutable({
+      homeDir,
+      hostBinPath,
+      nodePath: process.execPath,
+      scope: "user",
+    });
+    if (!usesCurrentExecutable) {
+      const status = await installAcpRemoteHostUserService({
+        hostBinPath,
+        env: {
+          ...process.env,
+        },
+        homeDir,
+        nodePath: process.execPath,
+        relayUrl,
+        scope: "user",
+        workspaceRoots: [homeDir],
+      });
+      return `Host service updated to current Free install: ${status.running ? "running" : "not running"} (${status.plistPath})`;
+    }
     if (userStatus.running) {
       return `Host service already installed: running (${userStatus.plistPath})`;
     }
@@ -214,7 +236,7 @@ async function ensureDefaultHostInstalled(
     return `Host service already installed; started: ${started.running ? "running" : "not running"} (${started.plistPath})`;
   }
   const status = await installAcpRemoteHostUserService({
-    hostBinPath: join(dirname(fileURLToPath(import.meta.url)), "host", "bin.js"),
+    hostBinPath,
     env: {
       ...process.env,
     },

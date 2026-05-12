@@ -30,6 +30,28 @@ export type AcpRemoteHostServiceStatus = {
   running: boolean;
 };
 
+export async function acpRemoteHostServiceUsesExecutable(input: {
+  homeDir?: string;
+  hostBinPath: string;
+  label?: string;
+  nodePath?: string;
+  scope?: AcpRemoteHostServiceScope;
+}): Promise<boolean> {
+  const scope = input.scope ?? "user";
+  const label = input.label ?? ACP_REMOTE_HOST_LAUNCHD_LABEL;
+  const homeDir = input.homeDir ?? homedir();
+  const plistPath = launchdPlistPath(label, scope, homeDir);
+  if (!existsSync(plistPath)) {
+    return false;
+  }
+  const plist = await readFile(plistPath, "utf8");
+  return (
+    plist.includes(`<string>${escapePlist(input.hostBinPath)}</string>`) &&
+    (!input.nodePath ||
+      plist.includes(`<string>${escapePlist(input.nodePath)}</string>`))
+  );
+}
+
 export async function installAcpRemoteHostUserService(
   options: AcpRemoteHostServiceInstallOptions,
 ): Promise<AcpRemoteHostServiceStatus> {
@@ -152,8 +174,10 @@ export function getAcpRemoteHostUserServiceStatus(
 
 export async function readAcpRemoteHostUserServicePlist(
   label = ACP_REMOTE_HOST_LAUNCHD_LABEL,
+  scope: AcpRemoteHostServiceScope = "user",
+  homeDir = homedir(),
 ): Promise<string | undefined> {
-  const plistPath = launchAgentPlistPath(label);
+  const plistPath = launchdPlistPath(label, scope, homeDir);
   if (!existsSync(plistPath)) {
     return undefined;
   }

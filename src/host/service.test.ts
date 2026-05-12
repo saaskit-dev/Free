@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  acpRemoteHostServiceUsesExecutable,
   createMacOSLaunchAgentPlist,
   launchHostPlistPath,
   parseMacOSLaunchAgentRunningState,
 } from "./service.js";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 
 describe("remote host user service", () => {
   it("creates a launchd plist that runs host with self-healing settings", () => {
@@ -137,5 +142,47 @@ gui/501/dev.saaskit.free.host = {
 }
 `),
     ).toBe(false);
+  });
+
+  it("detects whether an installed plist uses the current host executable", async () => {
+    const homeDir = join(tmpdir(), `free-service-${randomUUID()}`);
+    const plistPath = join(
+      homeDir,
+      "Library",
+      "LaunchAgents",
+      "dev.saaskit.free.host.plist",
+    );
+    await mkdir(join(homeDir, "Library", "LaunchAgents"), { recursive: true });
+    await writeFile(
+      plistPath,
+      createMacOSLaunchAgentPlist({
+        hostBinPath: "/opt/free/dist/host/bin.js",
+        homeDir,
+        label: "dev.saaskit.free.host",
+        nodePath: "/opt/node",
+        relayUrl: "wss://relay.example.com",
+        standardErrorPath: join(homeDir, ".free", "logs", "host.err.log"),
+        standardOutPath: join(homeDir, ".free", "logs", "host.out.log"),
+        workspaceRoots: [homeDir],
+      }),
+      "utf8",
+    );
+
+    await expect(
+      acpRemoteHostServiceUsesExecutable({
+        homeDir,
+        hostBinPath: "/opt/free/dist/host/bin.js",
+        nodePath: "/opt/node",
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      acpRemoteHostServiceUsesExecutable({
+        homeDir,
+        hostBinPath: "/old/free/dist/host/bin.js",
+        nodePath: "/opt/node",
+      }),
+    ).resolves.toBe(false);
+
+    await rm(homeDir, { force: true, recursive: true });
   });
 });

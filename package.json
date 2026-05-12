@@ -46,6 +46,7 @@
     "relay:deploy": "make relay-deploy",
     "remote:prod-smoke": "make remote-prod-smoke",
     "pack:local": "make pack-local",
+    "postinstall": "node scripts/install-maintenance.cjs",
     "verify": "make verify"
   },
   "dependencies": {

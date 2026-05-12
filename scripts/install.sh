@@ -200,6 +200,9 @@ install_packed_source() {
   fi
   npm install -g "$tarball" --ignore-scripts --force
   INSTALLED_FREE_BIN="$(npm_global_bin_dir)/free"
+  FREE_INSTALLED_BIN="$INSTALLED_FREE_BIN" \
+    FREE_PACKAGE_ROOT="$(npm root -g)/free" \
+    node "$source_dir/scripts/install-maintenance.cjs"
   ensure_active_free_launcher "$INSTALLED_FREE_BIN"
 }
 
