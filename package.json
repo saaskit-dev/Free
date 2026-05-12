@@ -10,6 +10,7 @@
     "free": "dist/bin.js"
   },
   "files": [
+    ".acp-runtime-ref",
     "dist",
     "relay/migrations",
     "relay/src",

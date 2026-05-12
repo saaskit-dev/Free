@@ -5,9 +5,11 @@ REPO_URL="${FREE_REPO_URL:-https://github.com/saaskit-dev/Free.git}"
 REPO_REF="${FREE_REF:-}"
 ACP_RUNTIME_REPO_URL="${ACP_RUNTIME_REPO_URL:-https://github.com/saaskit-dev/acp-runtime.git}"
 ACP_RUNTIME_REF="${ACP_RUNTIME_REF:-}"
+ACP_RUNTIME_REF_FILE=".acp-runtime-ref"
 RELAY_URL="${FREE_RELAY_URL:-}"
 RUN_LOGIN=1
 FORCE_LOGIN=0
+FORCE_GIT_SOURCE=0
 NO_HOST=0
 SYSTEM_HOST=0
 CLEANUP_DIRS=()
@@ -34,6 +36,7 @@ Options:
   --relay-url    Relay WebSocket URL passed to auth/host commands.
   --repo-url     Git repository URL, default: https://github.com/saaskit-dev/Free.git.
   --ref          Git ref to checkout, default: repository default branch.
+  --source-git   Force the installer to clone source instead of using the current checkout.
   --help         Show this help.
 
 Environment:
@@ -53,6 +56,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --force-login)
       FORCE_LOGIN=1
+      shift
+      ;;
+    --source-git)
+      FORCE_GIT_SOURCE=1
       shift
       ;;
     --no-login)
@@ -99,6 +106,63 @@ require_command() {
 require_command npm
 require_command node
 require_command git
+
+read_acp_runtime_ref_file() {
+  source_dir="$1"
+  ref_file="$source_dir/$ACP_RUNTIME_REF_FILE"
+  if [ ! -f "$ref_file" ]; then
+    echo "Missing pinned acp-runtime ref file: $ref_file" >&2
+    exit 1
+  fi
+  ref="$(sed -e 's/[[:space:]]*$//' -e '/^$/d' "$ref_file" | head -n 1)"
+  if [ -z "$ref" ]; then
+    echo "Pinned acp-runtime ref file is empty: $ref_file" >&2
+    exit 1
+  fi
+  printf '%s\n' "$ref"
+}
+
+pinned_acp_runtime_ref() {
+  source_dir="$1"
+  if [ -n "$ACP_RUNTIME_REF" ]; then
+    printf '%s\n' "$ACP_RUNTIME_REF"
+  else
+    read_acp_runtime_ref_file "$source_dir"
+  fi
+}
+
+checkout_git_ref() {
+  repo_url="$1"
+  ref="$2"
+  destination="$3"
+  label="$4"
+
+  echo "Cloning $label source: $repo_url ($ref)"
+  git clone --no-checkout "$repo_url" "$destination"
+  (
+    cd "$destination"
+    if ! git fetch --depth 1 origin "$ref"; then
+      echo "Unable to fetch $label ref: $ref" >&2
+      exit 1
+    fi
+    git checkout --detach FETCH_HEAD
+  )
+}
+
+require_local_acp_runtime_ref() {
+  runtime_dir="$1"
+  expected_ref="$2"
+  actual_ref="$(git -C "$runtime_dir" rev-parse HEAD)"
+  if [ "$actual_ref" != "$expected_ref" ]; then
+    cat >&2 <<EOF
+Local acp-runtime checkout does not match the pinned Free dependency.
+  expected: $expected_ref
+  actual:   $actual_ref
+  path:     $runtime_dir
+EOF
+    exit 1
+  fi
+}
 
 resolve_free_bin() {
   if [ -n "$INSTALLED_FREE_BIN" ] && [ -x "$INSTALLED_FREE_BIN" ]; then
@@ -200,10 +264,17 @@ install_packed_source() {
   fi
   npm install -g "$tarball" --ignore-scripts --force
   INSTALLED_FREE_BIN="$(npm_global_bin_dir)/free"
-  FREE_INSTALLED_BIN="$INSTALLED_FREE_BIN" \
-    FREE_PACKAGE_ROOT="$(npm root -g)/free" \
-    node "$source_dir/scripts/install-maintenance.cjs"
-  ensure_active_free_launcher "$INSTALLED_FREE_BIN"
+  maintenance_env=(
+    "FREE_INSTALLED_BIN=$INSTALLED_FREE_BIN"
+    "FREE_PACKAGE_ROOT=$(npm root -g)/free"
+  )
+  if [ "${FREE_INSTALL_ISOLATED:-}" = "1" ]; then
+    maintenance_env+=("FREE_INSTALL_ISOLATED=1")
+  fi
+  env "${maintenance_env[@]}" node "$source_dir/scripts/install-maintenance.cjs"
+  if [ "${FREE_INSTALL_ISOLATED:-}" != "1" ]; then
+    ensure_active_free_launcher "$INSTALLED_FREE_BIN"
+  fi
 }
 
 is_local_checkout() {
@@ -213,6 +284,8 @@ is_local_checkout() {
 
 install_from_local_checkout() {
   echo "Installing Free from local checkout: $repo_root"
+  runtime_ref="$(pinned_acp_runtime_ref "$repo_root")"
+  require_local_acp_runtime_ref "$repo_root/../acp-runtime" "$runtime_ref"
   if command -v pnpm >/dev/null 2>&1; then
     (cd "$repo_root/../acp-runtime" && pnpm install --frozen-lockfile)
     (cd "$repo_root" && pnpm install --frozen-lockfile)
@@ -226,20 +299,14 @@ install_from_local_checkout() {
 install_from_git_source() {
   tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/free-install.XXXXXX")"
   CLEANUP_DIRS+=("$tmp_dir")
-  if [ -n "$ACP_RUNTIME_REF" ]; then
-    echo "Cloning acp-runtime source: $ACP_RUNTIME_REPO_URL ($ACP_RUNTIME_REF)"
-    git clone --depth 1 --branch "$ACP_RUNTIME_REF" "$ACP_RUNTIME_REPO_URL" "$tmp_dir/acp-runtime"
-  else
-    echo "Cloning acp-runtime source: $ACP_RUNTIME_REPO_URL (default branch)"
-    git clone --depth 1 "$ACP_RUNTIME_REPO_URL" "$tmp_dir/acp-runtime"
-  fi
   if [ -n "$REPO_REF" ]; then
-    echo "Cloning Free source: $REPO_URL ($REPO_REF)"
-    git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" "$tmp_dir/free"
+    checkout_git_ref "$REPO_URL" "$REPO_REF" "$tmp_dir/free" "Free"
   else
     echo "Cloning Free source: $REPO_URL (default branch)"
     git clone --depth 1 "$REPO_URL" "$tmp_dir/free"
   fi
+  runtime_ref="$(pinned_acp_runtime_ref "$tmp_dir/free")"
+  checkout_git_ref "$ACP_RUNTIME_REPO_URL" "$runtime_ref" "$tmp_dir/acp-runtime" "acp-runtime"
   echo "Installing Free from source..."
   if command -v pnpm >/dev/null 2>&1; then
     (cd "$tmp_dir/acp-runtime" && pnpm install --frozen-lockfile)
@@ -254,7 +321,7 @@ install_from_git_source() {
   install_packed_source "$tmp_dir/free"
 }
 
-if is_local_checkout; then
+if [ "$FORCE_GIT_SOURCE" -eq 0 ] && is_local_checkout; then
   install_from_local_checkout
 else
   install_from_git_source

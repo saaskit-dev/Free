@@ -14,6 +14,7 @@ make -C "$ROOT_DIR" build
 ACP_RUNTIME_TARBALL="$(npm pack "$ACP_RUNTIME_DIR" --pack-destination "$STAGE_ROOT" --silent)"
 
 cp "$ROOT_DIR/package.json" "$STAGE_DIR/package.json"
+cp "$ROOT_DIR/.acp-runtime-ref" "$STAGE_DIR/.acp-runtime-ref"
 cp "$ROOT_DIR/README.md" "$STAGE_DIR/README.md"
 cp "$ROOT_DIR/Makefile" "$STAGE_DIR/Makefile"
 cp -R "$ROOT_DIR/dist" "$STAGE_DIR/dist"

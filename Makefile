@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: help install build build-self dev typecheck lint test verify local-full-test \
+.PHONY: help install build build-self dev typecheck lint test verify source-install-smoke local-full-test \
 	relay-typecheck relay-dev relay-deploy relay-deploy-dry-run \
 	relay-e2e relay-e2e-local relay-migrate-local relay-migrate-remote remote-prod-smoke pack-local package-install-check clean
 
@@ -19,6 +19,7 @@ help:
 		"  make typecheck            Typecheck Free and relay" \
 		"  make test                 Run unit tests" \
 		"  make verify               Run typecheck, tests, package, and install smoke" \
+		"  make source-install-smoke Run the source installer from a clean git clone" \
 		"  make local-full-test      Run verify plus local Wrangler relay e2e" \
 		"  make pack-local           Build local npm tarball under .tmp/pack" \
 		"  make package-install-check Install the tarball and smoke-test the CLI" \
@@ -59,7 +60,10 @@ lint: build relay-typecheck
 test:
 	pnpm exec vitest run
 
-verify: typecheck test pack-local package-install-check relay-deploy-dry-run
+verify: typecheck test pack-local package-install-check source-install-smoke relay-deploy-dry-run
+
+source-install-smoke:
+	scripts/source-install-smoke.sh
 
 local-full-test: verify relay-e2e-local
 

@@ -23,6 +23,9 @@ function main() {
     return;
   }
   ensureExecutableBins(packageRoot);
+  if (isIsolatedInstall()) {
+    return;
+  }
   ensureManagedShadowLaunchers(installedBin);
   if (!shouldUpdateLaunchdService(packageRoot)) {
     return;
@@ -44,6 +47,10 @@ function resolveInstalledBin() {
     return resolve(candidate);
   }
   return undefined;
+}
+
+function isIsolatedInstall() {
+  return process.env.FREE_INSTALL_ISOLATED === "1";
 }
 
 function resolvePackageRoot(installedBin) {
@@ -73,7 +80,7 @@ function ensureManagedShadowLaunchers(installedBin) {
     if (resolve(candidate) === resolve(installedBin)) {
       continue;
     }
-    if (!existsSync(candidate) || !isManagedFreeLauncher(candidate)) {
+    if (!pathExists(candidate) || !isManagedFreeLauncher(candidate)) {
       continue;
     }
     try {
@@ -100,6 +107,15 @@ function pathFreeCandidates() {
 
 function unique(values) {
   return [...new Set(values)];
+}
+
+function pathExists(path) {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function isManagedFreeLauncher(path) {
