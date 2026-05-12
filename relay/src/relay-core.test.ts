@@ -402,6 +402,9 @@ describe("AcpRelayBroker", () => {
       ok: true,
     });
     await expect(
+      broker.activeAuthorizableHostRouteIds("conn-1"),
+    ).resolves.toEqual(["host-1", "host-2"]);
+    await expect(
       broker.authorizeClient({
         connectionId: "conn-1",
         hostId: "host-2",

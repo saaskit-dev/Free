@@ -899,14 +899,16 @@ export class AcpRelayBroker {
       accountId: client.accountId,
       clientId: client.clientId,
     });
+    const authorizedHostIds =
+      client.connectionProofs.size > 0
+        ? new Set(client.connectionProofs.keys())
+        : client.connectionProof
+          ? new Set([client.connectionProof.hostId])
+          : undefined;
     return {
       hosts: hosts
         .filter((host) => activeHostRouteIds.has(host.hostId))
-        .filter(
-          (host) =>
-            !client.connectionProof?.hostId ||
-            host.hostId === client.connectionProof.hostId,
-        )
+        .filter((host) => !authorizedHostIds || authorizedHostIds.has(host.hostId))
         .map((host) => ({
           hostId: host.hostId,
           metadata: this.activeHostMetadata.get(host.hostId),
