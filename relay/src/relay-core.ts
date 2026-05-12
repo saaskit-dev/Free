@@ -1157,11 +1157,7 @@ export class AcpRelayBroker {
       input.sessionSelectionId,
     );
     if (wasRouteReady) {
-      const waiter =
-        client.sessionSelectionWaiters.get(sessionSelectionId) ??
-        (!input.sessionSelectionId && client.sessionSelectionWaiters.size === 1
-          ? client.sessionSelectionWaiters.values().next().value
-          : undefined);
+      const waiter = client.sessionSelectionWaiters.get(sessionSelectionId);
       if (waiter) {
         for (const [waiterId, candidate] of client.sessionSelectionWaiters) {
           if (candidate === waiter) {
