@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 import { dirname } from "node:path";
 import { platform } from "node:process";
@@ -161,7 +162,7 @@ export async function loadOrCreateHostMachineIdentity(): Promise<AcpRemoteHostMa
 
 function resolveStableHostId(): string {
   const seed = readStableMachineSeed();
-  const digest = crypto.createHash("sha256").update(seed).digest();
+  const digest = createHash("sha256").update(seed).digest();
   const bytes = new Uint8Array(digest.subarray(0, 16));
   bytes[6] = (bytes[6] & 0x0f) | 0x40;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
