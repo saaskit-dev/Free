@@ -59,6 +59,11 @@ jobs:
           pnpm --dir ../acp-runtime install --frozen-lockfile
           pnpm install --frozen-lockfile
 
+      - name: Build pinned acp-runtime
+        run: |
+          pnpm --dir ../acp-runtime --filter @saaskit-dev/simulator-agent-acp build
+          pnpm --dir ../acp-runtime run build:lib
+
       - name: Verify Free
         run: |
           make typecheck
