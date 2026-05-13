@@ -130,7 +130,7 @@ jobs:
       - name: Deploy relay
         run: |
           make relay-deploy-dry-run
-          make relay-deploy
+          pnpm --dir relay exec wrangler deploy --domain "$RELAY_DOMAIN"
 
   deploy-workbench:
     name: Deploy Workbench Pages

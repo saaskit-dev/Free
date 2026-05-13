@@ -162,8 +162,10 @@ CLOUDFLARE_API_TOKEN
 CLOUDFLARE_ACCOUNT_ID
 ```
 
-The Cloudflare token must be able to apply D1 migrations, deploy Workers, and
-deploy Cloudflare Pages. The workflow uses these defaults:
+The Cloudflare token must be able to deploy Workers and Cloudflare Pages. D1
+migrations still run through `make relay-deploy`; enable D1 write on the deploy
+token before switching the GitHub Actions relay step to that target. The
+workflow uses these defaults:
 
 ```text
 ACP_RUNTIME_REPO_URL=https://github.com/saaskit-dev/acp-runtime.git
