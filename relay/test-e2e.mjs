@@ -7,9 +7,6 @@ import {
 } from "../dist/protocol/index.js";
 
 const RELAY = process.env.RELAY_URL || "http://localhost:8791";
-const HAS_GITHUB_OAUTH =
-  Boolean(process.env.ACP_RELAY_GITHUB_CLIENT_ID) &&
-  Boolean(process.env.ACP_RELAY_GITHUB_CLIENT_SECRET);
 const LOCAL_ACCOUNT_SESSION_KEY = {
   kid: "free-default-2026-05-10",
   privateKey: "MC4CAQAwBQYDK2VwBCIEIE3QzRbUWyHMh9gdhq_2qUXX_NzCJpJFhxtndaTTRvb3",
@@ -19,13 +16,14 @@ const LOCAL_ACCOUNT_SESSION_KEY = {
 async function main() {
   // 1. GET /api/login/start. Without local GitHub OAuth config the expected
   //    result is a clear 503; with OAuth config it returns a GitHub URL.
+  //    Wrangler can source Worker secrets independently from this Node process,
+  //    so validate the server response instead of inferring from process.env.
   console.log("1. Testing /api/login/start...");
   const loginRes = await fetch(`${RELAY}/api/login/start?returnTo=/authorize&redirectUri=http%3A%2F%2F127.0.0.1%3A8790%2Flogin%2Fcallback`, {
     headers: { Origin: "http://127.0.0.1:8790" },
   });
   console.log(`   Status: ${loginRes.status}`);
-  if (HAS_GITHUB_OAUTH) {
-    assert(loginRes.status === 200, "Expected /api/login/start to return JSON with GitHub OAuth config");
+  if (loginRes.status === 200) {
     const loginBody = await loginRes.json();
     assert(loginBody.authorizationUrl.includes("github.com/login/oauth/authorize"), "Expected GitHub OAuth URL");
     console.log(`   ✓ Returns GitHub OAuth URL`);
