@@ -75,7 +75,10 @@ export function WorkbenchAppFrame({
               return (
                 <Pressable
                   key={item.id}
-                  onPress={() => setRoute(item.id)}
+                  onPress={() => {
+                    setRoute(item.id);
+                    pushRoutePath(item.id);
+                  }}
                   style={{
                     alignItems: "center",
                     backgroundColor: active ? colors.lime : dark ? "#24222D" : "#FFFFFF",
@@ -153,6 +156,13 @@ export function WorkbenchAppFrame({
       </View>
     </View>
   );
+}
+
+function pushRoutePath(route: RouteId): void {
+  if (typeof window === "undefined") return;
+  const pathname = route === "hosts" ? "/hosts" : route === "settings" ? "/settings" : "/access";
+  if (window.location.pathname === pathname) return;
+  window.history.pushState({}, "", `${pathname}${window.location.search}`);
 }
 
 function sessionStatusLabel(
