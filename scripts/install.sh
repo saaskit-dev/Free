@@ -305,8 +305,12 @@ install_from_git_source() {
     echo "Cloning Free source: $REPO_URL (default branch)"
     git clone --depth 1 "$REPO_URL" "$tmp_dir/free"
   fi
-  runtime_ref="$(pinned_acp_runtime_ref "$tmp_dir/free")"
-  checkout_git_ref "$ACP_RUNTIME_REPO_URL" "$runtime_ref" "$tmp_dir/acp-runtime" "acp-runtime"
+  if [ -n "$ACP_RUNTIME_REF" ]; then
+    checkout_git_ref "$ACP_RUNTIME_REPO_URL" "$ACP_RUNTIME_REF" "$tmp_dir/acp-runtime" "acp-runtime"
+  else
+    echo "Cloning acp-runtime source: $ACP_RUNTIME_REPO_URL (default branch)"
+    git clone --depth 1 "$ACP_RUNTIME_REPO_URL" "$tmp_dir/acp-runtime"
+  fi
   echo "Installing Free from source..."
   if command -v pnpm >/dev/null 2>&1; then
     (cd "$tmp_dir/acp-runtime" && pnpm install --frozen-lockfile)
