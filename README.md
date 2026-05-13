@@ -158,13 +158,15 @@ Workbench Web.
 Configure these GitHub Actions secrets before enabling automatic deployment:
 
 ```text
-CLOUDFLARE_API_TOKEN
+CLOUDFLARE_D1_API_TOKEN
 CLOUDFLARE_ACCOUNT_ID
 ```
 
-The Cloudflare token must be able to deploy Workers and Cloudflare Pages, and
-it must include D1 write access because the relay deployment applies remote D1
-migrations before publishing the Worker. The workflow uses these defaults:
+The deploy jobs run on the local macOS self-hosted runner and use that runner's
+authenticated Wrangler OAuth session for Worker and Pages deployment.
+`CLOUDFLARE_D1_API_TOKEN` is optional when the runner OAuth session has D1 edit
+access; when present, it is used only for remote D1 migrations and never for
+Worker or Pages deployment. The workflow uses these defaults:
 
 ```text
 ACP_RUNTIME_REPO_URL=https://github.com/saaskit-dev/acp-runtime.git
