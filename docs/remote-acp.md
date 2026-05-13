@@ -2,11 +2,21 @@
 
 Free makes a remote host feel like a local ACP agent.
 
+This document describes the current bridge compatibility layer. The bridge path
+keeps external ACP clients working while Free builds its own Session Workbench
+as the primary product client. The compatibility layer is an important current
+implementation surface, but it is not the final product center.
+
 The user-facing path has three moving parts:
 
 - `free bridge run` speaks native ACP over stdio to the editor.
 - The relay routes native ACP bytes and stores reconnect state.
 - `free host run` verifies the bridge proof and serves the local runtime.
+
+The Web UI should expose and harden the same bridge-era capabilities before it
+fully replaces the external ACP client as the main interaction surface: host
+discovery, session selection, authorization, runtime controls, reconnect and
+restore, logs, attachments, and workflow continuation.
 
 ## Identity
 

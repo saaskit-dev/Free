@@ -28,6 +28,6 @@ bash "$ROOT_DIR/scripts/install.sh" \
 free --help >/dev/null
 free host --help >/dev/null
 free bridge config \
-  --relay-url ws://127.0.0.1:8787 \
+  --relay-url ws://127.0.0.1:8791 \
   --command free \
   --format generic >/dev/null

@@ -17,6 +17,31 @@ agents. The interface should hide relay and runtime plumbing during normal use
 while preserving enough operational truth for supervision, authorization,
 review, and recovery.
 
+## Current Execution Focus
+
+The long-term product direction is for Free's own Session Workbench to become
+the primary client for coding-agent interaction. Users should be able to create,
+continue, authorize, interrupt, restore, review, and hand off agent work inside
+Free without depending on an external ACP client as the main product surface.
+
+The current implementation focus is the bridge compatibility layer and the Web
+UI around it. This means Free should keep external ACP clients working through
+`free bridge run` while building the product capabilities that the Session
+Workbench will own directly: host discovery, session selection, authorization,
+runtime controls, reconnect and restore states, logs, attachments, and workflow
+continuation.
+
+Product UI implementation should prioritize `Expo + React Native + React
+Native Web`, with Electron as the preferred desktop container. Cloudflare Worker
+HTML must not become a second product surface. The relay should keep only the
+server-rendered protocol pages required by OAuth login, login confirmation, and
+ACP authorization flows until those flows have first-class Workbench APIs.
+
+Treat the bridge as a compatibility and migration surface. It is allowed to
+expose protocol-level behavior where needed for compatibility, but product
+decisions should still optimize toward the Session Workbench as the durable
+human-agent interaction model.
+
 ## Users
 
 Free is for developers and technical operators who manage more than one remote
@@ -74,6 +99,25 @@ The product verb is not `chat`.
 
 ## Main Surface
 
+The main product surface is the Workbench app, not the relay Worker root. During
+the bridge compatibility focus, the live Workbench navigation must stay limited
+to surfaces backed by real APIs:
+
+- Access: account session state from `/api/session`, plus `/login` and
+  `/logout`.
+- Hosts: host discovery from `/api/hosts`.
+- System: relay health from `/health`.
+
+Do not keep sample workbench routes, fake project sessions, fake deploys, fake
+repositories, generic settings pages, or archived prototypes in the primary UI.
+Do not expose authorization queues, session continuation, migration state, logs,
+attachments, or runtime controls until the matching API and tests exist.
+
+Bridge Web UI is multi-endpoint from the first implementation. Large desktop,
+small desktop or tablet, and mobile must all preserve the same product meaning:
+account access, host discovery, and system health. Smaller screens may collapse
+secondary context, but they must not lose the primary bridge workflow.
+
 The main product surface has three regions:
 
 ```text
@@ -86,7 +130,7 @@ no dashboard widget grid, and no global bottom composer.
 ### Session Memory Surface
 
 The left surface is an attention queue for remote coding sessions. It should be
-240 to 280 px wide in the full product shell and should prioritize attention:
+240 to 280 px wide in the full Workbench app frame and should prioritize attention:
 
 1. `Waiting Auth`
 2. `Running`
@@ -176,10 +220,13 @@ business taxonomy.
 
 ### Deference Over Decoration
 
-The UI should recede behind the task. Use alignment, typography, state
-semantics, and subtle boundaries. Avoid decorative glow, large cards, heavy
-toolbars, noisy badges, strong gradients, duplicate metadata, and dashboard
-widgets.
+The workflow UI should recede behind the task, but the brand should not become
+bland. Use alignment, typography, state semantics, and subtle boundaries inside
+dense working areas. Use bold color, geometry, imagery, and motion in brand
+moments such as onboarding, authorization, empty states, generated imagery, and
+Web UI surfaces that can carry personality. Avoid generic decorative glow,
+large cards, heavy toolbars, noisy badges, generic strong gradients, duplicate
+metadata, and dashboard widgets.
 
 ### Command, Not Message
 
@@ -198,6 +245,10 @@ surface style:
 - Superhuman: attention queue and fast triage.
 - Arc: reduced chrome and content-first framing.
 - Codex: agent command surface and coding workflow continuity.
+- Contemporary creative technology brands: vivid color, tactile product
+  detail, editorial image direction, and confident art direction.
+- Consumer product and fashion systems: packaging discipline, cross-platform
+  consistency, and memorable brand surfaces.
 
 Apple HIG is a formal design reference, not a visual skin. In Free it means the
 interface should make priority clear, keep controls harmonious with the current

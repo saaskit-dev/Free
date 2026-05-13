@@ -1,4 +1,4 @@
-// Quick E2E test: GitHub OAuth → account session → host list → authorize page
+// Quick E2E test: Workbench login API → account session → host list → authorize page
 // Usage: ACP_RELAY_GITHUB_CLIENT_ID=... ACP_RELAY_GITHUB_CLIENT_SECRET=... node test-e2e.mjs
 
 import {
@@ -6,7 +6,7 @@ import {
   encodeAcpRemoteAccountSession,
 } from "../dist/protocol/index.js";
 
-const RELAY = process.env.RELAY_URL || "http://localhost:8787";
+const RELAY = process.env.RELAY_URL || "http://localhost:8791";
 const HAS_GITHUB_OAUTH =
   Boolean(process.env.ACP_RELAY_GITHUB_CLIENT_ID) &&
   Boolean(process.env.ACP_RELAY_GITHUB_CLIENT_SECRET);
@@ -17,19 +17,20 @@ const LOCAL_ACCOUNT_SESSION_KEY = {
 };
 
 async function main() {
-  // 1. GET /login. Without local GitHub OAuth config the expected result is a
-  //    clear 503; with OAuth config it should redirect to GitHub.
-  console.log("1. Testing /login...");
-  const loginRes = await fetch(`${RELAY}/login?returnTo=/authorize`);
+  // 1. GET /api/login/start. Without local GitHub OAuth config the expected
+  //    result is a clear 503; with OAuth config it returns a GitHub URL.
+  console.log("1. Testing /api/login/start...");
+  const loginRes = await fetch(`${RELAY}/api/login/start?returnTo=/authorize&redirectUri=http%3A%2F%2F127.0.0.1%3A8790%2Flogin%2Fcallback`, {
+    headers: { Origin: "http://127.0.0.1:8790" },
+  });
   console.log(`   Status: ${loginRes.status}`);
-  const location = loginRes.headers.get("location") ?? "";
-  console.log(`   Redirect: ${location.slice(0, 80)}...`);
   if (HAS_GITHUB_OAUTH) {
-    assert(loginRes.status === 302, "Expected /login to redirect with GitHub OAuth config");
-    assert(location.includes("github.com/login/oauth/authorize"), "Expected GitHub OAuth redirect");
-    console.log(`   ✓ Redirects to GitHub OAuth`);
+    assert(loginRes.status === 200, "Expected /api/login/start to return JSON with GitHub OAuth config");
+    const loginBody = await loginRes.json();
+    assert(loginBody.authorizationUrl.includes("github.com/login/oauth/authorize"), "Expected GitHub OAuth URL");
+    console.log(`   ✓ Returns GitHub OAuth URL`);
   } else {
-    assert(loginRes.status === 503, "Expected /login to report missing GitHub OAuth config");
+    assert(loginRes.status === 503, "Expected /api/login/start to report missing GitHub OAuth config");
     console.log(`   ✓ Reports missing GitHub OAuth config`);
   }
 
@@ -49,7 +50,7 @@ async function main() {
   assert(authRes.status === 401, "Expected /authorize without auth to return 401");
   console.log(`   ✓ Returns 401 without session`);
 
-  // 4. Manually create an account session (simulates what /login/callback does)
+  // 4. Manually create an account session.
   console.log("\n4. Creating test account session...");
   const sessionId = crypto.randomUUID();
   const accountId = "test-account-" + sessionId.slice(0, 8);

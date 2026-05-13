@@ -7,23 +7,44 @@ register: product
 Free's design language is:
 
 ```text
-Operational, calm, dense, continuous.
+Playful, futuristic, vivid, precise, continuous.
 ```
 
-The interface should feel like a precise runtime workbench for supervising
-remote coding agents. It should not feel like a chat app, IDE clone, project
-management dashboard, or marketing site.
+The interface should feel like a precise runtime workbench wrapped in a bold
+creative technology brand. It should balance toy-like energy with the polish of
+a high-end creative studio. Free should not feel like a chat app, IDE clone,
+project management dashboard, or generic SaaS tool.
 
 The default physical scene is a developer working inside a code-heavy desktop
-tool, scanning multiple long-running agent sessions while reviewing diffs,
-terminal output, and authorization decisions. This supports a restrained
-engineering theme closer to Cursor and Linear: graphite-tinted neutrals, fine
-separators, compact rows, subdued controls, and very limited accent color.
+tool that still carries a confident consumer-product personality: scanning
+multiple long-running agent sessions while bright geometric brand moments,
+precise motion, and tactile surfaces make the system feel young, future-facing,
+and highly designed.
+
+The brand world should express:
+
+- creativity
+- youthfulness
+- rhythm
+- tactile interaction
+- concept-forward digital product thinking
+- product obsession
+- visual experimentation
+- packaging exploration
+- editorial photography
+- immersive retail cues
+- cross-platform brand consistency
+
+The product surface still needs operational clarity. Dense session work areas
+should use disciplined structure, but the surrounding brand system can use
+high-saturation color, clean geometry, modern typography, energetic rhythm, and
+slightly surreal imagery.
 
 Free must support two first-class themes:
 
 - Light is the default product surface for broad daily work. It should feel
-  like a calm desktop tool, not a white SaaS dashboard.
+  like a polished desktop product with visible brand energy, not a white SaaS
+  dashboard.
 - Dark is a first-class focused work mode. It should use the same hierarchy and
   token roles, not a separate visual language.
 
@@ -52,8 +73,14 @@ Apply the principles as product behavior:
 
 ## Color Strategy
 
-Use a restrained dual-theme product palette: graphite-tinted neutrals plus
-limited semantic accent. Use OKLCH tokens for new CSS.
+Use a vivid dual-theme product palette: graphite-tinted operational neutrals
+plus saturated brand color. Use OKLCH tokens for new CSS.
+
+The strategy is not a quiet monochrome product shell. It is a controlled
+high-color system. Use bright color deliberately for brand surfaces, active
+states, onboarding, authorization moments, empty states, packaging-like
+composition, and visual storytelling. Use calmer neutrals for dense workflow
+reading, diffs, logs, and terminal output.
 
 Recommended roles:
 
@@ -65,23 +92,54 @@ Recommended roles:
 - border-strong: selected or active boundary
 - text: high-contrast foreground, never pure black or pure white
 - muted: secondary metadata
-- accent: low-area blue-violet for active selection and primary execution
-- success: restrained green for running or passed checks
+- accent: vivid blue-violet or electric blue for active selection and primary
+  execution
+- brand-bright: saturated consumer-product color for brand moments and visual
+  rhythm
+- brand-contrast: a second saturated color for campaign, empty-state, or
+  editorial contrast
+- success: precise green for running or passed checks
 - warning: muted amber for authorization and recoverable attention
 - danger: muted red for rejected, failed, or destructive states
 
 Accent color should be used for current selection, command execution, focus
-ring, and state indicators. It should not become decorative fill.
+ring, and state indicators. Brand color may carry more surface area in
+onboarding, marketing, first-run, illustration, and memorable product moments,
+but it must not obscure workflow state or make inactive controls look active.
 
 Avoid:
 
-- strong gradients
-- decorative glow
 - white SaaS dashboard surfaces
 - one-note purple surfaces
 - blue-slate dashboard atmosphere
 - saturated inactive states
 - color used without state meaning
+
+Do not flatten the brand into a single blue-purple software palette. Use
+color-blocking, swatches, geometric fields, layered product details, and
+editorial image direction before relying on generic gradients or glow.
+
+## Brand Assets And Imagery
+
+Free brand materials may be sourced from:
+
+```text
+https://github.com/saaskit-dev/agentbridge/tree/main/apps/free/app
+```
+
+The verified upstream app directory includes Free app assets and source
+material entry points such as `public`, `sources`, `targets`, and `logo.txt`.
+Use these as the first source for logos, app imagery, reference assets, and
+brand continuity before inventing new visual language.
+
+If the available assets are insufficient, generate replacement imagery with the
+image2 image generator. Prefer transparent-background images for product
+objects, icons, stickers, mascot-like elements, packaging studies, and
+editorial cutouts so they can be composed cleanly into Web UI surfaces.
+
+Image direction should be slightly surreal, tactile, and product-obsessed:
+precise object details, bold color, crisp silhouettes, confident art direction,
+and enough physicality to avoid generic abstract AI decoration.
 
 ## Language
 
@@ -172,7 +230,7 @@ sections entirely. Do not show zero-count groups.
 ### Context Tabs
 
 Context tabs are `Diff`, `Files`, `Terminal`, and `Logs`. Only one tab is
-visible at a time. Tabs should use quiet active indication and no decorative
+visible at a time. Tabs should use compact active indication and no decorative
 card stack.
 
 ### Command Surface
@@ -260,8 +318,15 @@ Use standard controls where users expect them:
 - menus for option sets
 - text buttons for explicit workflow actions
 
-Prefer lucide or the existing icon library when icons are needed. Do not invent
-custom decorative SVGs for standard actions.
+Use Hugeicons as the default icon library:
+
+```text
+https://hugeicons.com/
+```
+
+Do not invent custom decorative SVGs for standard actions. Custom artwork is
+reserved for brand imagery, product illustrations, packaging explorations, and
+transparent-background image assets.
 
 ## Motion
 
@@ -289,12 +354,28 @@ click areas.
 
 ## Responsive Behavior
 
-Desktop is the primary design target. The product can still adapt:
+Multi-endpoint responsiveness is a first-class requirement from the first Web
+implementation. Do not treat responsive behavior as a later polish pass.
+
+Design every bridge Web surface for at least three working ranges:
+
+- large desktop: dense supervision, visible navigation, inspector context, and
+  broad resource comparison
+- small desktop or tablet: preserve navigation and task continuity while
+  collapsing secondary context
+- mobile: keep the same product meaning with a single-column flow, reachable
+  primary actions, readable resource state, and no horizontal overflow
 
 - collapse or overlay Context Surface on narrower widths
 - allow Session Memory Surface to become a drawer below desktop breakpoints
 - keep Command Surface attached to Workflow Canvas
 - preserve state priority and context tab semantics
+- keep route navigation reachable without requiring hover or precise pointer
+  input
+- keep all action rows, endpoint rows, command rows, and resource rows readable
+  without clipping text
+- verify large desktop, small desktop, and mobile widths before considering a
+  Web UI change complete
 
 Do not turn the product into a marketing landing page on small screens.
 
@@ -307,8 +388,8 @@ Do not introduce:
 - dashboard cards
 - nested cards
 - large widgets
-- strong gradients
-- decorative glow
+- generic strong gradients
+- decorative glow as default atmosphere
 - glassmorphism as a default
 - noisy badges
 - duplicate metadata

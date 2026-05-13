@@ -24,6 +24,7 @@ export type HostMetadata = {
     type?: string;
     label: string;
   }[];
+  displayName?: string;
   machine?: string;
   runtimeInstanceId?: string;
   workspaceRoots: readonly { path: string; label?: string }[];

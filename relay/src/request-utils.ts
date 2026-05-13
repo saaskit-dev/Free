@@ -140,6 +140,10 @@ export function parseHostMetadataHeaders(
       typeof value.machine === "string" && value.machine.trim()
         ? value.machine
         : undefined;
+    const displayName =
+      typeof value.displayName === "string" && value.displayName.trim()
+        ? value.displayName
+        : undefined;
     const runtimeInstanceId =
       typeof value.runtimeInstanceId === "string" &&
       value.runtimeInstanceId.trim()
@@ -154,6 +158,7 @@ export function parseHostMetadataHeaders(
     }
     return {
       agentTypes,
+      ...(displayName ? { displayName } : {}),
       ...(machine ? { machine } : {}),
       ...(runtimeInstanceId ? { runtimeInstanceId } : {}),
       workspaceRoots,

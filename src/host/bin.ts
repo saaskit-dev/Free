@@ -874,7 +874,9 @@ function printHelp(): void {
   process.stdout.write(
     [
       "Usage:",
+      "  free host run [--relay-env online|local]",
       "  free host run [--relay-url <ws-url>]",
+      "  free host install [--relay-env online|local] [--workspace-root <path>...] [--system]",
       "  free host install [--relay-url <ws-url>] [--workspace-root <path>...] [--system]",
       "  free host status [--system]",
       "  free host stop [--system]",
@@ -883,6 +885,7 @@ function printHelp(): void {
       "",
       "Options:",
       `  --relay-url          Relay WebSocket URL (default: ${ACP_REMOTE_DEFAULT_RELAY_URL})`,
+      "  --relay-env          Relay environment name. online is the default, local uses ws://127.0.0.1:8791.",
       "  --host-id            Host ID (optional; default: persistent machine ID)",
       "  --identity-path      Host identity path (optional)",
       "  --workspace-root     Workspace root path (repeatable; default: home directory)",
@@ -894,6 +897,7 @@ function printHelp(): void {
       "",
       "Environment variables:",
       "  ACP_REMOTE_HOST_RELAY_URL            Relay WebSocket URL",
+      "  ACP_REMOTE_HOST_RELAY_ENV            Relay environment name: online or local",
       "  ACP_REMOTE_HOST_WORKSPACE_ROOTS      Comma-separated workspace roots",
       "  ACP_REMOTE_HOST_ACCOUNT_SESSION      Encoded AccountSession",
       "",

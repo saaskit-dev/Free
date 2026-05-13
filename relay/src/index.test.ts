@@ -102,60 +102,45 @@ describe("relay worker", () => {
     });
   });
 
-  it("serves the Free product app shell without auth", async () => {
-    const response = await worker.fetch(
-      new Request("https://relay.test/app"),
-      createEnv(),
-    );
-
-    expect(response.status).toBe(200);
-    expect(response.headers.get("content-type")).toContain("text/html");
-    const body = await response.text();
-    expect(body).toContain("<title>Free</title>");
-    expect(body).toContain("Session Memory Surface");
-    expect(body).toContain("Workflow Canvas");
-    expect(body).toContain("Context Surface");
-    expect(body).toContain("Command Surface");
-    expect(body).toContain("Fix login race condition");
-    expect(body).toContain('data-context-tab="Diff"');
-    expect(body).toContain('data-command-mode="running"');
-  });
-
-  it("serves the attention entry on the home route", async () => {
+  it("does not serve product UI from the relay root", async () => {
     const response = await worker.fetch(
       new Request("https://relay.test/"),
       createEnv(),
     );
 
-    expect(response.status).toBe(200);
-    expect(response.headers.get("content-type")).toContain("text/html");
-    const body = await response.text();
-    expect(body).toContain("Session Memory Surface");
-    expect(body).toContain("Deploy to production waiting approval");
-    expect(body).toContain("Approve once");
-    expect(body).toContain('data-command-mode="authorization"');
+    expect(response.status).toBe(404);
+    await expect(response.text()).resolves.toBe("Not found.");
   });
 
-  it("serves route-specific product surfaces", async () => {
-    const expectations = [
-      ["/authorization", "Authorization decisions", 'data-context-tab="Logs"'],
-      ["/sessions", "All session memory", "Idle · 3 failing tests"],
-      ["/settings", "Agent and workspace settings", "Runtime defaults"],
-      ["/system", "Relay, host, and runtime continuity", "Continuity state"],
-    ] as const;
+  it("does not keep archived or unbacked product routes on the relay", async () => {
+    const accountSession = await createTestAccountSession();
+    const paths = ["/archive/demo", "/authorization", "/hosts", "/sessions", "/system"] as const;
 
-    for (const [path, title, marker] of expectations) {
+    for (const path of paths) {
       const response = await worker.fetch(
-        new Request(`https://relay.test${path}`),
+        new Request(`https://relay.test${path}`, {
+          headers: {
+            authorization: `Bearer ${accountSession}`,
+          },
+        }),
         createEnv(),
       );
 
-      expect(response.status).toBe(200);
-      const body = await response.text();
-      expect(body).toContain(title);
-      expect(body).toContain(marker);
-      expect(body).toContain("Context Surface");
+      expect(response.status).toBe(404);
+      await expect(response.text()).resolves.toBe("Not found.");
     }
+  });
+
+  it("clears the browser account session on logout", async () => {
+    const response = await worker.fetch(
+      new Request("https://relay.test/logout"),
+      createEnv(),
+    );
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe("https://relay.test/");
+    expect(response.headers.get("set-cookie")).toContain("acp_relay_session=;");
+    expect(response.headers.get("set-cookie")).toContain("Max-Age=0");
   });
 
   it("does not expose a separate refresh endpoint", async () => {
@@ -216,31 +201,39 @@ describe("relay worker", () => {
       returnTo.searchParams.set("accountSessionReturn", "query");
 
       const login = await worker.fetch(
-        new Request(`https://relay.test/login?returnTo=${encodeURIComponent(returnTo.toString())}`),
+        new Request(
+          `https://relay.test/api/login/start?returnTo=${encodeURIComponent(returnTo.toString())}&redirectUri=http%3A%2F%2F127.0.0.1%3A8790%2Flogin%2Fcallback`,
+          {
+            headers: {
+              origin: "http://127.0.0.1:8790",
+            },
+          },
+        ),
         env,
       );
-      expect(login.status).toBe(302);
-      const githubUrl = new URL(login.headers.get("location") ?? "");
+      expect(login.status).toBe(200);
+      const loginBody = await login.json() as { authorizationUrl?: string };
+      const githubUrl = new URL(loginBody.authorizationUrl ?? "");
       const state = githubUrl.searchParams.get("state");
       expect(state).toBeTruthy();
 
       const callback = await worker.fetch(
-        new Request(`https://relay.test/login/callback?code=ok&state=${state}`),
+        new Request("https://relay.test/api/login/callback", {
+          body: JSON.stringify({ code: "ok", state }),
+          headers: {
+            "content-type": "application/json",
+            origin: "http://127.0.0.1:8790",
+          },
+          method: "POST",
+        }),
         env,
       );
       expect(callback.status).toBe(200);
-      const callbackBody = await callback.text();
-      expect(callbackBody).toContain("Authorize Free");
-      expect(callbackBody).toContain("Authorize this device");
-      expect(callbackBody).toContain("Waiting for Free to finish sign in.");
-      expect(callbackBody).toContain("fetch(form.action");
-      expect(callbackBody).toContain("free:login-complete");
-      expect(callbackBody).not.toContain("accountSession=");
       expect(db.loginApprovals.size).toBe(1);
 
       const approvalId = Array.from(db.loginApprovals.keys())[0];
       const confirmed = await worker.fetch(
-        new Request("https://relay.test/login/confirm", {
+        new Request("https://relay.test/api/login/confirm", {
           body: new URLSearchParams({ approvalId }).toString(),
           headers: {
             "Content-Type": "application/x-www-form-urlencoded",
@@ -300,21 +293,36 @@ describe("relay worker", () => {
       returnTo.searchParams.set("accountSessionReturn", "query");
 
       const login = await worker.fetch(
-        new Request(`https://relay.test/login?returnTo=${encodeURIComponent(returnTo.toString())}`),
+        new Request(
+          `https://relay.test/api/login/start?returnTo=${encodeURIComponent(returnTo.toString())}&redirectUri=http%3A%2F%2F127.0.0.1%3A8790%2Flogin%2Fcallback`,
+          {
+            headers: {
+              origin: "http://127.0.0.1:8790",
+            },
+          },
+        ),
         env,
       );
-      const githubUrl = new URL(login.headers.get("location") ?? "");
+      const loginBody = await login.json() as { authorizationUrl?: string };
+      const githubUrl = new URL(loginBody.authorizationUrl ?? "");
       const state = githubUrl.searchParams.get("state");
 
       await worker.fetch(
-        new Request(`https://relay.test/login/callback?code=ok&state=${state}`),
+        new Request("https://relay.test/api/login/callback", {
+          body: JSON.stringify({ code: "ok", state }),
+          headers: {
+            "content-type": "application/json",
+            origin: "http://127.0.0.1:8790",
+          },
+          method: "POST",
+        }),
         env,
       );
       const approvalId = Array.from(db.loginApprovals.keys())[0];
       const confirmationForm = new FormData();
       confirmationForm.set("approvalId", approvalId);
       const confirmed = await worker.fetch(
-        new Request("https://relay.test/login/confirm", {
+        new Request("https://relay.test/api/login/confirm", {
           body: confirmationForm,
           headers: {
             "Accept": "application/json",
@@ -340,6 +348,143 @@ describe("relay worker", () => {
     } finally {
       fetchSpy.mockRestore();
     }
+  });
+
+  it("moves workbench login approval UI to the web origin", async () => {
+    const db = new FakeAuthD1Database();
+    const env = createEnv({
+      ACP_RELAY_DB: db as unknown as D1Database,
+      ACP_RELAY_GITHUB_CLIENT_ID: "github-client",
+      ACP_RELAY_GITHUB_CLIENT_SECRET: "github-secret",
+    });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input) => {
+        const url = typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+        if (url === "https://github.com/login/oauth/access_token") {
+          return Response.json({ access_token: "github-token" });
+        }
+        if (url === "https://api.github.com/user") {
+          return Response.json({ id: 42, login: "octocat" });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      },
+    );
+
+    try {
+      const login = await worker.fetch(
+        new Request(
+          "https://relay.test/api/login/start?returnTo=http%3A%2F%2F127.0.0.1%3A8790%2F&redirectUri=http%3A%2F%2F127.0.0.1%3A8790%2Flogin%2Fcallback",
+          {
+            headers: {
+              origin: "http://127.0.0.1:8790",
+            },
+          },
+        ),
+        env,
+      );
+      expect(login.status).toBe(200);
+      expect(login.headers.get("access-control-allow-origin")).toBe("http://127.0.0.1:8790");
+      const loginBody = await login.json() as { authorizationUrl?: string };
+      const githubUrl = new URL(loginBody.authorizationUrl ?? "");
+      const state = githubUrl.searchParams.get("state");
+      expect(githubUrl.searchParams.get("redirect_uri")).toBe("http://127.0.0.1:8790/login/callback");
+
+      const callback = await worker.fetch(
+        new Request("https://relay.test/api/login/callback", {
+          body: JSON.stringify({ code: "ok", state }),
+          headers: {
+            "content-type": "application/json",
+            origin: "http://127.0.0.1:8790",
+          },
+          method: "POST",
+        }),
+        env,
+      );
+
+      expect(callback.status).toBe(200);
+      expect(callback.headers.get("access-control-allow-origin")).toBe("http://127.0.0.1:8790");
+      const callbackBody = await callback.json() as { approvalUrl?: string };
+      const approvalUrl = new URL(callbackBody.approvalUrl ?? "");
+      expect(approvalUrl.origin).toBe("http://127.0.0.1:8790");
+      expect(approvalUrl.pathname).toBe("/login/approve");
+      const approvalId = approvalUrl.searchParams.get("approvalId");
+      expect(approvalId).toBeTruthy();
+
+      const approval = await worker.fetch(
+        new Request(`https://relay.test/api/login/approvals/${approvalId}`, {
+          headers: {
+            origin: "http://127.0.0.1:8790",
+          },
+        }),
+        env,
+      );
+      expect(approval.status).toBe(200);
+      expect(approval.headers.get("access-control-allow-origin")).toBe("http://127.0.0.1:8790");
+      const body = await approval.json() as {
+        githubLogin?: string;
+        returnTo?: string;
+      };
+      expect(body.githubLogin).toBe("octocat");
+      expect(body.returnTo).toBe("http://127.0.0.1:8790/");
+
+      const confirmed = await worker.fetch(
+        new Request("https://relay.test/api/login/confirm", {
+          body: JSON.stringify({ approvalId }),
+          headers: {
+            accept: "application/json",
+            "content-type": "application/json",
+            origin: "http://127.0.0.1:8790",
+          },
+          method: "POST",
+        }),
+        env,
+      );
+      expect(confirmed.status).toBe(200);
+      expect(confirmed.headers.get("access-control-allow-origin")).toBe("http://127.0.0.1:8790");
+      expect(confirmed.headers.get("set-cookie")).toContain("acp_relay_session=");
+      const confirmationBody = await confirmed.json() as { callbackUrl?: string };
+      expect(confirmationBody.callbackUrl).toBe("http://127.0.0.1:8790/");
+
+      const session = await worker.fetch(
+        new Request("https://relay.test/api/session", {
+          headers: {
+            cookie: confirmed.headers.get("set-cookie") ?? "",
+            origin: "http://127.0.0.1:8790",
+          },
+        }),
+        env,
+      );
+      expect(session.status).toBe(200);
+      await expect(session.json()).resolves.toMatchObject({
+        account: {
+          name: "octocat",
+          provider: "github",
+        },
+        accountName: "octocat",
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("does not keep relay-hosted login entrypoints", async () => {
+    const env = createEnv({
+      ACP_RELAY_DB: new FakeAuthD1Database() as unknown as D1Database,
+      ACP_RELAY_GITHUB_CLIENT_ID: "github-client",
+      ACP_RELAY_GITHUB_CLIENT_SECRET: "github-secret",
+    });
+
+    const response = await worker.fetch(
+      new Request("http://127.0.0.1:8791/login?returnTo=http%3A%2F%2F127.0.0.1%3A52700%2Fcallback"),
+      env,
+    );
+
+    expect(response.status).toBe(404);
+    await expect(response.text()).resolves.toBe("Not found.");
   });
 
   it("accepts OTLP proxy uploads when export is not configured", async () => {
@@ -472,6 +617,12 @@ class FakeAuthD1Statement {
       return (this.db.oauthStates.get(state) as T | undefined) ?? null;
     }
     if (query.includes("from acp_github_accounts")) {
+      if (query.includes("where account_id")) {
+        const accountId = String(this.bindings[0]);
+        return ([...this.db.githubAccounts.values()].find(
+          (account) => account.account_id === accountId,
+        ) as T | undefined) ?? null;
+      }
       const githubId = Number(this.bindings[0]);
       return (this.db.githubAccounts.get(githubId) as T | undefined) ?? null;
     }

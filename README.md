@@ -102,3 +102,84 @@ make remote-prod-smoke
 `make build` builds the local `../acp-runtime` dependency and then Free.
 `make verify` runs typecheck, tests, package creation, install smoke, and relay
 deploy dry-run.
+
+## Cloudflare Deployment
+
+Free separates the public product surface from the relay/API surface.
+
+- Workbench Web: the product UI. Deploy the Expo Web export to Cloudflare Pages,
+  for example `https://free.saaskit.app`.
+- Relay/API: the Worker that owns WebSocket ACP, API, OAuth exchange, D1, and
+  Durable Object state. Deploy it to a separate Worker domain, for example
+  `https://free-relay.saaskit.app`.
+
+Deploy the relay Worker:
+
+```sh
+make relay-migrate-remote
+make relay-deploy
+```
+
+`make relay-deploy` deploys the Worker custom domain
+`free-relay.saaskit.app` by default. Override `RELAY_DOMAIN` only for a custom
+relay deployment.
+
+Set these Worker secrets before using GitHub OAuth online:
+
+```sh
+pnpm --dir relay exec wrangler secret put ACP_RELAY_GITHUB_CLIENT_SECRET
+pnpm --dir relay exec wrangler secret put ACP_RELAY_ACCOUNT_SESSION_PRIVATE_KEY
+```
+
+Set these Worker variables in `relay/wrangler.jsonc` or the Cloudflare dashboard:
+
+```text
+ACP_RELAY_GITHUB_CLIENT_ID
+ACP_RELAY_ACCOUNT_SESSION_KEY_ID
+ACP_RELAY_ACCOUNT_SESSION_PUBLIC_KEYS
+ACP_RELAY_WORKBENCH_ORIGIN=https://free.saaskit.app
+```
+
+Deploy Workbench Web after setting the public origins:
+
+```sh
+EXPO_PUBLIC_RELAY_URL=https://free-relay.saaskit.app \
+EXPO_PUBLIC_WORKBENCH_ORIGIN=https://free.saaskit.app \
+WORKBENCH_PAGES_PROJECT=free-app \
+make workbench-deploy
+```
+
+GitHub OAuth callback URLs should belong to Workbench, not the relay Worker:
+
+```text
+https://free.saaskit.app/login/callback
+http://127.0.0.1:8790/login/callback
+```
+
+The relay still handles the OAuth token exchange through `/api/login/callback`,
+but the visible callback, approval, error, and completion surfaces stay on
+Workbench.
+
+## Relay Environments
+
+The default bridge, auth, and host environment is online:
+
+```sh
+free bridge config
+free bridge run
+free auth login
+free host run
+```
+
+Use the local environment when testing against `make relay-dev` on port `8791`
+and Workbench Web on port `8790`:
+
+```sh
+free bridge config --relay-env local
+free bridge run --relay-env local
+free auth login --relay-env local
+free host run --relay-env local
+```
+
+`--relay-url <ws-url>` remains available for custom relay deployments, but it
+should not be mixed with `--relay-env`.

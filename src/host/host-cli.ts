@@ -7,7 +7,7 @@ import {
   type ConnectedAcpRemoteHostRelay,
   type HostMetadata,
 } from "./relay-client.js";
-import { ACP_REMOTE_DEFAULT_RELAY_URL } from "../defaults.js";
+import { resolveFreeRelayUrl } from "../relay-environment.js";
 
 export type AcpRemoteHostCliEnvironment = Record<string, string | undefined>;
 
@@ -21,6 +21,8 @@ export const ACP_REMOTE_HOST_IDENTITY_PATH_ENV_VAR =
   "ACP_REMOTE_HOST_IDENTITY_PATH" as const;
 export const ACP_REMOTE_HOST_RELAY_URL_ENV_VAR =
   "ACP_REMOTE_HOST_RELAY_URL" as const;
+export const ACP_REMOTE_HOST_RELAY_ENV_ENV_VAR =
+  "ACP_REMOTE_HOST_RELAY_ENV" as const;
 
 export type AcpRemoteHostCliConfig = {
   accountId?: string;
@@ -67,10 +69,13 @@ export function parseAcpRemoteHostCliConfig(input: {
   const accountSession =
     values.accountSession ?? env[ACP_REMOTE_HOST_ACCOUNT_SESSION_ENV_VAR];
   const hostId = values.hostId ?? env[ACP_REMOTE_HOST_HOST_ID_ENV_VAR];
-  const relayUrl =
-    values.relayUrl ??
-    env[ACP_REMOTE_HOST_RELAY_URL_ENV_VAR] ??
-    ACP_REMOTE_DEFAULT_RELAY_URL;
+  const relayUrl = resolveFreeRelayUrl({
+    env,
+    explicitRelayEnvironment: values.relayEnvironment,
+    explicitRelayUrl: values.relayUrl,
+    envRelayEnvironmentName: ACP_REMOTE_HOST_RELAY_ENV_ENV_VAR,
+    envRelayUrlName: ACP_REMOTE_HOST_RELAY_URL_ENV_VAR,
+  });
   const identityPath =
     values.identityPath ?? env[ACP_REMOTE_HOST_IDENTITY_PATH_ENV_VAR];
 
@@ -92,8 +97,12 @@ const EXTRA_ARG_KEYS = new Set([
   "--workspace-root",
 ]);
 
-function parseNamedArgs(argv: readonly string[]): Partial<AcpRemoteHostCliConfig> {
-  const values: Partial<AcpRemoteHostCliConfig> = {};
+function parseNamedArgs(argv: readonly string[]): Partial<AcpRemoteHostCliConfig> & {
+  relayEnvironment?: string;
+} {
+  const values: Partial<AcpRemoteHostCliConfig> & {
+    relayEnvironment?: string;
+  } = {};
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     switch (arg) {
@@ -117,6 +126,10 @@ function parseNamedArgs(argv: readonly string[]): Partial<AcpRemoteHostCliConfig
         break;
       case "--relay-url":
         values.relayUrl = readArgValue(argv, index, arg);
+        index += 1;
+        break;
+      case "--relay-env":
+        values.relayEnvironment = readArgValue(argv, index, arg);
         index += 1;
         break;
       case "--force-login":

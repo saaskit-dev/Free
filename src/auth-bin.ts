@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { ACP_REMOTE_DEFAULT_RELAY_URL } from "./defaults.js";
+import { resolveFreeRelayUrl } from "./relay-environment.js";
 import {
   clearCachedSession,
   getSessionPath,
@@ -24,9 +25,12 @@ type AuthCommand =
   | { name: "help" }
   | { ensureHost: boolean; force: boolean; name: "login"; relayUrl: string }
   | { name: "logout" }
-  | { name: "status" };
+  | { name: "status"; relayUrl: string };
 
-export function parseFreeAuthCommand(argv: readonly string[]): AuthCommand {
+export function parseFreeAuthCommand(
+  argv: readonly string[],
+  env: Record<string, string | undefined> = {},
+): AuthCommand {
   const [command = "help", ...rest] = argv;
   if (command === "--help" || command === "-h" || command === "help") {
     return { name: "help" };
@@ -34,20 +38,19 @@ export function parseFreeAuthCommand(argv: readonly string[]): AuthCommand {
 
   switch (command) {
     case "login":
-      return parseLoginCommand(rest);
+      return parseLoginCommand(rest, env);
     case "logout":
       assertNoArgs(rest, "logout");
       return { name: "logout" };
     case "status":
-      assertNoArgs(rest, "status");
-      return { name: "status" };
+      return parseStatusCommand(rest, env);
     default:
       throw new Error(`Unknown free auth command: ${command}`);
   }
 }
 
 async function main(argv: readonly string[]): Promise<void> {
-  const command = parseFreeAuthCommand(argv);
+  const command = parseFreeAuthCommand(argv, process.env);
   switch (command.name) {
     case "help":
       printHelp();
@@ -59,15 +62,19 @@ async function main(argv: readonly string[]): Promise<void> {
       await logout();
       return;
     case "status":
-      await status();
+      await status(command);
       return;
   }
 }
 
-function parseLoginCommand(argv: readonly string[]): AuthCommand {
+function parseLoginCommand(
+  argv: readonly string[],
+  env: Record<string, string | undefined>,
+): AuthCommand {
   let ensureHost = true;
   let force = false;
-  let relayUrl = ACP_REMOTE_DEFAULT_RELAY_URL;
+  let relayEnvironment: string | undefined;
+  let relayUrl: string | undefined;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     switch (arg) {
@@ -82,6 +89,10 @@ function parseLoginCommand(argv: readonly string[]): AuthCommand {
         relayUrl = readArgValue(argv, index, arg);
         index += 1;
         break;
+      case "--relay-env":
+        relayEnvironment = readArgValue(argv, index, arg);
+        index += 1;
+        break;
       case "--help":
       case "-h":
         return { name: "help" };
@@ -89,7 +100,51 @@ function parseLoginCommand(argv: readonly string[]): AuthCommand {
         throw new Error(`Unknown free auth login option: ${arg}`);
     }
   }
-  return { ensureHost, force, name: "login", relayUrl };
+  return {
+    ensureHost,
+    force,
+    name: "login",
+    relayUrl: resolveFreeRelayUrl({
+      env,
+      explicitRelayEnvironment: relayEnvironment,
+      explicitRelayUrl: relayUrl,
+      envRelayEnvironmentName: "FREE_RELAY_ENV",
+      envRelayUrlName: "FREE_RELAY_URL",
+    }),
+  };
+}
+
+function parseStatusCommand(
+  argv: readonly string[],
+  env: Record<string, string | undefined>,
+): AuthCommand {
+  let relayEnvironment: string | undefined;
+  let relayUrl: string | undefined;
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    switch (arg) {
+      case "--relay-url":
+        relayUrl = readArgValue(argv, index, arg);
+        index += 1;
+        break;
+      case "--relay-env":
+        relayEnvironment = readArgValue(argv, index, arg);
+        index += 1;
+        break;
+      default:
+        throw new Error(`Unknown free auth status option: ${arg}`);
+    }
+  }
+  return {
+    name: "status",
+    relayUrl: resolveFreeRelayUrl({
+      env,
+      explicitRelayEnvironment: relayEnvironment,
+      explicitRelayUrl: relayUrl,
+      envRelayEnvironmentName: "FREE_RELAY_ENV",
+      envRelayUrlName: "FREE_RELAY_URL",
+    }),
+  };
 }
 
 function assertNoArgs(argv: readonly string[], command: string): void {
@@ -281,7 +336,7 @@ async function logout(): Promise<void> {
   process.stdout.write(`Logged out. Removed cached session at ${path}.\n`);
 }
 
-async function status(): Promise<void> {
+async function status(command: Extract<AuthCommand, { name: "status" }>): Promise<void> {
   const cached = await loadCachedSession();
   if (cached) {
     process.stderr.write("Validating cached account session with relay...\n");
@@ -289,7 +344,7 @@ async function status(): Promise<void> {
   const validation = cached
     ? await withWaitingStatus(
         validateRelaySession({
-          relayUrl: ACP_REMOTE_DEFAULT_RELAY_URL,
+          relayUrl: command.relayUrl,
           session: cached,
         }),
         (elapsedSeconds) =>
@@ -333,12 +388,15 @@ function printHelp(): void {
   process.stdout.write(
     [
       "Usage:",
+      "  free auth login [--relay-env online|local] [--force] [--no-host]",
       "  free auth login [--relay-url <ws-url>] [--force] [--no-host]",
-      "  free auth status",
+      "  free auth status [--relay-env online|local]",
+      "  free auth status [--relay-url <ws-url>]",
       "  free auth logout",
       "",
       "Options:",
       `  --relay-url   Relay WebSocket URL (default: ${ACP_REMOTE_DEFAULT_RELAY_URL})`,
+      "  --relay-env   Relay environment name. online is the default, local uses ws://127.0.0.1:8791.",
       "  --force       Ignore any cached account session and open browser OAuth.",
       "  --no-host   Only cache the login session; do not install the default user host.",
       "",

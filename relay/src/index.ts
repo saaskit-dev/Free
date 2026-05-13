@@ -43,10 +43,6 @@ import {
   handleRelayOtlpProxyRequest,
 } from "./log-upload-http.js";
 import {
-  createFreeProductAppPage,
-  isFreeProductAppPath,
-} from "./product-ui.js";
-import {
   AcpRelayBroker,
   type AcpRelayAttachmentForwardInput,
   createRelayAuthorizationPage,
@@ -93,20 +89,24 @@ const MAX_RELAY_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === "/health") {
-      return json({ ok: true });
+    if (request.method === "OPTIONS" && isWorkbenchApiCorsPath(url.pathname)) {
+      return createWorkbenchApiCorsPreflightResponse(request, env);
     }
 
-    if (request.method === "GET" && isFreeProductAppPath(url.pathname)) {
-      return html(createFreeProductAppPage(url.pathname));
+    if (url.pathname === "/health") {
+      return withWorkbenchApiCors(json({ ok: true }), request, env);
     }
 
     if (
-      url.pathname === "/login" ||
-      url.pathname === "/login/callback" ||
-      url.pathname === "/login/confirm"
+      url.pathname === "/api/login/start" ||
+      url.pathname === "/api/login/callback" ||
+      url.pathname === "/api/login/confirm"
     ) {
       return handleGitHubAuthRequest(request, env, url);
+    }
+
+    if (url.pathname === "/logout") {
+      return createLogoutResponse(request, env);
     }
 
     if (url.pathname.startsWith("/control-plane/")) {
@@ -120,7 +120,12 @@ export default {
       url.pathname !== "/api/otel/logs" &&
       url.pathname !== "/api/otel/traces" &&
       url.pathname !== "/api/session" &&
+      url.pathname !== "/api/login/start" &&
+      url.pathname !== "/api/login/callback" &&
+      url.pathname !== "/api/login/confirm" &&
+      !url.pathname.startsWith("/api/login/approvals/") &&
       url.pathname !== "/attachments" &&
+      url.pathname !== "/logout" &&
       url.pathname !== "/host" &&
       !url.pathname.startsWith("/api/hosts/") &&
       url.pathname !== "/authorize"
@@ -129,9 +134,6 @@ export default {
     }
 
     // OAuth and API endpoints that persist data require D1
-    if (url.pathname.startsWith("/login") && !env.ACP_RELAY_DB) {
-      return new Response("GitHub OAuth requires a database (D1).", { status: 503 });
-    }
     if (url.pathname === "/api/logs") {
       return handleRelayLogUploadRequest(
         request,
@@ -151,21 +153,49 @@ export default {
       return new Response("API endpoints require a database (D1).", { status: 503 });
     }
 
+    if (url.pathname.startsWith("/api/login/approvals/")) {
+      if (!env.ACP_RELAY_DB) {
+        return new Response("API endpoints require a database (D1).", { status: 503 });
+      }
+      return handleLoginApprovalApi({
+        db: env.ACP_RELAY_DB,
+        env,
+        request,
+        url,
+      });
+    }
+
     if (url.pathname === "/api/session") {
       const accountSession = await verifyAccountSessionRequest({
         env,
         request,
       });
       if (!accountSession.ok) {
-        return json({ error: accountSession.reason }, {
-          status: accountSession.status,
-        });
+        return withWorkbenchApiCors(
+          json({ error: accountSession.reason }, {
+            status: accountSession.status,
+          }),
+          request,
+          env,
+        );
       }
-      return json({
-        accountId: accountSession.session.accountId,
-        expiresAt: accountSession.session.expiresAt,
-        sessionId: accountSession.session.sessionId,
-      });
+      const githubAccount = await new D1GitHubAccountStore(env.ACP_RELAY_DB as D1Database)
+        .findByAccountId(accountSession.session.accountId);
+      return withWorkbenchApiCors(
+        json({
+          account: {
+            id: accountSession.session.accountId,
+            name: githubAccount?.githubLogin ?? accountSession.session.accountId,
+            provider: githubAccount ? "github" : "unknown",
+          },
+          accountId: accountSession.session.accountId,
+          accountName: githubAccount?.githubLogin ?? accountSession.session.accountId,
+          expiresAt: accountSession.session.expiresAt,
+          sessionId: accountSession.session.sessionId,
+        }),
+        request,
+        env,
+      );
     }
 
     if (url.pathname === "/attachments") {
@@ -211,7 +241,8 @@ export default {
       );
       return env.ACP_RELAY_SHARDS
         .get(shardId)
-        .fetch(withVerifiedAccountSession(request, accountSession.session));
+        .fetch(withVerifiedAccountSession(request, accountSession.session))
+        .then((response) => withWorkbenchApiCors(response, request, env));
     }
 
     if (url.pathname === "/authorize") {
@@ -911,6 +942,40 @@ export class AcpRelayShard {
       request.headers.get("x-acp-verified-client-id") ??
       request.headers.get("x-acp-verified-principal-id") ??
       "";
+    if (request.method === "PATCH") {
+      const body = await readJsonBody(request);
+      if (!body.ok) {
+        return json({ error: body.reason }, { status: 400 });
+      }
+      const record = asRecord(body.value);
+      if (!record) {
+        return json({ error: "Request body must be an object." }, { status: 400 });
+      }
+      const rawName = record.name;
+      if (typeof rawName !== "string") {
+        return json({ error: "name must be a string." }, { status: 400 });
+      }
+      const name = rawName.trim();
+      if (name.length > 80) {
+        return json({ error: "name must be 80 characters or fewer." }, { status: 400 });
+      }
+      const update = await this.broker.setHostDisplayName({
+        accountId,
+        clientId,
+        hostId,
+        name,
+      });
+      if (!update.ok) {
+        return json({ error: update.reason }, { status: update.status });
+      }
+      return json(update.host);
+    }
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      return json({ error: "Method not allowed." }, {
+        headers: { allow: "GET, HEAD, PATCH" },
+        status: 405,
+      });
+    }
     const result = await this.broker.discoverableHosts({
       accountId,
       clientId,
@@ -1109,29 +1174,104 @@ function createAuthorizationSessionFailureResponse(input: {
   url: URL;
 }): Response {
   if (input.failure.status === 401 && input.env.ACP_RELAY_GITHUB_CLIENT_ID) {
-    const loginUrl = new URL("/login", input.request.url);
-    loginUrl.searchParams.set("returnTo", input.request.url);
-    return Response.redirect(loginUrl.toString(), 302);
-  }
-
-  if (input.failure.status === 401 && input.env.ACP_RELAY_LOGIN_URL) {
-    const loginUrl = new URL(input.env.ACP_RELAY_LOGIN_URL);
-    loginUrl.searchParams.set("returnTo", input.request.url);
-    const accountId = resolveRequestedAccountId(input.request, input.url);
-    if (accountId) {
-      loginUrl.searchParams.set("accountId", accountId);
+    const loginUrl = createWorkbenchLoginStartUrl({
+      env: input.env,
+      request: input.request,
+      returnTo: input.request.url,
+    });
+    if (loginUrl) {
+      return Response.redirect(loginUrl.toString(), 302);
     }
-    return Response.redirect(loginUrl.toString(), 302);
   }
 
   return html(
     createRelayAccountSessionRequiredPage({
-      loginUrl: input.env.ACP_RELAY_LOGIN_URL,
       reason: input.failure.reason,
-      requestUrl: input.request.url,
     }),
     { status: input.failure.status },
   );
+}
+
+function createLogoutResponse(request: Request, env: Env): Response {
+  const returnUrl = new URL("/", resolveWorkbenchOrigin({ env, request }) ?? request.url);
+  return new Response(null, {
+    headers: {
+      Location: returnUrl.toString(),
+      "Set-Cookie": createExpiredAccountSessionCookie(request),
+    },
+    status: 302,
+  });
+}
+
+function isWorkbenchApiCorsPath(pathname: string): boolean {
+  return (
+    pathname === "/health" ||
+    pathname === "/api/session" ||
+    pathname === "/api/login/start" ||
+    pathname === "/api/login/callback" ||
+    pathname === "/api/login/confirm" ||
+    pathname.startsWith("/api/login/approvals/") ||
+    pathname === "/api/hosts" ||
+    pathname.startsWith("/api/hosts/")
+  );
+}
+
+function createWorkbenchApiCorsPreflightResponse(request: Request, env: Env): Response {
+  return new Response(null, {
+    headers: createWorkbenchApiCorsHeaders(request, env, {
+      "Access-Control-Allow-Headers": "authorization, content-type, x-acp-account-id",
+      "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS, PATCH, POST",
+      "Access-Control-Max-Age": "600",
+    }),
+    status: 204,
+  });
+}
+
+function withWorkbenchApiCors(
+  response: Response,
+  request: Request,
+  env: Env,
+): Response {
+  const headers = new Headers(response.headers);
+  createWorkbenchApiCorsHeaders(request, env).forEach((value, key) => {
+    headers.set(key, value);
+  });
+  return new Response(response.body, {
+    headers,
+    status: response.status,
+    statusText: response.statusText,
+  });
+}
+
+function createWorkbenchApiCorsHeaders(
+  request: Request,
+  env: Env,
+  extraHeaders: HeadersInit = {},
+): Headers {
+  const headers = new Headers(extraHeaders);
+  const origin = request.headers.get("origin");
+  if (origin && isAllowedWorkbenchOrigin(origin, env)) {
+    headers.set("Access-Control-Allow-Credentials", "true");
+    headers.set("Access-Control-Allow-Origin", origin);
+    headers.append("Vary", "Origin");
+  }
+  return headers;
+}
+
+function isAllowedWorkbenchOrigin(origin: string, env: Env): boolean {
+  try {
+    const url = new URL(origin);
+    if (
+      (url.hostname === "127.0.0.1" || url.hostname === "localhost") &&
+      url.port === "8790"
+    ) {
+      return true;
+    }
+    return env.ACP_RELAY_WORKBENCH_ORIGIN !== undefined &&
+      normalizeOrigin(env.ACP_RELAY_WORKBENCH_ORIGIN) === url.origin;
+  } catch {
+    return false;
+  }
 }
 
 function withVerifiedConnectionProof(
@@ -1165,19 +1305,20 @@ async function sha256Hex(data: Uint8Array): Promise<string> {
 }
 
 function createRelayAccountSessionRequiredPage(input: {
-  loginUrl?: string;
+  body?: string;
+  heading?: string;
   reason: string;
-  requestUrl: string;
+  title?: string;
 }): string {
-  const loginButton = input.loginUrl
-    ? `<a class="primary" href="${escapeHtml(createLoginUrl(input.loginUrl, input.requestUrl))}">Sign in with GitHub</a>`
-    : "";
+  const title = input.title ?? "Free Authorization";
+  const heading = input.heading ?? "Authorize Free";
+  const body = input.body ?? "Sign in to continue this remote ACP authorization.";
   return `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Free Authorization</title>
+    <title>${escapeHtml(title)}</title>
     <style>
       :root {
         color-scheme: light;
@@ -1279,10 +1420,9 @@ function createRelayAccountSessionRequiredPage(input: {
       </header>
       <main>
         <section class="panel" aria-labelledby="title">
-          <h1 id="title">Authorize Free</h1>
-          <p>Sign in to continue this remote ACP authorization.</p>
+          <h1 id="title">${escapeHtml(heading)}</h1>
+          <p>${escapeHtml(body)}</p>
           <p class="reason">${escapeHtml(input.reason)}</p>
-          ${loginButton ? `<div class="actions">${loginButton}</div>` : ""}
         </section>
       </main>
     </div>
@@ -1290,10 +1430,73 @@ function createRelayAccountSessionRequiredPage(input: {
 </html>`;
 }
 
-function createLoginUrl(loginUrl: string, returnTo: string): string {
-  const url = new URL(loginUrl);
-  url.searchParams.set("returnTo", returnTo);
-  return url.toString();
+function createRelayLoginUnavailablePage(input: {
+  message: string;
+}): string {
+  const iconUrl =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAAzElEQVR4nO2ZwQnCQBBFJ2IPiRArsJQcrNWDpViBB9OF3kKQgHx3wtuF/04JZNl5zMzuQLqhH9/RMAc6gFIsQGMBGgvQHNUFr/m5RxwLp+EsfS9lYO/g/9mj+RKyAI0FaKoTUI9R+R7I2DST6jKgYgGalB5Qr//MnkEykDlTNV9CFqCxAA0ikHmMehaisQCNBWhSTqFSputjeb7fLtJaPAPr4Lfef4ELlGKBUr5rXu2BKppYDXqNlIGtmYecgyIiOv/ohrEAjQVomhf4AFQfHXrFoCgAAAAAAElFTkSuQmCC";
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Free Login</title>
+    <link rel="icon" href="${iconUrl}">
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: oklch(0.965 0.01 280);
+        --surface: oklch(0.99 0.006 280);
+        --ink: oklch(0.205 0.018 280);
+        --muted: oklch(0.48 0.018 280);
+        --line: oklch(0.84 0.016 280);
+        --accent: oklch(0.58 0.21 285);
+        --accent-2: oklch(0.72 0.18 38);
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: var(--bg);
+        color: var(--ink);
+        font: 14px/1.45 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .login-frame {
+        width: min(520px, calc(100vw - 32px));
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        padding: 28px;
+      }
+      .brand-mark {
+        width: 32px;
+        height: 32px;
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      .brand-mark img { display: block; width: 100%; height: 100%; }
+      h1 {
+        margin: 18px 0 8px;
+        font-size: 24px;
+        line-height: 1.12;
+        letter-spacing: 0;
+      }
+      p {
+        margin: 0;
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <main class="login-frame" aria-labelledby="login-title">
+      <div class="brand-mark"><img src="${iconUrl}" alt=""></div>
+      <h1 id="login-title">Login is unavailable</h1>
+      <p>${escapeHtml(input.message)}</p>
+    </main>
+  </body>
+</html>`;
 }
 
 const SESSION_COOKIE_NAME = "acp_relay_session";
@@ -1319,7 +1522,9 @@ async function handleGitHubAuthRequest(
   const clientId = env.ACP_RELAY_GITHUB_CLIENT_ID;
   const clientSecret = env.ACP_RELAY_GITHUB_CLIENT_SECRET;
   if (!clientId || !clientSecret) {
-    return new Response("GitHub OAuth is not configured.", { status: 503 });
+    return html(createRelayLoginUnavailablePage({
+      message: "GitHub sign in is not configured for this relay.",
+    }), { status: 503 });
   }
   const signingKey = readAccountSessionSigningKey(env);
   if (!signingKey.ok) {
@@ -1332,103 +1537,340 @@ async function handleGitHubAuthRequest(
     });
   }
 
-  if (url.pathname === "/login/confirm") {
+  if (url.pathname === "/api/login/confirm") {
     return handleLoginConfirmationRequest({
       db,
+      env,
       request,
       signingKey: signingKey.key,
     });
   }
 
-  if (url.pathname === "/login/callback") {
-    const code = url.searchParams.get("code");
-    const state = url.searchParams.get("state");
-    if (!code || !state) {
-      return new Response("Missing code or state parameter.", { status: 400 });
-    }
-
-    const returnTo = await getOAuthStateReturnTo(state, env);
-    if (returnTo === undefined) {
-      return new Response("Invalid or expired OAuth state.", { status: 400 });
-    }
-
-    let user;
-    try {
-      const accessToken = await exchangeGitHubCodeForAccessToken(
-        { clientId, clientSecret },
-        code,
-      );
-      user = await fetchGitHubUser(accessToken);
-    } catch (error) {
-      return new Response(
-        error instanceof Error ? error.message : "GitHub OAuth failed.",
-        { status: 502 },
+  if (url.pathname === "/api/login/start") {
+    if (request.method !== "GET") {
+      return withWorkbenchApiCors(
+        json({ error: "Method not allowed." }, {
+          headers: { allow: "GET" },
+          status: 405,
+        }),
+        request,
+        env,
       );
     }
-
-    const githubStore = new D1GitHubAccountStore(db);
-    const githubAccount = await resolveOrCreateGithubAccount(githubStore, user);
-    const accountId = githubAccount.accountId;
-    await new AcpRelayD1ControlPlaneStore(db).upsertAccount({ accountId });
-    const principal = resolveLoginPrincipal(returnTo);
-    const approval: LoginApproval = {
-      accountId,
-      approvalId: crypto.randomUUID(),
-      createdAt: Date.now(),
-      githubLogin: githubAccount.githubLogin,
-      principalId: principal.principalId,
-      principalType: principal.principalType,
-      ...(principal.publicKey ? { publicKey: principal.publicKey } : {}),
-      returnTo,
-    };
-    await openLoginApprovalStore(db).put(approval);
-    return html(createLoginApprovalPage({
-      accountId,
-      approvalId: approval.approvalId,
-      githubLogin: githubAccount.githubLogin,
-      principalId: principal.principalId,
-      principalType: principal.principalType,
-      returnTo,
-    }));
+    const returnTo = url.searchParams.get("returnTo") ??
+      resolveDefaultWorkbenchReturnTo(request, env);
+    const redirectUri = url.searchParams.get("redirectUri") ??
+      new URL("/login/callback", resolveDefaultWorkbenchReturnTo(request, env)).toString();
+    const redirectUrl = new URL(redirectUri);
+    if (!isAllowedWorkbenchOrigin(redirectUrl.origin, env)) {
+      return withWorkbenchApiCors(
+        json({ error: "redirectUri must point to the Workbench origin." }, { status: 400 }),
+        request,
+        env,
+      );
+    }
+    const state = crypto.randomUUID();
+    const stateStore = await openOAuthStateStore(env);
+    await stateStore.put(state, returnTo);
+    return withWorkbenchApiCors(
+      json({
+        authorizationUrl: createGitHubAuthorizationUrl(
+          { clientId, clientSecret },
+          state,
+          redirectUrl.origin,
+        ),
+      }, {
+        headers: {
+          "Cache-Control": "no-store",
+        },
+      }),
+      request,
+      env,
+    );
   }
 
-  // GET /login
-  const returnTo = url.searchParams.get("returnTo") ?? "/authorize";
-  const state = crypto.randomUUID();
-  const stateStore = await openOAuthStateStore(env);
-  await stateStore.put(state, returnTo);
+  if (url.pathname === "/api/login/callback") {
+    if (request.method !== "POST") {
+      return withWorkbenchApiCors(
+        json({ error: "Method not allowed." }, {
+          headers: { allow: "POST" },
+          status: 405,
+        }),
+        request,
+        env,
+      );
+    }
+    const parsed = await readJsonBody(request);
+    const record = parsed.ok ? asRecord(parsed.value) : undefined;
+    const code = typeof record?.code === "string" ? record.code : "";
+    const state = typeof record?.state === "string" ? record.state : "";
+    if (!code || !state) {
+      return withWorkbenchApiCors(
+        json({ error: "Missing code or state parameter." }, { status: 400 }),
+        request,
+        env,
+      );
+    }
+    const result = await createLoginApprovalFromGitHubCallback({
+      clientId,
+      clientSecret,
+      code,
+      db,
+      env,
+      request,
+      state,
+    });
+    if (!result.ok) {
+      return withWorkbenchApiCors(
+        json({ error: result.reason }, { status: result.status }),
+        request,
+        env,
+      );
+    }
+    return withWorkbenchApiCors(
+      json({
+        approvalUrl: createWorkbenchLoginApprovalUrl({
+          approvalId: result.approval.approvalId,
+          env,
+          request,
+          returnTo: result.approval.returnTo,
+        })?.toString(),
+      }, {
+        headers: {
+          "Cache-Control": "no-store",
+        },
+      }),
+      request,
+      env,
+    );
+  }
 
-  const githubUrl = createGitHubAuthorizationUrl(
-    { clientId, clientSecret },
-    state,
-    new URL("/login/callback", request.url).origin,
+  return json({ error: "Not found." }, { status: 404 });
+}
+
+async function createLoginApprovalFromGitHubCallback(input: {
+  clientId: string;
+  clientSecret: string;
+  code: string;
+  db: D1Database;
+  env: Env;
+  request: Request;
+  state: string;
+}): Promise<
+  | { ok: true; approval: LoginApproval }
+  | { ok: false; reason: string; status: number }
+> {
+  const returnTo = await getOAuthStateReturnTo(input.state, input.env);
+  if (returnTo === undefined) {
+    return { ok: false, reason: "Invalid or expired OAuth state.", status: 400 };
+  }
+
+  let user;
+  try {
+    const accessToken = await exchangeGitHubCodeForAccessToken(
+      { clientId: input.clientId, clientSecret: input.clientSecret },
+      input.code,
+    );
+    user = await fetchGitHubUser(accessToken);
+  } catch (error) {
+    return {
+      ok: false,
+      reason: error instanceof Error ? error.message : "GitHub OAuth failed.",
+      status: 502,
+    };
+  }
+
+  const githubStore = new D1GitHubAccountStore(input.db);
+  const githubAccount = await resolveOrCreateGithubAccount(githubStore, user);
+  const accountId = githubAccount.accountId;
+  await new AcpRelayD1ControlPlaneStore(input.db).upsertAccount({ accountId });
+  const principal = resolveLoginPrincipal(returnTo);
+  const approval: LoginApproval = {
+    accountId,
+    approvalId: crypto.randomUUID(),
+    createdAt: Date.now(),
+    githubLogin: githubAccount.githubLogin,
+    principalId: principal.principalId,
+    principalType: principal.principalType,
+    ...(principal.publicKey ? { publicKey: principal.publicKey } : {}),
+    returnTo,
+  };
+  await openLoginApprovalStore(input.db).put(approval);
+  return { ok: true, approval };
+}
+
+function createWorkbenchLoginApprovalUrl(input: {
+  approvalId: string;
+  env: Env;
+  request: Request;
+  returnTo: string;
+}): URL | undefined {
+  const workbenchOrigin = resolveWorkbenchOrigin(input);
+  if (!workbenchOrigin) {
+    return undefined;
+  }
+  const approvalUrl = new URL("/login/approve", workbenchOrigin);
+  approvalUrl.searchParams.set("approvalId", input.approvalId);
+  return approvalUrl;
+}
+
+function resolveWorkbenchOrigin(input: {
+  env: Env;
+  request: Request;
+  returnTo?: string;
+}): string | undefined {
+  const requestOrigin = input.request.headers.get("origin");
+  if (requestOrigin && isAllowedWorkbenchOrigin(requestOrigin, input.env)) {
+    return new URL(requestOrigin).origin;
+  }
+
+  const configuredOrigin = readConfiguredWorkbenchOrigin(input.env);
+  if (configuredOrigin) {
+    return configuredOrigin;
+  }
+
+  const relayLocalOrigin = deriveLocalWorkbenchOriginFromRelayRequest(input.request);
+  if (relayLocalOrigin) {
+    return relayLocalOrigin;
+  }
+
+  if (!input.returnTo) {
+    return undefined;
+  }
+  try {
+    const returnUrl = new URL(input.returnTo, input.request.url);
+    if (isAllowedWorkbenchOrigin(returnUrl.origin, input.env)) {
+      return returnUrl.origin;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function createWorkbenchLoginStartUrl(input: {
+  env: Env;
+  request: Request;
+  returnTo: string;
+}): URL | undefined {
+  const workbenchOrigin = resolveWorkbenchOrigin(input);
+  if (!workbenchOrigin) {
+    return undefined;
+  }
+  const loginUrl = new URL("/login/start", workbenchOrigin);
+  loginUrl.searchParams.set("returnTo", input.returnTo);
+  return loginUrl;
+}
+
+function resolveDefaultWorkbenchReturnTo(request: Request, env: Env): string {
+  return resolveWorkbenchOrigin({ env, request }) ?? "http://127.0.0.1:8790/";
+}
+
+function readConfiguredWorkbenchOrigin(env: Env): string | undefined {
+  if (!env.ACP_RELAY_WORKBENCH_ORIGIN) {
+    return undefined;
+  }
+  return normalizeOrigin(env.ACP_RELAY_WORKBENCH_ORIGIN);
+}
+
+function deriveLocalWorkbenchOriginFromRelayRequest(request: Request): string | undefined {
+  try {
+    const url = new URL(request.url);
+    if (
+      (url.hostname === "127.0.0.1" || url.hostname === "localhost") &&
+      url.port === "8791"
+    ) {
+      return "http://127.0.0.1:8790";
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function normalizeOrigin(value: string): string {
+  return new URL(value).origin;
+}
+
+async function handleLoginApprovalApi(input: {
+  db: D1Database;
+  env: Env;
+  request: Request;
+  url: URL;
+}): Promise<Response> {
+  if (input.request.method !== "GET") {
+    return withWorkbenchApiCors(
+      json({ error: "Method not allowed." }, {
+        headers: { allow: "GET" },
+        status: 405,
+      }),
+      input.request,
+      input.env,
+    );
+  }
+  const match = input.url.pathname.match(/^\/api\/login\/approvals\/([^/]+)$/);
+  const approvalId = match ? decodeURIComponent(match[1]) : "";
+  if (!approvalId) {
+    return withWorkbenchApiCors(
+      json({ error: "Missing approval id." }, { status: 400 }),
+      input.request,
+      input.env,
+    );
+  }
+  const approval = await openLoginApprovalStore(input.db).get(approvalId);
+  if (!approval) {
+    return withWorkbenchApiCors(
+      json({ error: "Login approval is expired or unavailable." }, { status: 404 }),
+      input.request,
+      input.env,
+    );
+  }
+  return withWorkbenchApiCors(
+    json({
+      accountId: approval.accountId,
+      approvalId: approval.approvalId,
+      createdAt: approval.createdAt,
+      githubLogin: approval.githubLogin,
+      principalId: approval.principalId,
+      principalType: approval.principalType,
+      returnTo: approval.returnTo,
+    }, {
+      headers: {
+        "Cache-Control": "no-store",
+      },
+    }),
+    input.request,
+    input.env,
   );
-  return Response.redirect(githubUrl, 302);
 }
 
 async function handleLoginConfirmationRequest(input: {
   db: D1Database;
+  env: Env;
   request: Request;
   signingKey: AcpRemoteAccountSessionSigningKey;
 }): Promise<Response> {
   if (input.request.method !== "POST") {
-    return html(createLoginApprovalUnavailablePage({
+    const response = html(createLoginApprovalUnavailablePage({
       message: "Open the login link from Free again to approve this device.",
     }), { status: 405 });
+    return withWorkbenchApiCors(response, input.request, input.env);
   }
 
   const approvalId = await readLoginApprovalId(input.request);
   if (!approvalId) {
-    return html(createLoginApprovalUnavailablePage({
+    const response = html(createLoginApprovalUnavailablePage({
       message: "The login confirmation request was missing its approval id.",
     }), { status: 400 });
+    return withWorkbenchApiCors(response, input.request, input.env);
   }
 
   const approval = await openLoginApprovalStore(input.db).consume(approvalId);
   if (!approval || Date.now() - approval.createdAt > LOGIN_APPROVAL_TTL_MS) {
-    return html(createLoginApprovalUnavailablePage({
+    const response = html(createLoginApprovalUnavailablePage({
       message: "This login approval expired. Run `free auth login --force` to start again.",
     }), { status: 410 });
+    return withWorkbenchApiCors(response, input.request, input.env);
   }
 
   const principalPublicKey =
@@ -1446,6 +1888,7 @@ async function handleLoginConfirmationRequest(input: {
     return createAccountSessionJsonResponse({
       accountId: approval.accountId,
       accountSession,
+      env: input.env,
       request: input.request,
       returnTo: approval.returnTo,
     });
@@ -1489,7 +1932,7 @@ function createAccountSessionRedirectResponse(input: {
     status: 302,
     headers: {
       Location: redirectUrl.toString(),
-      "Set-Cookie": createAccountSessionCookie(input.accountSession),
+      "Set-Cookie": createAccountSessionCookie(input.request, input.accountSession),
     },
   });
 }
@@ -1497,18 +1940,23 @@ function createAccountSessionRedirectResponse(input: {
 function createAccountSessionJsonResponse(input: {
   accountId: string;
   accountSession: string;
+  env: Env;
   request: Request;
   returnTo: string;
 }): Response {
-  return json({
-    accountId: input.accountId,
-    callbackUrl: buildAccountSessionReturnUrl(input).toString(),
-  }, {
-    headers: {
-      "Cache-Control": "no-store",
-      "Set-Cookie": createAccountSessionCookie(input.accountSession),
-    },
-  });
+  return withWorkbenchApiCors(
+    json({
+      accountId: input.accountId,
+      callbackUrl: buildAccountSessionReturnUrl(input).toString(),
+    }, {
+      headers: {
+        "Cache-Control": "no-store",
+        "Set-Cookie": createAccountSessionCookie(input.request, input.accountSession),
+      },
+    }),
+    input.request,
+    input.env,
+  );
 }
 
 function buildAccountSessionReturnUrl(input: {
@@ -1528,8 +1976,17 @@ function buildAccountSessionReturnUrl(input: {
   return redirectUrl;
 }
 
-function createAccountSessionCookie(accountSession: string): string {
-  return `${SESSION_COOKIE_NAME}=${accountSession}; Path=/; Max-Age=${SESSION_MAX_AGE_SECONDS}; HttpOnly; SameSite=Lax; Secure`;
+function createAccountSessionCookie(request: Request, accountSession: string): string {
+  return `${SESSION_COOKIE_NAME}=${accountSession}; Path=/; Max-Age=${SESSION_MAX_AGE_SECONDS}; HttpOnly; SameSite=Lax${shouldUseSecureCookie(request) ? "; Secure" : ""}`;
+}
+
+function createExpiredAccountSessionCookie(request: Request): string {
+  return `${SESSION_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax${shouldUseSecureCookie(request) ? "; Secure" : ""}`;
+}
+
+function shouldUseSecureCookie(request: Request): boolean {
+  const url = new URL(request.url);
+  return url.protocol === "https:";
 }
 
 function wantsJsonLoginConfirmation(request: Request): boolean {
@@ -1537,255 +1994,6 @@ function wantsJsonLoginConfirmation(request: Request): boolean {
     .split(",")
     .map((part) => part.trim().toLowerCase())
     .some((part) => part === "application/json" || part.startsWith("application/json;"));
-}
-
-function createLoginApprovalPage(input: {
-  accountId: string;
-  approvalId: string;
-  githubLogin: string;
-  principalId: string;
-  principalType: "client" | "host";
-  returnTo: string;
-}): string {
-  const target = summarizeLoginTarget(input.returnTo);
-  return `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Authorize Free</title>
-    <style>
-      :root {
-        color-scheme: light;
-        --bg: #f7f8f5;
-        --surface: #ffffff;
-        --ink: #18211d;
-        --muted: #5d6862;
-        --line: #d8ddd7;
-        --accent: #176b56;
-        --accent-ink: #f4fbf7;
-      }
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        min-height: 100vh;
-        background: var(--bg);
-        color: var(--ink);
-        font: 15px/1.5 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      }
-      .shell {
-        min-height: 100vh;
-        display: grid;
-        grid-template-rows: auto 1fr;
-      }
-      header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 16px;
-        padding: 18px clamp(20px, 5vw, 52px);
-        border-bottom: 1px solid var(--line);
-        background: color-mix(in oklch, var(--surface) 86%, var(--bg));
-      }
-      .brand { font-weight: 720; letter-spacing: 0; }
-      .status {
-        border: 1px solid color-mix(in oklch, var(--accent) 34%, var(--line));
-        border-radius: 999px;
-        color: var(--accent);
-        padding: 5px 10px;
-        font-size: 0.86rem;
-        white-space: nowrap;
-      }
-      main {
-        display: grid;
-        place-items: center;
-        padding: 34px clamp(20px, 5vw, 52px);
-      }
-      .panel {
-        width: min(680px, 100%);
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        background: var(--surface);
-        padding: clamp(24px, 5vw, 40px);
-      }
-      h1 {
-        margin: 0 0 10px;
-        font-size: clamp(1.55rem, 4vw, 2.25rem);
-        line-height: 1.08;
-        letter-spacing: 0;
-      }
-      p { margin: 0; color: var(--muted); }
-      dl {
-        display: grid;
-        gap: 10px;
-        margin: 24px 0;
-        padding: 0;
-      }
-      .row {
-        display: grid;
-        grid-template-columns: 132px minmax(0, 1fr);
-        gap: 14px;
-        border-top: 1px solid var(--line);
-        padding-top: 10px;
-      }
-      dt { color: var(--muted); font-weight: 650; }
-      dd {
-        margin: 0;
-        color: var(--ink);
-        overflow-wrap: anywhere;
-      }
-      .actions {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 12px;
-        align-items: center;
-      }
-      button, .secondary {
-        min-height: 42px;
-        border-radius: 7px;
-        padding: 0 16px;
-        font: inherit;
-      }
-      button {
-        border: 0;
-        background: var(--accent);
-        color: var(--accent-ink);
-        font-weight: 680;
-        cursor: pointer;
-      }
-      button:disabled {
-        cursor: wait;
-        opacity: 0.72;
-      }
-      .secondary {
-        display: inline-flex;
-        align-items: center;
-        border: 1px solid var(--line);
-        color: var(--muted);
-        text-decoration: none;
-      }
-      .submit-state {
-        color: var(--muted);
-        font-size: 0.88rem;
-        margin-top: 12px;
-        min-height: 1.4em;
-      }
-      @media (max-width: 580px) {
-        .row { grid-template-columns: 1fr; gap: 3px; }
-      }
-    </style>
-  </head>
-  <body>
-    <div class="shell">
-      <header>
-        <div class="brand">Free</div>
-        <div class="status">Confirmation required</div>
-      </header>
-      <main>
-        <section class="panel" aria-labelledby="title">
-          <h1 id="title">Authorize Free</h1>
-          <p>Confirm this sign in before Free creates an account session for this device.</p>
-          <dl>
-            <div class="row">
-              <dt>GitHub account</dt>
-              <dd>${escapeHtml(input.githubLogin)}</dd>
-            </div>
-            <div class="row">
-              <dt>Account</dt>
-              <dd>${escapeHtml(input.accountId)}</dd>
-            </div>
-            <div class="row">
-              <dt>Device</dt>
-              <dd>${escapeHtml(input.principalType)} ${escapeHtml(input.principalId)}</dd>
-            </div>
-            <div class="row">
-              <dt>Return target</dt>
-              <dd>${escapeHtml(target)}</dd>
-            </div>
-          </dl>
-          <form method="post" action="/login/confirm" id="approvalForm">
-            <input type="hidden" name="approvalId" value="${escapeHtml(input.approvalId)}">
-            <div class="actions">
-              <button type="submit" id="approvalButton">Authorize this device</button>
-              <a class="secondary" href="about:blank" onclick="window.close(); return false;">Cancel</a>
-            </div>
-            <p class="submit-state" id="submitState" aria-live="polite"></p>
-          </form>
-        </section>
-      </main>
-    </div>
-    <script>
-      (function() {
-        var form = document.getElementById("approvalForm");
-        var button = document.getElementById("approvalButton");
-        var state = document.getElementById("submitState");
-        if (!form || !button || !state) return;
-        var completed = false;
-        var fallbackTimer = 0;
-        function tryClose() {
-          try { window.open("", "_self"); } catch (_) {}
-          try { window.close(); } catch (_) {}
-        }
-        function finish() {
-          if (completed) return;
-          completed = true;
-          if (fallbackTimer) window.clearTimeout(fallbackTimer);
-          button.textContent = "Authorized";
-          state.textContent = "Free is connected. This tab will close.";
-          window.setTimeout(tryClose, 300);
-          window.setTimeout(tryClose, 1000);
-          window.setTimeout(function() {
-            state.textContent = "Free is connected. This tab can be closed.";
-          }, 2200);
-        }
-        window.addEventListener("message", function(event) {
-          if (event && event.data && event.data.type === "free:login-complete") {
-            finish();
-          }
-        });
-        form.addEventListener("submit", function(event) {
-          event.preventDefault();
-          if (completed || button.disabled) return;
-          button.disabled = true;
-          button.textContent = "Authorizing...";
-          state.textContent = "Waiting for Free to finish sign in.";
-          fetch(form.action, {
-            method: "POST",
-            body: new FormData(form),
-            credentials: "same-origin",
-            headers: { "Accept": "application/json" }
-          }).then(function(response) {
-            if (!response.ok) throw new Error("Login confirmation failed.");
-            return response.json();
-          }).then(function(body) {
-            if (!body || typeof body.callbackUrl !== "string") {
-              throw new Error("Login confirmation did not return a callback URL.");
-            }
-            var frame = document.createElement("iframe");
-            frame.setAttribute("aria-hidden", "true");
-            frame.style.position = "fixed";
-            frame.style.width = "1px";
-            frame.style.height = "1px";
-            frame.style.opacity = "0";
-            frame.style.pointerEvents = "none";
-            frame.style.border = "0";
-            frame.src = body.callbackUrl;
-            document.body.appendChild(frame);
-            fallbackTimer = window.setTimeout(function() {
-              if (!completed) window.location.assign(body.callbackUrl);
-            }, 8000);
-          }).catch(function(error) {
-            button.disabled = false;
-            button.textContent = "Authorize this device";
-            state.textContent = error && error.message
-              ? error.message
-              : "Login confirmation failed. Try again.";
-          });
-        });
-      })();
-    </script>
-  </body>
-</html>`;
 }
 
 function createLoginApprovalUnavailablePage(input: { message: string }): string {
@@ -1824,15 +2032,6 @@ function createLoginApprovalUnavailablePage(input: { message: string }): string 
     </section>
   </body>
 </html>`;
-}
-
-function summarizeLoginTarget(returnTo: string): string {
-  try {
-    const url = new URL(returnTo);
-    return `${url.protocol}//${url.host}${url.pathname}`;
-  } catch {
-    return returnTo;
-  }
 }
 
 function shouldReturnAccountSessionInQuery(url: URL): boolean {
@@ -1936,6 +2135,7 @@ class D1OAuthStateStore implements OAuthStateStore {
 }
 
 interface LoginApprovalStore {
+  get(approvalId: string): Promise<LoginApproval | undefined>;
   put(approval: LoginApproval): Promise<void>;
   consume(approvalId: string): Promise<LoginApproval | undefined>;
 }
@@ -1946,6 +2146,19 @@ function openLoginApprovalStore(db: D1Database): LoginApprovalStore {
 
 class D1LoginApprovalStore implements LoginApprovalStore {
   constructor(private readonly db: D1Database) {}
+
+  async get(approvalId: string): Promise<LoginApproval | undefined> {
+    const row = await this.db
+      .prepare(
+        `SELECT approval_id, account_id, github_login, principal_id,
+                principal_type, principal_public_key, return_to, created_at
+         FROM acp_login_approvals
+         WHERE approval_id = ? AND created_at > ?`,
+      )
+      .bind(approvalId, Date.now() - LOGIN_APPROVAL_TTL_MS)
+      .first<Record<string, unknown>>();
+    return row ? readLoginApprovalRow(row) : undefined;
+  }
 
   async put(approval: LoginApproval): Promise<void> {
     await this.db
@@ -1975,38 +2188,31 @@ class D1LoginApprovalStore implements LoginApprovalStore {
   }
 
   async consume(approvalId: string): Promise<LoginApproval | undefined> {
-    const row = await this.db
-      .prepare(
-        `SELECT approval_id, account_id, github_login, principal_id,
-                principal_type, principal_public_key, return_to, created_at
-         FROM acp_login_approvals
-         WHERE approval_id = ? AND created_at > ?`,
-      )
-      .bind(approvalId, Date.now() - LOGIN_APPROVAL_TTL_MS)
-      .first<Record<string, unknown>>();
+    const approval = await this.get(approvalId);
     await this.db
       .prepare("DELETE FROM acp_login_approvals WHERE approval_id = ?")
       .bind(approvalId)
       .run();
-    if (!row) {
-      return undefined;
-    }
-    const principalType = row.principal_type === "host" ? "host" : "client";
-    const publicKey = typeof row.principal_public_key === "string" &&
-      row.principal_public_key.trim()
-      ? row.principal_public_key
-      : undefined;
-    return {
-      accountId: String(row.account_id),
-      approvalId: String(row.approval_id),
-      createdAt: Number(row.created_at),
-      githubLogin: String(row.github_login),
-      principalId: String(row.principal_id),
-      principalType,
-      ...(publicKey ? { publicKey } : {}),
-      returnTo: String(row.return_to),
-    };
+    return approval;
   }
+}
+
+function readLoginApprovalRow(row: Record<string, unknown>): LoginApproval {
+  const principalType = row.principal_type === "host" ? "host" : "client";
+  const publicKey = typeof row.principal_public_key === "string" &&
+    row.principal_public_key.trim()
+    ? row.principal_public_key
+    : undefined;
+  return {
+    accountId: String(row.account_id),
+    approvalId: String(row.approval_id),
+    createdAt: Number(row.created_at),
+    githubLogin: String(row.github_login),
+    principalId: String(row.principal_id),
+    principalType,
+    ...(publicKey ? { publicKey } : {}),
+    returnTo: String(row.return_to),
+  };
 }
 
 async function verifyAccountSessionRequest(input: {

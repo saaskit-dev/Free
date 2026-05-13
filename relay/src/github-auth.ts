@@ -16,6 +16,7 @@ export type GitHubAccount = {
 };
 
 export type GitHubAccountStore = {
+  findByAccountId(accountId: string): Promise<GitHubAccount | undefined>;
   findByGithubId(githubId: number): Promise<GitHubAccount | undefined>;
   upsert(account: GitHubAccount): Promise<void>;
 };
@@ -109,20 +110,20 @@ async function resolveOrCreateAccount(
 export class D1GitHubAccountStore implements GitHubAccountStore {
   constructor(private readonly db: D1Database) {}
 
+  async findByAccountId(accountId: string): Promise<GitHubAccount | undefined> {
+    const row = await this.db
+      .prepare("SELECT * FROM acp_github_accounts WHERE account_id = ?")
+      .bind(accountId)
+      .first<Record<string, unknown>>();
+    return row ? readGitHubAccountRow(row) : undefined;
+  }
+
   async findByGithubId(githubId: number): Promise<GitHubAccount | undefined> {
     const row = await this.db
       .prepare("SELECT * FROM acp_github_accounts WHERE github_id = ?")
       .bind(githubId)
       .first<Record<string, unknown>>();
-    if (!row) {
-      return undefined;
-    }
-    return {
-      accountId: row.account_id as string,
-      createdAt: row.created_at as number,
-      githubId: row.github_id as number,
-      githubLogin: row.github_login as string,
-    };
+    return row ? readGitHubAccountRow(row) : undefined;
   }
 
   async upsert(account: GitHubAccount): Promise<void> {
@@ -150,13 +151,28 @@ export class D1GitHubAccountStore implements GitHubAccountStore {
 }
 
 export class MemoryGitHubAccountStore implements GitHubAccountStore {
+  private readonly byAccountId = new Map<string, GitHubAccount>();
   private readonly byGithubId = new Map<number, GitHubAccount>();
+
+  async findByAccountId(accountId: string): Promise<GitHubAccount | undefined> {
+    return this.byAccountId.get(accountId);
+  }
 
   async findByGithubId(githubId: number): Promise<GitHubAccount | undefined> {
     return this.byGithubId.get(githubId);
   }
 
   async upsert(account: GitHubAccount): Promise<void> {
+    this.byAccountId.set(account.accountId, account);
     this.byGithubId.set(account.githubId, account);
   }
+}
+
+function readGitHubAccountRow(row: Record<string, unknown>): GitHubAccount {
+  return {
+    accountId: row.account_id as string,
+    createdAt: row.created_at as number,
+    githubId: row.github_id as number,
+    githubLogin: row.github_login as string,
+  };
 }

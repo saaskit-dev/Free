@@ -50,6 +50,21 @@ describe("Free bridge config", () => {
     });
   });
 
+  it("parses local relay environment for generated configs", () => {
+    expect(parseFreeBridgeConfigArgs(["--relay-env", "local"])).toEqual({
+      args: ["bridge", "run"],
+      command: undefined,
+      format: "generic",
+      relayUrl: "ws://127.0.0.1:8791",
+    });
+    expect(parseFreeBridgeConfigArgs(["--relay-env", "online"])).toEqual({
+      args: ["bridge", "run"],
+      command: undefined,
+      format: "generic",
+      relayUrl: undefined,
+    });
+  });
+
   it("creates Zed custom agent config", () => {
     expect(
       createFreeBridgeZedConfig({
@@ -101,12 +116,18 @@ describe("Free bridge config", () => {
     ).toEqual({ relayUrl: "wss://relay.arg.example.com" });
     expect(
       parseFreeBridgeRunArgs({
+        argv: ["--relay-env", "local"],
+        env: { FREE_RELAY_URL: "wss://relay.env.example.com" },
+      }),
+    ).toEqual({ relayUrl: "ws://127.0.0.1:8791" });
+    expect(
+      parseFreeBridgeRunArgs({
         argv: [],
         env: { FREE_RELAY_URL: "wss://relay.env.example.com" },
       }),
     ).toEqual({ relayUrl: "wss://relay.env.example.com" });
     expect(parseFreeBridgeRunArgs({ argv: [], env: {} })).toEqual({
-      relayUrl: "wss://relay.saaskit.app",
+      relayUrl: "wss://free-relay.saaskit.app",
     });
   });
 
@@ -132,6 +153,14 @@ describe("Free bridge config", () => {
     expect(() => parseFreeBridgeConfigArgs(["--relay-url"])).toThrow(
       "Missing value for --relay-url.",
     );
+    expect(() =>
+      parseFreeBridgeConfigArgs([
+        "--relay-url",
+        "wss://relay.example.com",
+        "--relay-env",
+        "local",
+      ]),
+    ).toThrow("Use either --relay-url or --relay-env, not both.");
     expect(() => parseFreeBridgeRunArgs({ argv: ["--relay-url"] })).toThrow(
       "Missing value for --relay-url.",
     );

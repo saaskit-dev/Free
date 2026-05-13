@@ -507,6 +507,117 @@ describe("AcpRelayBroker", () => {
     });
   });
 
+  it("keeps a custom host name while refreshing runtime metadata", async () => {
+    const broker = new AcpRelayBroker({
+      controlPlaneStore: new AcpRelayInMemoryControlPlaneStore({
+        accounts: [{ accountId: "acct-1" }],
+        clientDevices: [{ accountId: "acct-1", clientId: "client-1" }],
+        grants: [
+          {
+            accountId: "acct-1",
+            clientId: "client-1",
+            hostId: "host-1",
+            policyVersion: 1,
+            scopes: ["acp:connect"],
+          },
+        ],
+        hosts: [
+          {
+            accountId: "acct-1",
+            hostId: "host-1",
+            metadata: {
+              agentTypes: [],
+              displayName: "Studio Mac",
+              machine: "old-hostname",
+              workspaceRoots: [],
+            },
+          },
+        ],
+      }),
+    });
+    const [, relayHostSocket] = createMemoryWebSocketPair();
+    await broker.registerHost({
+      accountId: "acct-1",
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        machine: "dev-hostname",
+        runtimeInstanceId: "runtime-1",
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: relayHostSocket,
+    });
+
+    await expect(
+      broker.discoverableHosts({
+        accountId: "acct-1",
+        clientId: "client-1",
+      }),
+    ).resolves.toEqual({
+      hosts: [
+        {
+          hostId: "host-1",
+          metadata: {
+            agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+            displayName: "Studio Mac",
+            machine: "dev-hostname",
+            runtimeInstanceId: "runtime-1",
+            workspaceRoots: [{ path: "/workspace" }],
+          },
+          online: true,
+        },
+      ],
+      ok: true,
+    });
+  });
+
+  it("updates the custom host display name", async () => {
+    const broker = new AcpRelayBroker({
+      controlPlaneStore: new AcpRelayInMemoryControlPlaneStore({
+        accounts: [{ accountId: "acct-1" }],
+        clientDevices: [{ accountId: "acct-1", clientId: "client-1" }],
+        grants: [
+          {
+            accountId: "acct-1",
+            clientId: "client-1",
+            hostId: "host-1",
+            policyVersion: 1,
+            scopes: ["acp:connect"],
+          },
+        ],
+        hosts: [
+          {
+            accountId: "acct-1",
+            hostId: "host-1",
+            metadata: {
+              agentTypes: [],
+              machine: "dev-hostname",
+              workspaceRoots: [],
+            },
+          },
+        ],
+      }),
+    });
+
+    await expect(
+      broker.setHostDisplayName({
+        accountId: "acct-1",
+        clientId: "client-1",
+        hostId: "host-1",
+        name: "Build Host",
+      }),
+    ).resolves.toMatchObject({
+      host: {
+        hostId: "host-1",
+        metadata: {
+          displayName: "Build Host",
+          machine: "dev-hostname",
+        },
+      },
+      ok: true,
+    });
+  });
+
   it("lets authorization select any host with a matching bridge proof", async () => {
     const authority = await createEd25519KeyPair();
     const client = await createEd25519KeyPair();

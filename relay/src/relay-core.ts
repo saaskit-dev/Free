@@ -435,6 +435,46 @@ function normalizePathForContainment(path: string): string {
     : normalized;
 }
 
+function mergeHostMetadata(
+  stored: HostMetadata | undefined,
+  runtime: HostMetadata | undefined,
+): HostMetadata | undefined {
+  if (!stored && !runtime) {
+    return undefined;
+  }
+  return {
+    agentTypes: runtime?.agentTypes ?? stored?.agentTypes ?? [],
+    ...(stored?.displayName ? { displayName: stored.displayName } : {}),
+    ...(runtime?.displayName ? { displayName: runtime.displayName } : {}),
+    ...(runtime?.machine ?? stored?.machine
+      ? { machine: runtime?.machine ?? stored?.machine }
+      : {}),
+    ...(runtime?.runtimeInstanceId ?? stored?.runtimeInstanceId
+      ? { runtimeInstanceId: runtime?.runtimeInstanceId ?? stored?.runtimeInstanceId }
+      : {}),
+    workspaceRoots: runtime?.workspaceRoots ?? stored?.workspaceRoots ?? [],
+  };
+}
+
+function setDisplayNameOnHostMetadata(
+  metadata: HostMetadata | undefined,
+  name: string,
+): HostMetadata {
+  const trimmed = name.trim();
+  const next: HostMetadata = {
+    agentTypes: metadata?.agentTypes ?? [],
+    ...(metadata?.machine ? { machine: metadata.machine } : {}),
+    ...(metadata?.runtimeInstanceId
+      ? { runtimeInstanceId: metadata.runtimeInstanceId }
+      : {}),
+    workspaceRoots: metadata?.workspaceRoots ?? [],
+  };
+  if (trimmed) {
+    next.displayName = trimmed;
+  }
+  return next;
+}
+
 export class AcpRelayBroker {
   private readonly authWaitMs: number;
   private readonly clientReconnectGraceMs: number;
@@ -503,8 +543,12 @@ export class AcpRelayBroker {
       this.activeHostAccountIds.set(hostId, accountId);
     }
     this.pendingHostReconnects.delete(hostId);
-    if (metadata) {
-      this.activeHostMetadata.set(hostId, metadata);
+    const storedHost = accountId
+      ? await this.controlPlaneStore.getHost({ accountId, hostId })
+      : undefined;
+    const mergedMetadata = mergeHostMetadata(storedHost?.metadata, metadata);
+    if (mergedMetadata) {
+      this.activeHostMetadata.set(hostId, mergedMetadata);
     }
     this.hostHeartbeats.set(hostId, {
       lastPongAt: connectedAt,
@@ -514,7 +558,7 @@ export class AcpRelayBroker {
         accountId,
         connectedAt,
         hostId,
-        metadata,
+        metadata: mergedMetadata,
       });
     }
     previousSocket?.close(1012, "Host connection replaced.");
@@ -1057,11 +1101,72 @@ export class AcpRelayBroker {
           const online = activeHostRouteIds.has(host.hostId);
           return {
             hostId: host.hostId,
-            metadata: this.activeHostMetadata.get(host.hostId) ?? host.metadata,
+            metadata: mergeHostMetadata(
+              host.metadata,
+              this.activeHostMetadata.get(host.hostId),
+            ),
             online,
           };
         })
         .sort((a, b) => a.hostId.localeCompare(b.hostId)),
+      ok: true,
+    };
+  }
+
+  async setHostDisplayName(input: {
+    accountId: string;
+    clientId: string;
+    hostId: string;
+    name: string;
+  }): Promise<
+    | {
+        host: { hostId: string; metadata?: HostMetadata; online?: boolean };
+        ok: true;
+      }
+    | { ok: false; reason: string; status: number }
+  > {
+    const visibleHosts = await this.discoverableHosts({
+      accountId: input.accountId,
+      clientId: input.clientId,
+      hostId: input.hostId,
+    });
+    if (!visibleHosts.ok) {
+      return { ok: false, reason: visibleHosts.reason, status: 410 };
+    }
+    if (visibleHosts.hosts.length === 0) {
+      return { ok: false, reason: "Host not found.", status: 404 };
+    }
+
+    const current = await this.controlPlaneStore.getHost({
+      accountId: input.accountId,
+      hostId: input.hostId,
+    });
+    if (!current) {
+      return { ok: false, reason: "Host not found.", status: 404 };
+    }
+
+    const nextMetadata = setDisplayNameOnHostMetadata(
+      mergeHostMetadata(current.metadata, this.activeHostMetadata.get(input.hostId)),
+      input.name,
+    );
+    await this.controlPlaneStore.upsertHost({
+      ...current,
+      metadata: nextMetadata,
+    });
+    if (this.activeHostMetadata.has(input.hostId) || nextMetadata) {
+      this.activeHostMetadata.set(input.hostId, nextMetadata);
+    }
+
+    const refreshed = await this.discoverableHosts({
+      accountId: input.accountId,
+      clientId: input.clientId,
+      hostId: input.hostId,
+    });
+    return {
+      host: refreshed.ok ? refreshed.hosts[0] ?? { hostId: input.hostId, metadata: nextMetadata } : {
+        hostId: input.hostId,
+        metadata: nextMetadata,
+      },
       ok: true,
     };
   }

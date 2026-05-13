@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { isAbsolute } from "node:path";
 
 import { ACP_REMOTE_DEFAULT_RELAY_URL } from "../defaults.js";
+import { resolveFreeRelayUrl } from "../relay-environment.js";
 
 export type FreeBridgeConfigOptions = {
   args?: readonly string[];
@@ -57,6 +58,7 @@ export function parseFreeBridgeConfigArgs(argv: readonly string[]): {
   let command: string | undefined;
   let format: FreeBridgeConfigFormat = "generic";
   let legacyCommand = false;
+  let relayEnvironment: string | undefined;
   let relayUrl: string | undefined;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -77,6 +79,10 @@ export function parseFreeBridgeConfigArgs(argv: readonly string[]): {
         relayUrl = readArgValue(argv, index, arg);
         index += 1;
         break;
+      case "--relay-env":
+        relayEnvironment = readArgValue(argv, index, arg);
+        index += 1;
+        break;
       case "--format":
         format = readConfigFormat(readArgValue(argv, index, arg));
         index += 1;
@@ -91,11 +97,18 @@ export function parseFreeBridgeConfigArgs(argv: readonly string[]): {
         throw new Error(`Unknown bridge config option: ${arg}`);
     }
   }
+  const resolvedRelayUrl = resolveFreeRelayUrl({
+    env: {},
+    explicitRelayEnvironment: relayEnvironment,
+    explicitRelayUrl: relayUrl,
+  });
   return {
     args: args ?? (legacyCommand ? undefined : ["bridge", "run"]),
     command,
     format,
-    relayUrl,
+    relayUrl: resolvedRelayUrl === ACP_REMOTE_DEFAULT_RELAY_URL
+      ? undefined
+      : resolvedRelayUrl,
   };
 }
 
@@ -106,6 +119,7 @@ export function parseFreeBridgeRunArgs(input: {
   relayUrl: string;
 } {
   const env = input.env ?? process.env;
+  let relayEnvironment: string | undefined;
   let relayUrl: string | undefined;
   for (let index = 0; index < input.argv.length; index += 1) {
     const arg = input.argv[index];
@@ -114,12 +128,22 @@ export function parseFreeBridgeRunArgs(input: {
         relayUrl = readArgValue(input.argv, index, arg);
         index += 1;
         break;
+      case "--relay-env":
+        relayEnvironment = readArgValue(input.argv, index, arg);
+        index += 1;
+        break;
       default:
         throw new Error(`Unknown bridge run option: ${arg}`);
     }
   }
   return {
-    relayUrl: relayUrl ?? env.FREE_RELAY_URL ?? ACP_REMOTE_DEFAULT_RELAY_URL,
+    relayUrl: resolveFreeRelayUrl({
+      env,
+      explicitRelayEnvironment: relayEnvironment,
+      explicitRelayUrl: relayUrl,
+      envRelayEnvironmentName: "FREE_RELAY_ENV",
+      envRelayUrlName: "FREE_RELAY_URL",
+    }),
   };
 }
 

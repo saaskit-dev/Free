@@ -54,7 +54,7 @@ describe("remote host login cache", () => {
     const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
     let loginUrl: string | undefined;
     const statuses: string[] = [];
-    const login = loginViaOAuth("ws://relay.example", {
+    const login = loginViaOAuth("wss://free-relay.saaskit.app", {
       onStatus: (message) => statuses.push(message),
       openBrowser: async (url) => {
         loginUrl = url;
@@ -66,7 +66,10 @@ describe("remote host login cache", () => {
       expect(loginUrl).toBeDefined();
     });
 
-    const returnTo = new URL(loginUrl ?? "").searchParams.get("returnTo");
+    const loginStartUrl = new URL(loginUrl ?? "");
+    expect(loginStartUrl.origin).toBe("https://free.saaskit.app");
+    expect(loginStartUrl.pathname).toBe("/login/start");
+    const returnTo = loginStartUrl.searchParams.get("returnTo");
     expect(returnTo).toBeTruthy();
     const returnToUrl = new URL(returnTo ?? "");
     expect(returnToUrl.hostname).toBe("127.0.0.1");
@@ -117,7 +120,7 @@ describe("remote host login cache", () => {
 
   it("renders a product login failure page when relay callback omits the account session", async () => {
     let loginUrl: string | undefined;
-    const login = loginViaOAuth("ws://relay.example", {
+    const login = loginViaOAuth("wss://free-relay.saaskit.app", {
       openBrowser: async (url) => {
         loginUrl = url;
       },
@@ -131,7 +134,10 @@ describe("remote host login cache", () => {
       expect(loginUrl).toBeDefined();
     });
 
-    const returnTo = new URL(loginUrl ?? "").searchParams.get("returnTo");
+    const loginStartUrl = new URL(loginUrl ?? "");
+    expect(loginStartUrl.origin).toBe("https://free.saaskit.app");
+    expect(loginStartUrl.pathname).toBe("/login/start");
+    const returnTo = loginStartUrl.searchParams.get("returnTo");
     expect(returnTo).toBeTruthy();
     const response = await fetch(`${returnTo}&accountId=acct-2`);
     expect(response.status).toBe(400);

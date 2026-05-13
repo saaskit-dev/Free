@@ -11,6 +11,10 @@ import {
   exportEd25519PublicKey,
   type AcpRemoteAccountSession,
 } from "../protocol/account-session.js";
+import {
+  createFreeWorkbenchLoginStartUrl,
+  resolveFreeWorkbenchOriginForRelayUrl,
+} from "../relay-environment.js";
 
 export type HostSession = {
   accountId: string;
@@ -267,8 +271,18 @@ export async function loginViaOAuth(
       callbackUrl.searchParams.set("accountSessionPublicKey", principalKeyPair.publicKey);
       callbackUrl.searchParams.set("accountSessionReturn", "query");
       const httpRelayUrl = relayUrl.replace(/^ws(s?):\/\//, "http$1://");
-      const loginUrl = new URL("/login", httpRelayUrl);
-      loginUrl.searchParams.set("returnTo", callbackUrl.toString());
+      const workbenchOrigin = resolveFreeWorkbenchOriginForRelayUrl({
+        env: process.env,
+        relayUrl,
+      });
+      if (!workbenchOrigin) {
+        rejectLogin(new Error(`Unable to resolve Workbench origin for relay ${httpRelayUrl}.`));
+        return;
+      }
+      const loginUrl = new URL(createFreeWorkbenchLoginStartUrl({
+        returnTo: callbackUrl.toString(),
+        workbenchOrigin,
+      }));
       const startedAt = Date.now();
       const statusIntervalMs = Math.max(1_000, options.statusIntervalMs ?? 15_000);
       reportStatus(`Local sign-in listener ready: http://127.0.0.1:${port}/`);

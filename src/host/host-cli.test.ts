@@ -4,6 +4,7 @@ import {
   ACP_REMOTE_HOST_ACCOUNT_ID_ENV_VAR,
   ACP_REMOTE_HOST_HOST_ID_ENV_VAR,
   ACP_REMOTE_HOST_IDENTITY_PATH_ENV_VAR,
+  ACP_REMOTE_HOST_RELAY_ENV_ENV_VAR,
   ACP_REMOTE_HOST_RELAY_URL_ENV_VAR,
   parseAcpRemoteHostCliConfig,
 } from "./host-cli.js";
@@ -53,6 +54,38 @@ describe("remote host CLI connector", () => {
     });
   });
 
+  it("parses relay environment from CLI args and environment", () => {
+    expect(
+      parseAcpRemoteHostCliConfig({
+        argv: ["--relay-env", "local"],
+        env: {
+          [ACP_REMOTE_HOST_RELAY_URL_ENV_VAR]: "wss://relay.env.test",
+        },
+      }),
+    ).toMatchObject({
+      relayUrl: "ws://127.0.0.1:8791",
+    });
+    expect(
+      parseAcpRemoteHostCliConfig({
+        argv: [],
+        env: {
+          [ACP_REMOTE_HOST_RELAY_ENV_ENV_VAR]: "local",
+        },
+      }),
+    ).toMatchObject({
+      relayUrl: "ws://127.0.0.1:8791",
+    });
+  });
+
+  it("rejects ambiguous relay URL and environment options", () => {
+    expect(() =>
+      parseAcpRemoteHostCliConfig({
+        argv: ["--relay-url", "wss://relay.test", "--relay-env", "local"],
+        env: {},
+      }),
+    ).toThrow("Use either --relay-url or --relay-env, not both.");
+  });
+
   it("defaults accountId and hostId to undefined", () => {
     expect(
       parseAcpRemoteHostCliConfig({
@@ -76,7 +109,7 @@ describe("remote host CLI connector", () => {
       }),
     ).toMatchObject({
       forceLogin: true,
-      relayUrl: "wss://relay.saaskit.app",
+      relayUrl: "wss://free-relay.saaskit.app",
     });
   });
 
@@ -95,7 +128,7 @@ describe("remote host CLI connector", () => {
         env: {},
       }),
     ).toMatchObject({
-      relayUrl: "wss://relay.saaskit.app",
+      relayUrl: "wss://free-relay.saaskit.app",
     });
   });
 
@@ -106,7 +139,7 @@ describe("remote host CLI connector", () => {
         env: {},
       }),
     ).toMatchObject({
-      relayUrl: "wss://relay.saaskit.app",
+      relayUrl: "wss://free-relay.saaskit.app",
     });
   });
 

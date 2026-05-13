@@ -21,13 +21,73 @@ Session Memory Surface | Workflow Canvas | Context Surface
 ```
 
 Do not add top-level session tabs, a global icon rail, dashboard widgets, or a
-global footer composer. The product should feel operational, calm, dense,
-continuous, and typography-driven.
+global footer composer. The product should feel operational, vivid, dense,
+precise, continuous, and typography-driven.
 
 Free users are not primarily chatting with an assistant. They are managing
 remote agent sessions: checking what needs attention, watching active work,
 reviewing context, approving sensitive actions, continuing a workflow, and
 handing work back and forth with the agent.
+
+## Current Interface Focus
+
+Free's final product surface is its own Session Workbench. The workbench should
+eventually be the primary place where users create sessions, continue agent
+work, approve sensitive operations, interrupt running turns, inspect outputs,
+review changes, and restore durable workflows.
+
+The current product and UI focus is narrower: make the bridge compatibility
+layer excellent, then expose its capabilities through the Web UI. That includes
+host discovery, connection authorization, session selection, runtime permission
+decisions, reconnect and restore state, session memory, logs, diffs, terminal
+context, attachments, and the command surface needed to continue a workflow.
+
+The product frontend stack should prioritize `Expo + React Native + React
+Native Web`; Electron is the preferred desktop container. The React Native Web
+surface should lead product implementation, with React Native mobile kept
+first-class. Worker-rendered HTML is not a product surface. It should remain
+limited to server-side protocol pages that cannot yet be represented by a real
+Workbench API.
+
+External ACP clients remain important compatibility surfaces during this phase.
+They should not define the final information architecture. If a design decision
+works for a stdio bridge client but weakens the Session Workbench model, prefer
+the workbench model and keep the bridge behavior as an adapter concern.
+
+## Current Workbench Surface
+
+The Workbench should expose only surfaces backed by real relay APIs. As of this
+implementation phase, the product navigation is limited to:
+
+- Access: `/api/session`, plus the existing `/login` and `/logout` protocol
+  endpoints.
+- Hosts: `/api/hosts`.
+- Settings: local Workbench preferences and the real `/api/session` account
+  state.
+
+Do not expose pages for authorization queues, session continuation, migration
+state, logs, attachments, or runtime controls until the matching API exists. If
+one of those surfaces becomes necessary, implement the API and tests first, then
+add the UI.
+
+## Responsive Requirement
+
+Bridge Web UI must be designed as a multi-endpoint product from the first
+implementation. Large desktop, small desktop or tablet, and mobile are all
+formal experience targets.
+
+Every bridge page should preserve the same product meaning across sizes:
+
+- Home still explains available bridge resources and next actions
+- Authorization still distinguishes connection authorization from runtime
+  permission
+- Hosts still explains discovery and workspace roots
+- Sessions still explains binding, reconnect, restore, and continuation
+- System still exposes relay, host, API, and attachment diagnostics
+
+On smaller screens, collapse secondary context before removing primary meaning.
+Navigation, status, and primary actions must remain reachable without hover,
+without horizontal scrolling, and without relying on desktop-only layout.
 
 ## Design References
 
@@ -47,11 +107,35 @@ visual skin:
 - consistency: state names, action labels, tabs, and controls keep the same
   meaning across surfaces
 - clarity: labels describe concrete workflow and runtime state
-- deference: chrome stays quiet so session content remains primary
+- deference: chrome stays subordinate so session content remains primary
 - depth: layering supports attention and disclosure, not decoration
 
 Free also borrows operational lessons from Linear, Raycast, Superhuman, Arc,
 and Codex, but it should not copy any of them visually.
+
+## Brand System Inputs
+
+Use the Free app materials from the upstream app directory as the first visual
+asset source:
+
+```text
+https://github.com/saaskit-dev/agentbridge/tree/main/apps/free/app
+```
+
+The verified directory includes `public`, `sources`, `targets`, and `logo.txt`
+entry points. Use those materials for logos, app imagery, reference assets, and
+brand continuity before inventing new visual language.
+
+Use Hugeicons as the default icon library for Web UI controls:
+
+```text
+https://hugeicons.com/
+```
+
+If source assets are insufficient, generate replacement imagery with the image2
+image generator. Prefer transparent-background images for product objects,
+icons, stickers, editorial cutouts, packaging studies, and other composable
+brand assets.
 
 ## Session Memory Surface
 
@@ -285,14 +369,19 @@ choice subdued.
 The default product surface should be:
 
 - light theme by default, with dark theme as a first-class mode
-- graphite-tinted engineering palette in both themes
-- calm
+- graphite-tinted operational neutrals in both themes
+- saturated brand color used deliberately for active states and brand moments
 - dense
-- quiet
 - precise
 - operational
+- playful without becoming childish
+- futuristic without becoming generic sci-fi
+- tactile
+- rhythm-driven
 - typography-driven
-- closer to Cursor and Linear than a web dashboard
+- visually experimental in onboarding, authorization, empty states, and other
+  brand surfaces
+- calmer inside diffs, logs, terminal output, and long workflow reading
 
 Avoid:
 
@@ -300,15 +389,17 @@ Avoid:
 - browser-style session tabs
 - dashboard cards
 - large widgets
-- strong gradients
-- decorative glow
+- generic strong gradients
+- decorative glow as default atmosphere
 - noisy badges
 - repeated metadata
 - nested cards
 - permanent heavy toolbars
 
 Use boundaries sparingly. Prefer alignment, typography, state semantics, and
-content hierarchy over decorative framing.
+content hierarchy over decorative framing. Use bold color, clean geometry,
+editorial image direction, and product-detail imagery where the surface can
+carry brand personality without weakening workflow clarity.
 
 The interface must support English and Chinese. Language switching should keep
 the same product structure and density. Translate action labels, state labels,

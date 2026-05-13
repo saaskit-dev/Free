@@ -1,6 +1,7 @@
 SHELL := /bin/bash
 
 .PHONY: help install build build-self dev typecheck lint test verify source-install-smoke local-full-test \
+	workbench-export workbench-deploy \
 	relay-typecheck relay-dev relay-deploy relay-deploy-dry-run \
 	relay-e2e relay-e2e-local relay-migrate-local relay-migrate-remote remote-prod-smoke pack-local package-install-check clean
 
@@ -23,6 +24,8 @@ help:
 		"  make local-full-test      Run verify plus local Wrangler relay e2e" \
 		"  make pack-local           Build local npm tarball under .tmp/pack" \
 		"  make package-install-check Install the tarball and smoke-test the CLI" \
+		"  make workbench-export     Export Workbench Web static assets" \
+		"  make workbench-deploy     Deploy Workbench Web static assets to Cloudflare Pages" \
 		"" \
 		"Relay commands:" \
 		"  make relay-dev            Run Cloudflare Worker locally" \
@@ -70,14 +73,22 @@ local-full-test: verify relay-e2e-local
 relay-typecheck:
 	pnpm --dir relay exec tsc --noEmit -p tsconfig.json
 
-relay-dev:
-	pnpm --dir relay exec wrangler dev
+relay-dev: relay-migrate-local
+	pnpm --dir relay exec wrangler dev --ip 127.0.0.1 --port "$${RELAY_PORT:-8791}"
 
-relay-deploy:
-	pnpm --dir relay exec wrangler deploy
+relay-deploy: relay-migrate-remote
+	pnpm --dir relay exec wrangler deploy --domain "$${RELAY_DOMAIN:-free-relay.saaskit.app}"
 
 relay-deploy-dry-run:
-	pnpm --dir relay exec wrangler deploy --dry-run
+	pnpm --dir relay exec wrangler deploy --dry-run --domain "$${RELAY_DOMAIN:-free-relay.saaskit.app}"
+
+workbench-export:
+	: "$${EXPO_PUBLIC_RELAY_URL:?Set EXPO_PUBLIC_RELAY_URL to the public relay/API origin.}"
+	: "$${EXPO_PUBLIC_WORKBENCH_ORIGIN:?Set EXPO_PUBLIC_WORKBENCH_ORIGIN to the public Workbench origin.}"
+	pnpm --dir apps/workbench export:web
+
+workbench-deploy: workbench-export
+	pnpm --dir relay exec wrangler pages deploy ../apps/workbench/dist --project-name "$${WORKBENCH_PAGES_PROJECT:-free-app}" --commit-dirty=true
 
 relay-e2e:
 	node relay/test-e2e.mjs
@@ -99,14 +110,14 @@ relay-e2e-local:
 	}; \
 	trap cleanup EXIT; \
 	$(MAKE) relay-migrate-local >/dev/null; \
-	pnpm --dir relay exec wrangler dev --ip 127.0.0.1 --port "$${RELAY_PORT:-8787}" > .tmp/relay-e2e-wrangler.log 2>&1 & \
+	pnpm --dir relay exec wrangler dev --ip 127.0.0.1 --port "$${RELAY_PORT:-8791}" > .tmp/relay-e2e-wrangler.log 2>&1 & \
 	worker_pid=$$!; \
 	for _ in {1..60}; do \
-		if curl -fsS "http://127.0.0.1:$${RELAY_PORT:-8787}/health" >/dev/null 2>&1; then break; fi; \
+		if curl -fsS "http://127.0.0.1:$${RELAY_PORT:-8791}/health" >/dev/null 2>&1; then break; fi; \
 		sleep 0.5; \
 	done; \
-	curl -fsS "http://127.0.0.1:$${RELAY_PORT:-8787}/health" >/dev/null; \
-	RELAY_URL="http://127.0.0.1:$${RELAY_PORT:-8787}" node relay/test-e2e.mjs
+	curl -fsS "http://127.0.0.1:$${RELAY_PORT:-8791}/health" >/dev/null; \
+	RELAY_URL="http://127.0.0.1:$${RELAY_PORT:-8791}" node relay/test-e2e.mjs
 
 relay-migrate-local:
 	pnpm --dir relay exec wrangler d1 migrations apply acp-relay --local
@@ -127,7 +138,7 @@ package-install-check: $(TARBALL)
 	test -x "$(FREE_BIN)"
 	"$(FREE_BIN)" --help >/dev/null
 	"$(FREE_BIN)" host --help >/dev/null
-	"$(FREE_BIN)" bridge config --relay-url ws://127.0.0.1:8787 --command "$(FREE_BIN)" --format generic >/dev/null
+	"$(FREE_BIN)" bridge config --relay-url ws://127.0.0.1:8791 --command "$(FREE_BIN)" --format generic >/dev/null
 
 $(TARBALL):
 	$(MAKE) pack-local

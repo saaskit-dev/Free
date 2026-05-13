@@ -62,6 +62,8 @@ function printHelp(): void {
       "  free bridge run",
       "  free bridge config",
       "",
+      "Default relay environment is online. Use --relay-env local for ws://127.0.0.1:8791.",
+      "",
       "Run a subcommand with --help for details.",
     ].join("\n") + "\n",
   );

@@ -35,6 +35,7 @@ export type AcpRelayHostMetadata = {
     type?: string;
     label: string;
   }[];
+  displayName?: string;
   machine?: string;
   runtimeInstanceId?: string;
   workspaceRoots: readonly { path: string; label?: string }[];
@@ -844,6 +845,10 @@ function parseHostMetadata(value: string): AcpRelayHostMetadata | undefined {
       typeof parsed.machine === "string" && parsed.machine.trim()
         ? parsed.machine
         : undefined;
+    const displayName =
+      typeof parsed.displayName === "string" && parsed.displayName.trim()
+        ? parsed.displayName
+        : undefined;
     const runtimeInstanceId =
       typeof parsed.runtimeInstanceId === "string" &&
       parsed.runtimeInstanceId.trim()
@@ -851,6 +856,7 @@ function parseHostMetadata(value: string): AcpRelayHostMetadata | undefined {
         : undefined;
     return {
       agentTypes,
+      ...(displayName ? { displayName } : {}),
       ...(machine ? { machine } : {}),
       ...(runtimeInstanceId ? { runtimeInstanceId } : {}),
       workspaceRoots,
