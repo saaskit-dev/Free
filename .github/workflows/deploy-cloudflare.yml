@@ -54,15 +54,16 @@ jobs:
           git -C ../acp-runtime fetch --depth 1 origin "$ACP_RUNTIME_REF"
           git -C ../acp-runtime checkout --detach FETCH_HEAD
 
-      - name: Install dependencies
-        run: |
-          pnpm --dir ../acp-runtime install --frozen-lockfile
-          pnpm install --frozen-lockfile
+      - name: Install pinned acp-runtime dependencies
+        run: pnpm --dir ../acp-runtime install --frozen-lockfile
 
       - name: Build pinned acp-runtime
         run: |
           pnpm --dir ../acp-runtime --filter @saaskit-dev/simulator-agent-acp build
           pnpm --dir ../acp-runtime run build:lib
+
+      - name: Install Free dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Verify Free
         run: |
@@ -115,10 +116,16 @@ jobs:
           git -C ../acp-runtime fetch --depth 1 origin "$ACP_RUNTIME_REF"
           git -C ../acp-runtime checkout --detach FETCH_HEAD
 
-      - name: Install dependencies
+      - name: Install pinned acp-runtime dependencies
+        run: pnpm --dir ../acp-runtime install --frozen-lockfile
+
+      - name: Build pinned acp-runtime
         run: |
-          pnpm --dir ../acp-runtime install --frozen-lockfile
-          pnpm install --frozen-lockfile
+          pnpm --dir ../acp-runtime --filter @saaskit-dev/simulator-agent-acp build
+          pnpm --dir ../acp-runtime run build:lib
+
+      - name: Install Free dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Deploy relay
         run: |
@@ -167,10 +174,16 @@ jobs:
           git -C ../acp-runtime fetch --depth 1 origin "$ACP_RUNTIME_REF"
           git -C ../acp-runtime checkout --detach FETCH_HEAD
 
-      - name: Install dependencies
+      - name: Install pinned acp-runtime dependencies
+        run: pnpm --dir ../acp-runtime install --frozen-lockfile
+
+      - name: Build pinned acp-runtime
         run: |
-          pnpm --dir ../acp-runtime install --frozen-lockfile
-          pnpm install --frozen-lockfile
+          pnpm --dir ../acp-runtime --filter @saaskit-dev/simulator-agent-acp build
+          pnpm --dir ../acp-runtime run build:lib
+
+      - name: Install Free dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Deploy Workbench
         run: |
