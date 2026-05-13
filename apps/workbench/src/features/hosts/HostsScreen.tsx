@@ -2,7 +2,7 @@ import { CheckmarkCircle02Icon, Edit02Icon } from "@hugeicons/core-free-icons";
 import { useEffect, useState } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
 
-import { updateHostName } from "../../api/relay";
+import { revokeHost, updateHostName } from "../../api/relay";
 import type { HostRecord, LanguageMode, LoadState } from "../../types";
 import { Icon } from "../../ui/Icon";
 import { colors, common, typography } from "../../ui/theme";
@@ -62,6 +62,7 @@ function HostCard({
   const [draft, setDraft] = useState(savedName);
   const [error, setError] = useState<string | undefined>();
   const [saving, setSaving] = useState(false);
+  const [removing, setRemoving] = useState(false);
 
   useEffect(() => {
     setDraft(savedName);
@@ -83,6 +84,19 @@ function HostCard({
       setError(caught instanceof Error ? caught.message : t(language, "保存失败。", "Save failed."));
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function removeHost() {
+    setRemoving(true);
+    setError(undefined);
+    try {
+      await revokeHost(host.hostId);
+      await onChanged();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : t(language, "删除失败。", "Delete failed."));
+    } finally {
+      setRemoving(false);
     }
   }
 
@@ -152,10 +166,21 @@ function HostCard({
           </View>
         </View>
       ) : (
-        <Pressable onPress={() => setEditing(true)} style={[buttonStyle(false), { marginTop: 16, alignSelf: "flex-start" }]}>
-          <Icon color={colors.ink} icon={Edit02Icon} size={18} />
-          <Text style={buttonTextStyle}>{t(language, "设置名称", "Set name")}</Text>
-        </Pressable>
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 16 }}>
+          <Pressable onPress={() => setEditing(true)} style={[buttonStyle(false), { alignSelf: "flex-start" }]}>
+            <Icon color={colors.ink} icon={Edit02Icon} size={18} />
+            <Text style={buttonTextStyle}>{t(language, "设置名称", "Set name")}</Text>
+          </Pressable>
+          <Pressable
+            disabled={removing}
+            onPress={() => void removeHost()}
+            style={[buttonStyle(false), removing ? { opacity: 0.6 } : null]}
+          >
+            <Text style={[buttonTextStyle, { color: colors.coral }]}>
+              {removing ? t(language, "删除中", "Deleting") : t(language, "撤销授权并删除", "Revoke and delete")}
+            </Text>
+          </Pressable>
+        </View>
       )}
     </View>
   );

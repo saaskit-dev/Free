@@ -293,7 +293,7 @@ export function mapRuntimeHistoryEntryToAcpNotifications(
   if (entry.type === AcpRuntimePromptMessageRole.User) {
     return mapRuntimeUserMessageToAcpNotifications(
       sessionId,
-      entry.content,
+      readRuntimeUserMessageContent(entry),
       entry.text,
     );
   }
@@ -308,7 +308,7 @@ export function mapRuntimeThreadEntryToAcpNotifications(
     case AcpRuntimeThreadEntryKind.UserMessage:
       return mapRuntimeUserMessageToAcpNotifications(
         sessionId,
-        entry.content,
+        readRuntimeUserMessageContent(entry),
         entry.text,
       );
     case AcpRuntimeThreadEntryKind.AssistantMessage:
@@ -367,6 +367,16 @@ function mapRuntimeUserMessageToAcpNotifications(
       sessionUpdate: "user_message_chunk",
     },
   }));
+}
+
+function readRuntimeUserMessageContent(
+  entry: { text: string } & Record<string, unknown>,
+): readonly AcpRuntimePromptPart[] | undefined {
+  const value = entry.content;
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  return value as readonly AcpRuntimePromptPart[];
 }
 
 function mapRuntimeThreadToolCallToAcpNotifications(

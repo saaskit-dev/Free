@@ -172,6 +172,24 @@ export async function updateHostName(hostId: string, name: string) {
   return value as HostRecord;
 }
 
+export async function revokeHost(hostId: string) {
+  const response = await fetch(`${defaultRelayUrl()}/api/hosts/${encodeURIComponent(hostId)}`, {
+    credentials: "include",
+    headers: {
+      accept: "application/json",
+    },
+    method: "DELETE",
+  });
+  const value = (await response.json().catch(() => null)) as { error?: unknown } | null;
+  if (!response.ok) {
+    throw new Error(
+      value && typeof value === "object" && "error" in value
+        ? String(value.error)
+        : `Request failed with ${response.status}.`,
+    );
+  }
+}
+
 function defaultWorkbenchOrigin(): string {
   if (configuredWorkbenchOrigin) return configuredWorkbenchOrigin;
   if (typeof window !== "undefined" && window.location.origin.startsWith("http")) {

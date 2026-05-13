@@ -1,6 +1,9 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { hostname } from "node:os";
 import { dirname } from "node:path";
+import { platform } from "node:process";
 
 import { emitFreeSuppressedError } from "../observability/logging.js";
 import { resolveRuntimeHomePath } from "@saaskit-dev/acp-runtime";
@@ -127,9 +130,12 @@ export async function loadOrCreateHostMachineIdentity(): Promise<AcpRemoteHostMa
   try {
     const raw = await readFile(path, "utf8");
     const data = JSON.parse(raw);
-    if (data.hostId && data.machine === hostname()) {
+    if (data.hostId) {
       const identity = parseAcpRemoteHostIdentity(data.identity);
-      return { hostId: data.hostId, identity, machine: data.machine };
+      const machine = typeof data.machine === "string" && data.machine
+        ? data.machine
+        : hostname();
+      return { hostId: data.hostId, identity, machine };
     }
   } catch (error) {
     if (!isMissingFileError(error)) {
@@ -144,13 +150,64 @@ export async function loadOrCreateHostMachineIdentity(): Promise<AcpRemoteHostMa
     }
   }
 
-  const hostId = crypto.randomUUID();
+  const hostId = resolveStableHostId();
   const identity = await createAcpRemoteHostIdentity();
   const machine = hostname();
   const record: AcpRemoteHostMachineIdentity = { hostId, identity, machine };
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(record, null, 2)}\n`, "utf8");
   return record;
+}
+
+function resolveStableHostId(): string {
+  const seed = readStableMachineSeed();
+  const digest = crypto.createHash("sha256").update(seed).digest();
+  const bytes = new Uint8Array(digest.subarray(0, 16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Buffer.from(bytes).toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
+function readStableMachineSeed(): string {
+  if (process.env.FREE_HOST_MACHINE_ID?.trim()) {
+    return `env:${process.env.FREE_HOST_MACHINE_ID.trim()}`;
+  }
+  if (platform === "darwin") {
+    const value = runCommand("ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"]);
+    const match = value.match(/"IOPlatformUUID"\s*=\s*"([^"]+)"/);
+    if (match?.[1]) return `darwin:${match[1]}`;
+  }
+  if (platform === "linux") {
+    const machineId = readFirstExistingFile(["/etc/machine-id", "/var/lib/dbus/machine-id"]);
+    if (machineId) return `linux:${machineId}`;
+  }
+  if (platform === "win32") {
+    const value = runCommand("reg", ["query", "HKLM\\SOFTWARE\\Microsoft\\Cryptography", "/v", "MachineGuid"]);
+    const match = value.match(/MachineGuid\s+REG_SZ\s+([^\r\n]+)/);
+    if (match?.[1]) return `win32:${match[1].trim()}`;
+  }
+  return `fallback:${hostname()}`;
+}
+
+function runCommand(command: string, args: string[]): string {
+  try {
+    return execFileSync(command, args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    return "";
+  }
+}
+
+function readFirstExistingFile(paths: readonly string[]): string | undefined {
+  for (const candidate of paths) {
+    try {
+      const value = readFileSync(candidate, "utf8").trim();
+      if (value) return value;
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
 }
 
 export function createAcpRemoteHostIdentityRecord(

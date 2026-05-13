@@ -378,7 +378,7 @@ function createLocalOAuthResultPage(input: {
   const isSuccess = input.tone === "success";
   const title = isSuccess ? "Free sign in complete" : "Free sign in failed";
   const status = isSuccess ? "Connected" : "Action required";
-  const accent = isSuccess ? "#147a5c" : "#b63c32";
+  const accent = isSuccess ? "#8cff54" : "#ff6d5a";
   const script = input.autoClose
     ? `<script>
       (function() {
@@ -409,18 +409,22 @@ function createLocalOAuthResultPage(input: {
     <style>
       :root {
         color-scheme: light;
-        --bg: #f7f8f5;
-        --surface: #ffffff;
-        --ink: #18211d;
-        --muted: #5d6862;
-        --line: #d8ddd7;
+        --bg: #0a0f1f;
+        --surface: #121a33;
+        --surface-2: #1b2550;
+        --ink: #ecf2ff;
+        --muted: #aab7d6;
+        --line: #2f3a63;
         --accent: ${accent};
       }
       * { box-sizing: border-box; }
       body {
         margin: 0;
         min-height: 100vh;
-        background: var(--bg);
+        background:
+          radial-gradient(1200px 500px at 12% -10%, #5d3df433 0%, transparent 70%),
+          radial-gradient(1000px 420px at 100% 0%, #00e7ff2a 0%, transparent 75%),
+          var(--bg);
         color: var(--ink);
         font: 15px/1.5 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
@@ -436,11 +440,11 @@ function createLocalOAuthResultPage(input: {
         gap: 16px;
         padding: 18px clamp(20px, 5vw, 52px);
         border-bottom: 1px solid var(--line);
-        background: color-mix(in oklch, var(--surface) 86%, var(--bg));
+        background: color-mix(in oklch, var(--surface) 90%, #000000);
       }
-      .brand { font-weight: 720; letter-spacing: 0; }
+      .brand { font-weight: 780; letter-spacing: 0.02em; }
       .status {
-        border: 1px solid color-mix(in oklch, var(--accent) 34%, var(--line));
+        border: 1px solid color-mix(in oklch, var(--accent) 40%, var(--line));
         border-radius: 999px;
         color: var(--accent);
         padding: 5px 10px;
@@ -455,9 +459,10 @@ function createLocalOAuthResultPage(input: {
       .panel {
         width: min(560px, 100%);
         border: 1px solid var(--line);
-        border-radius: 8px;
-        background: var(--surface);
+        border-radius: 14px;
+        background: linear-gradient(180deg, var(--surface) 0%, var(--surface-2) 100%);
         padding: clamp(24px, 5vw, 38px);
+        box-shadow: 0 14px 46px #00000052;
       }
       h1 {
         margin: 0 0 10px;
@@ -469,7 +474,9 @@ function createLocalOAuthResultPage(input: {
       .detail {
         margin-top: 18px;
         border-left: 3px solid var(--accent);
-        padding-left: 12px;
+        background: color-mix(in oklch, var(--surface) 75%, #000000);
+        border-radius: 8px;
+        padding: 10px 12px;
         color: var(--ink);
       }
       code {

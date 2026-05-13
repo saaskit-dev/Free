@@ -1,6 +1,6 @@
 import { StatusBar } from "expo-status-bar";
 import { useFonts } from "expo-font";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
 
 import { WorkbenchAppFrame } from "./workbench/WorkbenchAppFrame";
@@ -12,7 +12,7 @@ import { t, useWorkbenchPreferences } from "./workbench/preferences";
 import { colors, typography } from "./ui/theme";
 
 export default function App() {
-  const [route, setRoute] = useState<RouteId>("access");
+  const [route, setRoute] = useState<RouteId>(readWorkbenchRouteFromLocation());
   const { preferences, setLanguage, setTheme } = useWorkbenchPreferences();
   const [fontsLoaded] = useFonts({
     BricolageGrotesqueBold: require("../assets/fonts/BricolageGrotesque-Bold.ttf"),
@@ -65,6 +65,13 @@ export default function App() {
     );
   }
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onPopState = () => setRoute(readWorkbenchRouteFromLocation());
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
   return (
     <>
       <StatusBar style="dark" />
@@ -77,6 +84,14 @@ export default function App() {
       />
     </>
   );
+}
+
+function readWorkbenchRouteFromLocation(): RouteId {
+  if (typeof window === "undefined") return "access";
+  if (window.location.pathname === "/access") return "access";
+  if (window.location.pathname === "/hosts") return "hosts";
+  if (window.location.pathname === "/settings") return "settings";
+  return "access";
 }
 
 function readLoginApprovalIdFromLocation(): string | undefined {
