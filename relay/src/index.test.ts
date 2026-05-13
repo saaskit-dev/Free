@@ -166,6 +166,27 @@ describe("relay worker", () => {
     expect(body).toContain("Sign in required");
   });
 
+  it("returns a CORS JSON error when Workbench starts login without GitHub config", async () => {
+    const response = await worker.fetch(
+      new Request(
+        "https://relay.test/api/login/start?returnTo=http%3A%2F%2F127.0.0.1%3A8790%2F&redirectUri=http%3A%2F%2F127.0.0.1%3A8790%2Flogin%2Fcallback",
+        {
+          headers: {
+            origin: "http://127.0.0.1:8790",
+          },
+        },
+      ),
+      createEnv({ ACP_RELAY_DB: new FakeAuthD1Database() as unknown as D1Database }),
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("access-control-allow-origin")).toBe("http://127.0.0.1:8790");
+    expect(response.headers.get("content-type")).toContain("application/json");
+    await expect(response.json()).resolves.toEqual({
+      error: "GitHub sign in is not configured for this relay.",
+    });
+  });
+
   it("requires explicit confirmation before issuing CLI account session credentials", async () => {
     const db = new FakeAuthD1Database();
     const env = createEnv({

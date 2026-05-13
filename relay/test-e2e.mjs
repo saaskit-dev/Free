@@ -42,11 +42,22 @@ async function main() {
 
   // 3. Check /authorize requires connectionId
   console.log("\n3. Testing /authorize requires connectionId...");
-  const authRes = await fetch(`${RELAY}/authorize`);
+  const authRes = await fetch(`${RELAY}/authorize`, { redirect: "manual" });
   console.log(`   Status: ${authRes.status}`);
   console.log(`   Body: ${await authRes.text()}`);
-  assert(authRes.status === 401, "Expected /authorize without auth to return 401");
-  console.log(`   ✓ Returns 401 without session`);
+  assert(
+    authRes.status === 401 || authRes.status === 302,
+    "Expected /authorize without auth to return 401 or redirect to login",
+  );
+  if (authRes.status === 302) {
+    assert(
+      authRes.headers.get("location")?.includes("/login/start"),
+      "Expected /authorize redirect to point at login start",
+    );
+    console.log(`   ✓ Redirects to login without session`);
+  } else {
+    console.log(`   ✓ Returns 401 without session`);
+  }
 
   // 4. Manually create an account session.
   console.log("\n4. Creating test account session...");

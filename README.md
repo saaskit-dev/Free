@@ -149,6 +149,33 @@ WORKBENCH_PAGES_PROJECT=free-app \
 make workbench-deploy
 ```
 
+### GitHub Actions deployment
+
+`.github/workflows/deploy-cloudflare.yml` runs verification for pull requests
+and branches. On `main` it deploys the relay Worker first, then deploys
+Workbench Web.
+
+Configure these GitHub Actions secrets before enabling automatic deployment:
+
+```text
+CLOUDFLARE_API_TOKEN
+CLOUDFLARE_ACCOUNT_ID
+```
+
+The Cloudflare token must be able to apply D1 migrations, deploy Workers, and
+deploy Cloudflare Pages. The workflow uses these defaults:
+
+```text
+ACP_RUNTIME_REPO_URL=https://github.com/saaskit-dev/acp-runtime.git
+RELAY_DOMAIN=free-relay.saaskit.app
+EXPO_PUBLIC_RELAY_URL=https://free-relay.saaskit.app
+EXPO_PUBLIC_WORKBENCH_ORIGIN=https://free.saaskit.app
+WORKBENCH_PAGES_PROJECT=free-app
+```
+
+The workflow checkout also clones the pinned `acp-runtime` ref from
+`.acp-runtime-ref` into `../acp-runtime`, matching the local development layout.
+
 GitHub OAuth callback URLs should belong to Workbench, not the relay Worker:
 
 ```text

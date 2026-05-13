@@ -1430,75 +1430,6 @@ function createRelayAccountSessionRequiredPage(input: {
 </html>`;
 }
 
-function createRelayLoginUnavailablePage(input: {
-  message: string;
-}): string {
-  const iconUrl =
-    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAAzElEQVR4nO2ZwQnCQBBFJ2IPiRArsJQcrNWDpViBB9OF3kKQgHx3wtuF/04JZNl5zMzuQLqhH9/RMAc6gFIsQGMBGgvQHNUFr/m5RxwLp+EsfS9lYO/g/9mj+RKyAI0FaKoTUI9R+R7I2DST6jKgYgGalB5Qr//MnkEykDlTNV9CFqCxAA0ikHmMehaisQCNBWhSTqFSputjeb7fLtJaPAPr4Lfef4ELlGKBUr5rXu2BKppYDXqNlIGtmYecgyIiOv/ohrEAjQVomhf4AFQfHXrFoCgAAAAAAElFTkSuQmCC";
-  return `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Free Login</title>
-    <link rel="icon" href="${iconUrl}">
-    <style>
-      :root {
-        color-scheme: light;
-        --bg: oklch(0.965 0.01 280);
-        --surface: oklch(0.99 0.006 280);
-        --ink: oklch(0.205 0.018 280);
-        --muted: oklch(0.48 0.018 280);
-        --line: oklch(0.84 0.016 280);
-        --accent: oklch(0.58 0.21 285);
-        --accent-2: oklch(0.72 0.18 38);
-      }
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        min-height: 100vh;
-        display: grid;
-        place-items: center;
-        background: var(--bg);
-        color: var(--ink);
-        font: 14px/1.45 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      }
-      .login-frame {
-        width: min(520px, calc(100vw - 32px));
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        background: var(--surface);
-        padding: 28px;
-      }
-      .brand-mark {
-        width: 32px;
-        height: 32px;
-        border-radius: 8px;
-        overflow: hidden;
-      }
-      .brand-mark img { display: block; width: 100%; height: 100%; }
-      h1 {
-        margin: 18px 0 8px;
-        font-size: 24px;
-        line-height: 1.12;
-        letter-spacing: 0;
-      }
-      p {
-        margin: 0;
-        color: var(--muted);
-      }
-    </style>
-  </head>
-  <body>
-    <main class="login-frame" aria-labelledby="login-title">
-      <div class="brand-mark"><img src="${iconUrl}" alt=""></div>
-      <h1 id="login-title">Login is unavailable</h1>
-      <p>${escapeHtml(input.message)}</p>
-    </main>
-  </body>
-</html>`;
-}
-
 const SESSION_COOKIE_NAME = "acp_relay_session";
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 const LOGIN_APPROVAL_TTL_MS = 10 * 60 * 1000;
@@ -1522,19 +1453,27 @@ async function handleGitHubAuthRequest(
   const clientId = env.ACP_RELAY_GITHUB_CLIENT_ID;
   const clientSecret = env.ACP_RELAY_GITHUB_CLIENT_SECRET;
   if (!clientId || !clientSecret) {
-    return html(createRelayLoginUnavailablePage({
-      message: "GitHub sign in is not configured for this relay.",
-    }), { status: 503 });
+    return withWorkbenchApiCors(
+      json({ error: "GitHub sign in is not configured for this relay." }, { status: 503 }),
+      request,
+      env,
+    );
   }
   const signingKey = readAccountSessionSigningKey(env);
   if (!signingKey.ok) {
-    return new Response(signingKey.reason, { status: 503 });
+    return withWorkbenchApiCors(
+      json({ error: signingKey.reason }, { status: 503 }),
+      request,
+      env,
+    );
   }
   const db = env.ACP_RELAY_DB;
   if (!db) {
-    return new Response("GitHub OAuth requires a database (D1).", {
-      status: 503,
-    });
+    return withWorkbenchApiCors(
+      json({ error: "GitHub OAuth requires a database (D1)." }, { status: 503 }),
+      request,
+      env,
+    );
   }
 
   if (url.pathname === "/api/login/confirm") {

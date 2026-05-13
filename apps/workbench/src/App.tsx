@@ -21,6 +21,13 @@ export default function App() {
     IBMPlexSansSemiBold: require("../assets/fonts/IBMPlexSans-SemiBold.ttf"),
   });
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onPopState = () => setRoute(readWorkbenchRouteFromLocation());
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
   if (!fontsLoaded) {
     return (
       <View style={{ alignItems: "center", backgroundColor: colors.paper, flex: 1, justifyContent: "center" }}>
@@ -64,13 +71,6 @@ export default function App() {
       </>
     );
   }
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const onPopState = () => setRoute(readWorkbenchRouteFromLocation());
-    window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
-  }, []);
 
   return (
     <>
