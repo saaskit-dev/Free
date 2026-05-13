@@ -128,9 +128,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Deploy relay
-        run: |
-          make relay-deploy-dry-run
-          pnpm --dir relay exec wrangler deploy --domain "$RELAY_DOMAIN"
+        run: make relay-deploy
 
   deploy-workbench:
     name: Deploy Workbench Pages
