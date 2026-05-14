@@ -1,5 +1,12 @@
 import { useMemo, useState } from "react";
-import { Pressable, Text, TextInput, useWindowDimensions, View } from "react-native";
+import {
+  Pressable,
+  ScrollView,
+  Text,
+  TextInput,
+  useWindowDimensions,
+  View,
+} from "react-native";
 
 import type { HostRecord, LanguageMode, LoadState, SessionRecord } from "../../types";
 import { colors, common, typography } from "../../ui/theme";
@@ -12,6 +19,7 @@ type SessionsScreenProps = {
 };
 
 type AvailabilityFilter = "all" | "online" | "offline";
+type StatusFilter = "all" | NonNullable<SessionRecord["status"]>;
 
 export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProps) {
   const { width } = useWindowDimensions();
@@ -21,6 +29,8 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
   const [agentKey, setAgentKey] = useState("all");
   const [workspaceRoot, setWorkspaceRoot] = useState("all");
   const [availability, setAvailability] = useState<AvailabilityFilter>("all");
+  const [status, setStatus] = useState<StatusFilter>("all");
+  const [copiedKey, setCopiedKey] = useState<string | undefined>();
 
   const hostLabels = useMemo(() => {
     const labels = new Map<string, string>();
@@ -44,8 +54,7 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
     if (sessions.status === "ready") {
       for (const session of sessions.data) {
         hostIds.add(session.hostId);
-        const agent = readAgentLabel(session);
-        agents.set(readAgentKey(session), agent);
+        agents.set(readAgentKey(session), readAgentLabel(session));
         for (const root of session.workspaceRoots) {
           workspaces.set(root, readWorkspaceLabel(root));
         }
@@ -69,17 +78,33 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
       if (workspaceRoot !== "all" && !session.workspaceRoots.includes(workspaceRoot)) return false;
       if (availability === "online" && !session.hostOnline) return false;
       if (availability === "offline" && session.hostOnline) return false;
+      if (status !== "all" && session.status !== status) return false;
       if (!needle) return true;
       const values = [
         session.sessionId,
+        String(session.requestId ?? ""),
+        session.connectionId ?? "",
         session.hostId,
         readSessionHostLabel(session, hostLabels),
         readAgentLabel(session),
+        readStatusLabel(session.status, language),
+        session.latestEvent ?? "",
+        session.error ?? "",
         ...session.workspaceRoots,
       ];
       return values.some((value) => value.toLowerCase().includes(needle));
     });
-  }, [agentKey, availability, hostId, hostLabels, query, sessions, workspaceRoot]);
+  }, [agentKey, availability, hostId, hostLabels, language, query, sessions, status, workspaceRoot]);
+
+  const copyValue = (value: string, key: string) => {
+    void copyText(value).then((ok) => {
+      if (!ok) return;
+      setCopiedKey(key);
+      setTimeout(() => {
+        setCopiedKey((current) => current === key ? undefined : current);
+      }, 1400);
+    });
+  };
 
   if (sessions.status === "loading") {
     return (
@@ -112,35 +137,54 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
           accessibilityLabel={t(language, "搜索 Session", "Search sessions")}
           autoCapitalize="none"
           onChangeText={setQuery}
-          placeholder={t(language, "搜索 Session、主机、Agent、目录", "Search session, host, agent, workspace")}
+          placeholder={t(language, "搜索 Session、主机、Agent、目录、ID", "Search session, host, agent, workspace, ID")}
           placeholderTextColor={colors.muted}
           style={[inputStyle, { flex: compact ? undefined : 1, width: compact ? "100%" : undefined }]}
           value={query}
         />
-        <View style={{ alignItems: "center", flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
-          <Text style={common.eyebrow}>{visibleSessions.length}</Text>
-          <FilterButton active={availability === "all"} label={t(language, "全部", "All")} onPress={() => setAvailability("all")} />
-          <FilterButton active={availability === "online"} label={t(language, "在线", "Online")} onPress={() => setAvailability("online")} />
-          <FilterButton active={availability === "offline"} label={t(language, "离线", "Offline")} onPress={() => setAvailability("offline")} />
-        </View>
+        <Text style={common.eyebrow}>
+          {visibleSessions.length} / {sessions.data.length}
+        </Text>
       </View>
 
       <View style={filterRailStyle}>
-        <FilterGroup
+        <SelectFilter
+          allLabel={t(language, "全部状态", "All states")}
+          label={t(language, "状态", "State")}
+          options={[
+            ["active", t(language, "运行中", "Active")],
+            ["starting", t(language, "启动中", "Starting")],
+            ["waiting_authorization", t(language, "等待授权", "Waiting")],
+            ["failed", t(language, "失败", "Failed")],
+          ]}
+          value={status}
+          onChange={(value) => setStatus(value as StatusFilter)}
+        />
+        <SelectFilter
+          allLabel={t(language, "全部在线状态", "All availability")}
+          label={t(language, "在线状态", "Availability")}
+          options={[
+            ["online", t(language, "在线", "Online")],
+            ["offline", t(language, "离线", "Offline")],
+          ]}
+          value={availability}
+          onChange={(value) => setAvailability(value as AvailabilityFilter)}
+        />
+        <SelectFilter
           allLabel={t(language, "全部主机", "All hosts")}
           label={t(language, "主机", "Host")}
           options={filterOptions.hosts.map((id) => [id, hostLabels.get(id) ?? shortId(id)] as const)}
           value={hostId}
           onChange={setHostId}
         />
-        <FilterGroup
+        <SelectFilter
           allLabel={t(language, "全部 Agent", "All agents")}
           label={t(language, "Agent", "Agent")}
           options={filterOptions.agents}
           value={agentKey}
           onChange={setAgentKey}
         />
-        <FilterGroup
+        <SelectFilter
           allLabel={t(language, "全部目录", "All workspaces")}
           label={t(language, "目录", "Workspace")}
           options={filterOptions.workspaces}
@@ -154,8 +198,8 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
           title={t(language, "暂无 Session", "No sessions")}
           body={t(
             language,
-            "当前账号还没有可管理的 Session。通过 ACP 客户端完成授权后，Session 会出现在这里。",
-            "This account has no manageable sessions yet. Sessions appear here after an ACP client is authorized.",
+            "通过 ACP 客户端完成授权后，Session 会出现在这里。",
+            "Sessions appear here after an ACP client is authorized.",
           )}
         />
       ) : visibleSessions.length === 0 ? (
@@ -169,9 +213,11 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
           {visibleSessions.map((session) => (
             <SessionRow
               compact={compact}
-              key={session.sessionId}
+              copiedKey={copiedKey}
               hostLabel={readSessionHostLabel(session, hostLabels)}
+              key={session.sessionId}
               language={language}
+              onCopy={copyValue}
               session={session}
             />
           ))}
@@ -181,7 +227,7 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
   );
 }
 
-function FilterGroup({
+function SelectFilter({
   allLabel,
   label,
   onChange,
@@ -194,63 +240,61 @@ function FilterGroup({
   options: readonly (readonly [string, string])[];
   value: string;
 }) {
-  if (options.length === 0) return null;
+  const [open, setOpen] = useState(false);
+  const items = [["all", allLabel] as const, ...options];
+  const selectedLabel = items.find(([optionValue]) => optionValue === value)?.[1] ?? allLabel;
   return (
-    <View style={{ alignItems: "center", flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
-      <Text style={[common.eyebrow, { marginRight: 2 }]}>{label}</Text>
-      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-        <FilterButton active={value === "all"} label={allLabel} onPress={() => onChange("all")} />
-        {options.map(([optionValue, optionLabel]) => (
-          <FilterButton
-            key={optionValue}
-            active={value === optionValue}
-            label={optionLabel}
-            onPress={() => onChange(optionValue)}
-          />
-        ))}
-      </View>
+    <View style={{ minWidth: 156, position: "relative", zIndex: open ? 30 : 1 }}>
+      <Text style={[common.eyebrow, { marginBottom: 4 }]}>{label}</Text>
+      <Pressable
+        accessibilityLabel={label}
+        accessibilityRole="button"
+        onPress={() => setOpen((current) => !current)}
+        style={selectButtonStyle}
+      >
+        <Text numberOfLines={1} style={selectButtonTextStyle}>{selectedLabel}</Text>
+        <Text style={selectCaretStyle}>{open ? "⌃" : "⌄"}</Text>
+      </Pressable>
+      {open ? (
+        <View style={selectMenuStyle}>
+          <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 220 }}>
+            {items.map(([optionValue, optionLabel]) => (
+              <Pressable
+                key={optionValue}
+                onPress={() => {
+                  onChange(optionValue);
+                  setOpen(false);
+                }}
+                style={[
+                  selectOptionStyle,
+                  optionValue === value ? { backgroundColor: colors.lime } : null,
+                ]}
+              >
+                <Text numberOfLines={1} style={selectOptionTextStyle}>
+                  {optionLabel}
+                </Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        </View>
+      ) : null}
     </View>
-  );
-}
-
-function FilterButton({
-  active,
-  label,
-  onPress,
-}: {
-  active: boolean;
-  label: string;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable
-      onPress={onPress}
-      style={{
-        backgroundColor: active ? colors.lime : "#FFFFFF",
-        borderColor: colors.ink,
-        borderRadius: 8,
-        borderWidth: 1,
-        minHeight: 30,
-        paddingHorizontal: 10,
-        justifyContent: "center",
-      }}
-    >
-      <Text style={{ color: colors.ink, fontFamily: typography.sansSemi, fontSize: 13 }}>
-        {label}
-      </Text>
-    </Pressable>
   );
 }
 
 function SessionRow({
   compact,
+  copiedKey,
   hostLabel,
   language,
+  onCopy,
   session,
 }: {
   compact: boolean;
+  copiedKey?: string;
   hostLabel: string;
   language: LanguageMode;
+  onCopy: (value: string, key: string) => void;
   session: SessionRecord;
 }) {
   const workspaces = session.workspaceRoots.length > 0
@@ -258,43 +302,38 @@ function SessionRow({
     : t(language, "未限定目录", "No workspace limit");
   const updated = formatTime(session.updatedAt ?? session.createdAt, language);
   return (
-    <View style={[rowStyle, compact ? { alignItems: "flex-start", flexDirection: "column", gap: 6 } : null]}>
-      <View style={{ flex: compact ? undefined : 1.2, minWidth: 0 }}>
+    <View style={[rowStyle, compact ? compactRowStyle : null]}>
+      <View style={{ flex: compact ? undefined : 1.05, minWidth: 0 }}>
         <Text numberOfLines={1} style={primaryTextStyle}>
           {hostLabel}
-        </Text>
-        <Text numberOfLines={1} style={secondaryMonoStyle}>
-          {shortId(session.sessionId)}
-        </Text>
-      </View>
-      <View style={{ flex: compact ? undefined : 1, minWidth: 0 }}>
-        <Text numberOfLines={1} style={primaryTextStyle}>
-          {readAgentLabel(session)}
         </Text>
         <Text numberOfLines={1} style={secondaryMonoStyle}>
           {shortId(session.hostId)}
         </Text>
       </View>
-      <View style={{ flex: compact ? undefined : 1.4, minWidth: 0 }}>
+      <View style={{ flex: compact ? undefined : 0.9, minWidth: 0 }}>
+        <Text numberOfLines={1} style={primaryTextStyle}>
+          {readAgentLabel(session)}
+        </Text>
+        <Text numberOfLines={1} style={secondaryTextStyle}>
+          {session.hostOnline ? t(language, "在线", "Online") : t(language, "离线", "Offline")} · {updated}
+        </Text>
+      </View>
+      <View style={{ flex: compact ? undefined : 1.15, minWidth: 0 }}>
         <Text numberOfLines={1} style={primaryTextStyle}>
           {workspaces}
         </Text>
-        {compact ? (
-          <Text numberOfLines={1} style={secondaryTextStyle}>
-            {updated}
-          </Text>
-        ) : null}
+        <SessionMeta language={language} session={session} />
       </View>
-      <View style={{ alignItems: compact ? "flex-start" : "flex-end", flex: compact ? undefined : 0.7, minWidth: compact ? undefined : 120 }}>
-        <Text style={[common.eyebrow, { color: session.hostOnline ? colors.green : colors.coral }]}>
-          {session.hostOnline ? t(language, "在线", "Online") : t(language, "离线", "Offline")}
-        </Text>
-        {!compact ? (
-          <Text numberOfLines={1} style={secondaryTextStyle}>
-            {updated}
-          </Text>
-        ) : null}
+      <View style={{ flex: compact ? undefined : 1.45, minWidth: 0 }}>
+        <SessionIdentity language={language} session={session} />
       </View>
+      <SessionActions
+        copiedKey={copiedKey}
+        language={language}
+        onCopy={onCopy}
+        session={session}
+      />
     </View>
   );
 }
@@ -302,11 +341,103 @@ function SessionRow({
 function SessionHeader({ language }: { language: LanguageMode }) {
   return (
     <View style={[rowStyle, { backgroundColor: "#F5F1E8", minHeight: 34, paddingVertical: 8 }]}>
-      <Text style={[headerCellStyle, { flex: 1.2 }]}>{t(language, "主机", "Host")}</Text>
-      <Text style={[headerCellStyle, { flex: 1 }]}>{t(language, "Agent", "Agent")}</Text>
-      <Text style={[headerCellStyle, { flex: 1.4 }]}>{t(language, "工作目录", "Workspace")}</Text>
-      <Text style={[headerCellStyle, { flex: 0.7, minWidth: 120, textAlign: "right" }]}>{t(language, "状态", "State")}</Text>
+      <Text style={[headerCellStyle, { flex: 1.05 }]}>{t(language, "主机", "Host")}</Text>
+      <Text style={[headerCellStyle, { flex: 0.9 }]}>{t(language, "Agent", "Agent")}</Text>
+      <Text style={[headerCellStyle, { flex: 1.15 }]}>{t(language, "上下文", "Context")}</Text>
+      <Text style={[headerCellStyle, { flex: 1.45 }]}>{t(language, "标识", "Identity")}</Text>
+      <Text style={[headerCellStyle, { minWidth: 154, textAlign: "right" }]}>{t(language, "操作", "Actions")}</Text>
     </View>
+  );
+}
+
+function SessionMeta({
+  language,
+  session,
+}: {
+  language: LanguageMode;
+  session: SessionRecord;
+}) {
+  const statusLabel = readStatusLabel(session.status, language);
+  const statusTone = readStatusTone(session.status);
+  const detail = session.error ?? session.latestEvent ?? "";
+  return (
+    <View style={{ gap: 1, minWidth: 0 }}>
+      <Text numberOfLines={1} style={[common.eyebrow, { color: statusTone }]}>
+        {statusLabel}
+      </Text>
+      {detail ? (
+        <Text numberOfLines={2} style={[secondaryTextStyle, session.error ? { color: colors.coral } : null]}>
+          {detail}
+        </Text>
+      ) : null}
+    </View>
+  );
+}
+
+function SessionIdentity({
+  language,
+  session,
+}: {
+  language: LanguageMode;
+  session: SessionRecord;
+}) {
+  return (
+    <View style={{ gap: 2, minWidth: 0 }}>
+      <Text selectable numberOfLines={1} style={secondaryMonoStyle}>
+        {t(language, "Session", "Session")} {session.sessionId}
+      </Text>
+      {session.connectionId ? (
+        <Text selectable numberOfLines={1} style={secondaryMonoStyle}>
+          {t(language, "连接", "Connection")} {session.connectionId}
+        </Text>
+      ) : null}
+      {session.requestId !== undefined ? (
+        <Text selectable numberOfLines={1} style={secondaryMonoStyle}>
+          {t(language, "请求", "Request")} {String(session.requestId)}
+        </Text>
+      ) : null}
+    </View>
+  );
+}
+
+function SessionActions({
+  copiedKey,
+  language,
+  onCopy,
+  session,
+}: {
+  copiedKey?: string;
+  language: LanguageMode;
+  onCopy: (value: string, key: string) => void;
+  session: SessionRecord;
+}) {
+  return (
+    <View style={actionRailStyle}>
+      <ActionButton
+        label={copiedKey === `${session.sessionId}:session` ? t(language, "已复制", "Copied") : t(language, "复制 ID", "Copy ID")}
+        onPress={() => onCopy(session.sessionId, `${session.sessionId}:session`)}
+      />
+      {session.connectionId ? (
+        <ActionButton
+          label={copiedKey === `${session.sessionId}:connection` ? t(language, "已复制", "Copied") : t(language, "复制连接", "Copy conn")}
+          onPress={() => onCopy(session.connectionId ?? "", `${session.sessionId}:connection`)}
+        />
+      ) : null}
+    </View>
+  );
+}
+
+function ActionButton({
+  label,
+  onPress,
+}: {
+  label: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable onPress={onPress} style={actionButtonStyle}>
+      <Text style={actionButtonTextStyle}>{label}</Text>
+    </Pressable>
   );
 }
 
@@ -327,6 +458,18 @@ function Panel({
       <Text style={[common.body, { marginTop: 8 }]}>{body}</Text>
     </View>
   );
+}
+
+async function copyText(value: string): Promise<boolean> {
+  if (
+    typeof navigator !== "undefined" &&
+    navigator.clipboard &&
+    typeof navigator.clipboard.writeText === "function"
+  ) {
+    await navigator.clipboard.writeText(value);
+    return true;
+  }
+  return false;
 }
 
 function readHostLabel(host: HostRecord): string {
@@ -354,6 +497,19 @@ function readAgentLabel(session: SessionRecord): string {
 
 function readAgentKey(session: SessionRecord): string {
   return session.agent?.id ?? session.agent?.command ?? session.agent?.type ?? "unknown";
+}
+
+function readStatusLabel(status: SessionRecord["status"], language: LanguageMode): string {
+  if (status === "waiting_authorization") return t(language, "等待授权", "Waiting");
+  if (status === "starting") return t(language, "启动中", "Starting");
+  if (status === "failed") return t(language, "失败", "Failed");
+  return t(language, "运行中", "Active");
+}
+
+function readStatusTone(status: SessionRecord["status"]): string {
+  if (status === "failed") return colors.coral;
+  if (status === "starting" || status === "waiting_authorization") return colors.cyan;
+  return colors.green;
 }
 
 function readWorkspaceLabel(path: string): string {
@@ -395,11 +551,67 @@ const toolbarStyle = {
 };
 
 const filterRailStyle = {
-  alignItems: "center" as const,
+  alignItems: "flex-start" as const,
   flexDirection: "row" as const,
   flexWrap: "wrap" as const,
   gap: 10,
   paddingBottom: 2,
+};
+
+const selectButtonStyle = {
+  alignItems: "center" as const,
+  backgroundColor: "#FFFFFF",
+  borderColor: colors.ink,
+  borderRadius: 8,
+  borderWidth: 1,
+  flexDirection: "row" as const,
+  gap: 8,
+  minHeight: 34,
+  paddingHorizontal: 10,
+};
+
+const selectButtonTextStyle = {
+  color: colors.ink,
+  flex: 1,
+  fontFamily: typography.sansSemi,
+  fontSize: 13,
+};
+
+const selectCaretStyle = {
+  color: colors.muted,
+  fontFamily: typography.sansSemi,
+  fontSize: 13,
+};
+
+const selectMenuStyle = {
+  backgroundColor: "#FFFFFF",
+  borderColor: colors.ink,
+  borderRadius: 8,
+  borderWidth: 1,
+  left: 0,
+  marginTop: 4,
+  overflow: "hidden" as const,
+  position: "absolute" as const,
+  right: 0,
+  shadowColor: colors.ink,
+  shadowOffset: { width: 3, height: 3 },
+  shadowOpacity: 1,
+  shadowRadius: 0,
+  top: 56,
+};
+
+const selectOptionStyle = {
+  borderBottomColor: colors.line,
+  borderBottomWidth: 1,
+  minHeight: 34,
+  justifyContent: "center" as const,
+  paddingHorizontal: 10,
+};
+
+const selectOptionTextStyle = {
+  color: colors.ink,
+  fontFamily: typography.sans,
+  fontSize: 13,
 };
 
 const rowStyle = {
@@ -408,9 +620,40 @@ const rowStyle = {
   borderBottomWidth: 1,
   flexDirection: "row" as const,
   gap: 12,
-  minHeight: 58,
+  minHeight: 56,
   paddingHorizontal: 12,
-  paddingVertical: 9,
+  paddingVertical: 8,
+};
+
+const compactRowStyle = {
+  alignItems: "flex-start" as const,
+  flexDirection: "column" as const,
+  gap: 7,
+};
+
+const actionRailStyle = {
+  alignItems: "center" as const,
+  flexDirection: "row" as const,
+  flexWrap: "wrap" as const,
+  gap: 6,
+  justifyContent: "flex-end" as const,
+  minWidth: 154,
+};
+
+const actionButtonStyle = {
+  backgroundColor: "#FFFFFF",
+  borderColor: colors.ink,
+  borderRadius: 7,
+  borderWidth: 1,
+  justifyContent: "center" as const,
+  minHeight: 30,
+  paddingHorizontal: 9,
+};
+
+const actionButtonTextStyle = {
+  color: colors.ink,
+  fontFamily: typography.sansSemi,
+  fontSize: 12,
 };
 
 const primaryTextStyle = {

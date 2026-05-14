@@ -31,12 +31,17 @@ export type SessionRecord = {
     id?: string;
     type?: string;
   };
+  connectionId?: string;
   createdAt?: string;
+  error?: string;
   hostId: string;
   hostMetadata?: HostRecord["metadata"];
   hostName?: string;
   hostOnline?: boolean;
+  latestEvent?: string;
+  requestId?: string | number;
   sessionId: string;
+  status?: "waiting_authorization" | "starting" | "active" | "failed";
   updatedAt?: string;
   workspaceRoots: string[];
 };

@@ -704,6 +704,143 @@ describe("AcpRelayBroker", () => {
     });
   });
 
+  it("lists a session while the host runtime is starting it", async () => {
+    const identity = await createProofFixture();
+    const broker = createBroker({ sessionOpenTimeoutMs: 0 });
+    const [hostSocket, relayHostSocket] = createMemoryWebSocketPair();
+    const hostFrames: unknown[] = [];
+    hostSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        hostFrames.push(JSON.parse(event.data));
+      }
+    });
+    await broker.registerHost({
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        displayName: "Studio Mac",
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: relayHostSocket,
+    });
+
+    const [, relayClientSocket] = createMemoryWebSocketPair();
+    broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      connectionProof: identity.proof,
+      socket: relayClientSocket,
+    });
+    await broker.authorizeClient({
+      clientAgent: { id: "fake-agent" },
+      connectionId: "conn-1",
+      hostId: "host-1",
+      skipHostBootstrapInitialize: true,
+      workspaceRoots: ["/workspace"],
+    });
+    await broker.handleClientText(
+      "conn-1",
+      JSON.stringify({
+        id: 41,
+        jsonrpc: "2.0",
+        method: "session/new",
+        params: { cwd: "/workspace/project", mcpServers: [] },
+      }),
+    );
+
+    await waitFor(() => hostFrames.length > 0);
+    await expect(
+      broker.listSessions({ accountId: "acct-1", clientId: "client-1" }),
+    ).resolves.toEqual({
+      ok: true,
+      sessions: [
+        expect.objectContaining({
+          agent: { id: "fake-agent" },
+          hostId: "host-1",
+          latestEvent: "Waiting for host runtime response.",
+          requestId: 41,
+          status: "starting",
+          workspaceRoots: ["/workspace"],
+        }),
+      ],
+    });
+  });
+
+  it("returns a product error when session start times out", async () => {
+    const identity = await createProofFixture();
+    const broker = createBroker({ sessionOpenTimeoutMs: 5 });
+    const [, relayHostSocket] = createMemoryWebSocketPair();
+    await broker.registerHost({
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        displayName: "Studio Mac",
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: relayHostSocket,
+    });
+
+    const [clientSocket, relayClientSocket] = createMemoryWebSocketPair();
+    const clientMessages: unknown[] = [];
+    clientSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        clientMessages.push(JSON.parse(event.data));
+      }
+    });
+    broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      connectionProof: identity.proof,
+      socket: relayClientSocket,
+    });
+    await broker.authorizeClient({
+      clientAgent: { id: "fake-agent" },
+      connectionId: "conn-1",
+      hostId: "host-1",
+      skipHostBootstrapInitialize: true,
+      workspaceRoots: ["/workspace"],
+    });
+    await broker.handleClientText(
+      "conn-1",
+      JSON.stringify({
+        id: 42,
+        jsonrpc: "2.0",
+        method: "session/new",
+        params: { cwd: "/workspace/project", mcpServers: [] },
+      }),
+    );
+
+    await waitFor(() => clientMessages.length > 0);
+    expect(clientMessages[0]).toMatchObject({
+      error: {
+        code: -32004,
+        data: { reason: "host_session_open_timeout" },
+        message:
+          "Host runtime did not respond to session start in time. Restart the host or choose another host.",
+      },
+      id: 42,
+      jsonrpc: "2.0",
+    });
+    await expect(
+      broker.listSessions({ accountId: "acct-1", clientId: "client-1" }),
+    ).resolves.toEqual({
+      ok: true,
+      sessions: [
+        expect.objectContaining({
+          error:
+            "Host runtime did not respond to session start in time. Restart the host or choose another host.",
+          hostId: "host-1",
+          requestId: 42,
+          status: "failed",
+        }),
+      ],
+    });
+  });
+
   it("keeps a custom host name while refreshing runtime metadata", async () => {
     const broker = new AcpRelayBroker({
       controlPlaneStore: new AcpRelayInMemoryControlPlaneStore({

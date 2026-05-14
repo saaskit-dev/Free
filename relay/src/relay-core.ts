@@ -42,6 +42,7 @@ export type AcpRelayBrokerOptions = {
   controlPlaneStore?: AcpRelayWritableControlPlaneStore;
   hostReconnectGraceMs?: number;
   heartbeatTimeoutMs?: number;
+  sessionOpenTimeoutMs?: number;
   maxBufferedFramesPerConnection?: number;
   maxQueuedFramesPerConnection?: number;
   maxConnectionsPerAccount?: number;
@@ -149,6 +150,7 @@ const DEFAULT_RECONNECT_GRACE_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_CLIENT_RECONNECT_GRACE_MS = DEFAULT_RECONNECT_GRACE_MS;
 const DEFAULT_HOST_RECONNECT_GRACE_MS = DEFAULT_RECONNECT_GRACE_MS;
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = 45 * 1000;
+const DEFAULT_SESSION_OPEN_TIMEOUT_MS = 35 * 1000;
 const DEFAULT_MAX_BUFFERED_FRAMES_PER_CONNECTION = Number.MAX_SAFE_INTEGER;
 const DEFAULT_MAX_QUEUED_FRAMES_PER_CONNECTION = Number.MAX_SAFE_INTEGER;
 const DEFAULT_COMPLETED_RESPONSE_CACHE_LIMIT = 256;
@@ -173,6 +175,7 @@ type RelayClient = {
   hostRuntimeInstanceId?: string;
   initializeParams?: unknown;
   hostRequests: Map<string | number, RelayJsonRpcRequest>;
+  hostRequestStates: Map<string | number, RelayHostRequestState>;
   lastHostSeq?: number;
   nativeClientAck: boolean;
   seq: number;
@@ -187,7 +190,24 @@ type RelayClient = {
     string,
     (selection: RelayAuthorizationSelection | undefined) => void
   >;
+  recentSessionFailures: Map<string | number, RelaySessionFailure>;
   waiters: Set<(hostId: string | undefined) => void>;
+};
+
+type RelayHostRequestState = {
+  connectionId: string;
+  startedAt: string;
+  timeout?: ReturnType<typeof setTimeout>;
+};
+
+type RelaySessionFailure = {
+  agent?: AcpRemoteAgentGrant;
+  connectionId: string;
+  error: string;
+  failedAt: string;
+  hostId?: string;
+  requestId: string | number;
+  workspaceRoots?: readonly string[];
 };
 
 type ConnectedRelayClient = RelayClient & {
@@ -277,12 +297,17 @@ export type AcpRelayAuthorizableHostsResult =
 
 export type AcpRelaySessionSummary = {
   agent?: AcpRemoteAgentGrant;
+  connectionId?: string;
   createdAt?: string;
+  error?: string;
   hostId: string;
   hostName?: string;
   hostOnline?: boolean;
   hostMetadata?: HostMetadata;
+  latestEvent?: string;
+  requestId?: string | number;
   sessionId: string;
+  status?: "waiting_authorization" | "starting" | "active" | "failed";
   updatedAt?: string;
   workspaceRoots: readonly string[];
 };
@@ -507,6 +532,7 @@ export class AcpRelayBroker {
   private readonly pendingAttachmentForwards =
     new Map<string, PendingAttachmentForward>();
   private readonly heartbeatTimeoutMs: number;
+  private readonly sessionOpenTimeoutMs: number;
   private readonly maxBufferedFramesPerConnection: number;
   private readonly maxQueuedFramesPerConnection: number;
   private readonly maxConnectionsPerAccount: number;
@@ -531,6 +557,8 @@ export class AcpRelayBroker {
       options.hostReconnectGraceMs ?? DEFAULT_HOST_RECONNECT_GRACE_MS;
     this.heartbeatTimeoutMs =
       options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS;
+    this.sessionOpenTimeoutMs =
+      options.sessionOpenTimeoutMs ?? DEFAULT_SESSION_OPEN_TIMEOUT_MS;
     this.maxBufferedFramesPerConnection =
       options.maxBufferedFramesPerConnection ??
       DEFAULT_MAX_BUFFERED_FRAMES_PER_CONNECTION;
@@ -685,6 +713,7 @@ export class AcpRelayBroker {
       hostQueuedFrames: [...(snapshot?.hostQueuedFrames ?? [])],
       hostPendingFrames: framesToSeqMap(snapshot?.hostPendingFrames),
       hostRequests: requestsToIdMap(snapshot?.hostRequests),
+      hostRequestStates: new Map(),
       hostId: hostId ?? snapshot?.hostId,
       hostRuntimeInstanceId: snapshot?.hostRuntimeInstanceId,
       initializeParams: snapshot?.initializeParams,
@@ -704,6 +733,7 @@ export class AcpRelayBroker {
       ]),
       pendingSessionSelections: new Map(),
       sessionSelectionWaiters: new Map(),
+      recentSessionFailures: new Map(),
       waiters: new Set(),
       transport,
     });
@@ -1139,6 +1169,7 @@ export class AcpRelayBroker {
         hostId: binding.hostId,
         hostOnline: host.online,
         sessionId: binding.sessionId,
+        status: "active",
         workspaceRoots: binding.workspaceRoots ?? [],
         ...(binding.agent ? { agent: binding.agent } : {}),
         ...(binding.createdAt ? { createdAt: binding.createdAt } : {}),
@@ -1149,9 +1180,179 @@ export class AcpRelayBroker {
           : {}),
       });
     }
+    const seenSessionIds = new Set(sessions.map((session) => session.sessionId));
+    for (const session of await this.activeSessionLifecycleSummaries({
+      accountId: input.accountId,
+      clientId: input.clientId,
+    })) {
+      if (seenSessionIds.has(session.sessionId)) {
+        continue;
+      }
+      sessions.push(session);
+      seenSessionIds.add(session.sessionId);
+    }
     return {
       ok: true,
       sessions: sessions.slice(0, input.limit),
+    };
+  }
+
+  private async activeSessionLifecycleSummaries(input: {
+    accountId: string;
+    clientId: string;
+  }): Promise<AcpRelaySessionSummary[]> {
+    const summaries: AcpRelaySessionSummary[] = [];
+    const hostIds = new Set<string>();
+    for (const client of this.clients.values()) {
+      if (client.accountId !== input.accountId) {
+        continue;
+      }
+      for (const hostId of this.clientLifecycleHostIds(client)) {
+        hostIds.add(hostId);
+      }
+    }
+    if (hostIds.size === 0) {
+      return [];
+    }
+
+    const visibleHosts = await this.discoverableHostRecords({
+      accountId: input.accountId,
+      clientId: input.clientId,
+      hostIds: [...hostIds],
+    });
+    const hostsById = new Map(visibleHosts.map((host) => [host.hostId, host]));
+    for (const [connectionId, client] of this.clients.entries()) {
+      if (client.accountId !== input.accountId) {
+        continue;
+      }
+      for (const request of client.hostRequests.values()) {
+        if (!isSessionOpenRequest(request) || !isStoredJsonRpcId(request.id)) {
+          continue;
+        }
+        const selection = readSessionRestoreSelection(request) ?? client.lastAuthorization;
+        const hostId = selection?.hostId ?? client.hostId;
+        if (!hostId) {
+          continue;
+        }
+        const host = hostsById.get(hostId);
+        if (!host) {
+          continue;
+        }
+        const state = client.hostRequestStates.get(request.id);
+        summaries.push(this.createSessionSummary({
+          agent: selection?.agent,
+          connectionId,
+          createdAt: state?.startedAt,
+          host,
+          latestEvent: "Waiting for host runtime response.",
+          requestId: request.id,
+          sessionId: `starting:${connectionId}:${String(request.id)}`,
+          status: "starting",
+          updatedAt: state?.startedAt,
+          workspaceRoots: selection?.workspaceRoots ?? [],
+        }));
+      }
+      for (const [sessionSelectionId, selection] of client.pendingSessionSelections) {
+        const host = hostsById.get(selection.hostId);
+        if (!host) {
+          continue;
+        }
+        summaries.push(this.createSessionSummary({
+          agent: selection.agent,
+          connectionId,
+          host,
+          latestEvent: "Waiting for ACP client to consume authorization.",
+          requestId: sessionSelectionId,
+          sessionId: `authorization:${connectionId}:${sessionSelectionId}`,
+          status: "waiting_authorization",
+          workspaceRoots: selection.workspaceRoots ?? [],
+        }));
+      }
+      for (const failure of client.recentSessionFailures.values()) {
+        const hostId = failure.hostId;
+        if (!hostId) {
+          continue;
+        }
+        const host = hostsById.get(hostId);
+        if (!host) {
+          continue;
+        }
+        summaries.push(this.createSessionSummary({
+          agent: failure.agent,
+          connectionId: failure.connectionId,
+          error: failure.error,
+          host,
+          latestEvent: "Session start failed.",
+          requestId: failure.requestId,
+          sessionId: `failed:${failure.connectionId}:${String(failure.requestId)}`,
+          status: "failed",
+          updatedAt: failure.failedAt,
+          workspaceRoots: failure.workspaceRoots ?? [],
+        }));
+      }
+    }
+    return summaries;
+  }
+
+  private clientLifecycleHostIds(client: RelayClient): string[] {
+    const hostIds = new Set<string>();
+    if (client.hostId) {
+      hostIds.add(client.hostId);
+    }
+    if (client.lastAuthorization?.hostId) {
+      hostIds.add(client.lastAuthorization.hostId);
+    }
+    for (const selection of client.pendingSessionSelections.values()) {
+      hostIds.add(selection.hostId);
+    }
+    for (const request of client.hostRequests.values()) {
+      if (!isSessionOpenRequest(request)) {
+        continue;
+      }
+      const selection = readSessionRestoreSelection(request);
+      const hostId = selection?.hostId ?? client.hostId;
+      if (hostId) {
+        hostIds.add(hostId);
+      }
+    }
+    for (const failure of client.recentSessionFailures.values()) {
+      if (failure.hostId) {
+        hostIds.add(failure.hostId);
+      }
+    }
+    return [...hostIds];
+  }
+
+  private createSessionSummary(input: {
+    agent?: AcpRemoteAgentGrant;
+    connectionId?: string;
+    createdAt?: string;
+    error?: string;
+    host: { hostId: string; metadata?: HostMetadata; online?: boolean };
+    latestEvent?: string;
+    requestId?: string | number;
+    sessionId: string;
+    status: NonNullable<AcpRelaySessionSummary["status"]>;
+    updatedAt?: string;
+    workspaceRoots: readonly string[];
+  }): AcpRelaySessionSummary {
+    return {
+      hostId: input.host.hostId,
+      hostOnline: input.host.online,
+      sessionId: input.sessionId,
+      status: input.status,
+      workspaceRoots: input.workspaceRoots,
+      ...(input.agent ? { agent: input.agent } : {}),
+      ...(input.connectionId ? { connectionId: input.connectionId } : {}),
+      ...(input.createdAt ? { createdAt: input.createdAt } : {}),
+      ...(input.error ? { error: input.error } : {}),
+      ...(input.latestEvent ? { latestEvent: input.latestEvent } : {}),
+      ...(input.requestId !== undefined ? { requestId: input.requestId } : {}),
+      ...(input.updatedAt ? { updatedAt: input.updatedAt } : {}),
+      ...(input.host.metadata ? { hostMetadata: input.host.metadata } : {}),
+      ...(input.host.metadata?.displayName || input.host.metadata?.machine
+        ? { hostName: input.host.metadata.displayName ?? input.host.metadata.machine }
+        : {}),
     };
   }
 
@@ -1778,6 +1979,13 @@ export class AcpRelayBroker {
         client &&
         frame.channelKind === AcpRemoteChannelKind.Acp &&
         isSuppressedHostBootstrapResponse(client, frame.payload)
+      ) {
+        return frame.connectionId;
+      }
+      if (
+        client &&
+        frame.channelKind === AcpRemoteChannelKind.Acp &&
+        this.isSuppressedLateHostResponse(client, frame.payload)
       ) {
         return frame.connectionId;
       }
@@ -2720,6 +2928,12 @@ export class AcpRelayBroker {
 
   private clearHostJsonRpcRequests(client: RelayClient): void {
     client.hostRequests.clear();
+    for (const state of client.hostRequestStates.values()) {
+      if (state.timeout) {
+        clearTimeout(state.timeout);
+      }
+    }
+    client.hostRequestStates.clear();
   }
 
   private markHostDisconnected(hostId: string, reason: string): void {
@@ -2776,6 +2990,7 @@ export class AcpRelayBroker {
           continue;
         }
         client.hostRequests.delete(requestId);
+        this.clearHostRequestState(client, requestId);
         this.rejectHostRequestAfterRuntimeRestart(
           connectionId,
           client,
@@ -3237,6 +3452,7 @@ export class AcpRelayBroker {
     const request = client.hostRequests.get(response.id);
     if (request) {
       client.hostRequests.delete(response.id);
+      this.clearHostRequestState(client, response.id);
     }
     this.rememberCompletedClientResponse(client, response);
     if (request && !response.error) {
@@ -3275,7 +3491,7 @@ export class AcpRelayBroker {
   }
 
   private trackHostJsonRpcRequest(
-    _connectionId: string,
+    connectionId: string,
     client: RelayClient,
     request: RelayJsonRpcRequest,
   ): void {
@@ -3284,6 +3500,112 @@ export class AcpRelayBroker {
     }
     const requestId = request.id;
     client.hostRequests.set(requestId, request);
+    this.clearHostRequestState(client, requestId);
+    const state: RelayHostRequestState = {
+      connectionId,
+      startedAt: this.now().toISOString(),
+    };
+    if (isSessionOpenRequest(request) && this.sessionOpenTimeoutMs > 0) {
+      state.timeout = setTimeout(() => {
+        this.failTimedOutSessionOpenRequest(connectionId, client, request);
+      }, this.sessionOpenTimeoutMs);
+    }
+    client.hostRequestStates.set(requestId, state);
+  }
+
+  private clearHostRequestState(
+    client: RelayClient,
+    requestId: string | number,
+  ): void {
+    const state = client.hostRequestStates.get(requestId);
+    if (state?.timeout) {
+      clearTimeout(state.timeout);
+    }
+    client.hostRequestStates.delete(requestId);
+  }
+
+  private failTimedOutSessionOpenRequest(
+    connectionId: string,
+    client: RelayClient,
+    request: RelayJsonRpcRequest,
+  ): void {
+    if (!isStoredJsonRpcId(request.id)) {
+      return;
+    }
+    const requestId = request.id;
+    if (client.hostRequests.get(requestId) !== request) {
+      return;
+    }
+    client.hostRequests.delete(requestId);
+    this.clearHostRequestState(client, requestId);
+
+    const selection = readSessionRestoreSelection(request) ?? client.lastAuthorization;
+    const message =
+      "Host runtime did not respond to session start in time. Restart the host or choose another host.";
+    client.recentSessionFailures.set(requestId, {
+      agent: selection?.agent,
+      connectionId,
+      error: message,
+      failedAt: this.now().toISOString(),
+      hostId: selection?.hostId ?? client.hostId,
+      requestId,
+      workspaceRoots: selection?.workspaceRoots,
+    });
+    while (client.recentSessionFailures.size > 32) {
+      const firstKey = client.recentSessionFailures.keys().next().value;
+      if (firstKey === undefined) {
+        break;
+      }
+      client.recentSessionFailures.delete(firstKey);
+    }
+
+    const error = {
+      code: -32004,
+      data: {
+        connectionId,
+        hostId: selection?.hostId ?? client.hostId,
+        method: request.method,
+        reason: "host_session_open_timeout",
+        requestId,
+        timeoutMs: this.sessionOpenTimeoutMs,
+      },
+      message,
+    };
+    this.rememberCompletedClientResponse(client, {
+      error,
+      id: requestId,
+      jsonrpc: "2.0",
+    });
+    this.logRelayLifecycle({
+      accountId: client.accountId,
+      clientId: client.clientId,
+      connectionId,
+      hostId: selection?.hostId ?? client.hostId,
+      eventName: "acp.relay.session_open.timeout",
+      jsonRpcId: requestId,
+      method: request.method,
+      severityText: "ERROR",
+      traceContext: readAcpRemoteTraceContextFromJsonRpcMessage(request),
+      transport: client.transport,
+    });
+    if (client.socket) {
+      sendJsonRpcError(client.socket, request, error);
+    }
+  }
+
+  private isSuppressedLateHostResponse(
+    client: RelayClient,
+    payload: unknown,
+  ): boolean {
+    const response = isJsonRpcResponsePayload(payload) ? payload : undefined;
+    if (!response || !isStoredJsonRpcId(response.id)) {
+      return false;
+    }
+    if (client.hostRequests.has(response.id)) {
+      return false;
+    }
+    const completed = client.completedClientResponses.get(response.id);
+    return Boolean(completed?.error);
   }
 
   private rememberSessionControlRequest(
@@ -4895,6 +5217,7 @@ function isSuppressedHostBootstrapResponse(
 
   client.hostBootstrapRequestIds.delete(id);
   client.hostRequests.delete(id);
+  client.hostRequestStates.delete(id);
   return true;
 }
 
