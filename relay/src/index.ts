@@ -120,9 +120,11 @@ export default {
       url.pathname !== "/api/otel/logs" &&
       url.pathname !== "/api/otel/traces" &&
       url.pathname !== "/api/session" &&
+      url.pathname !== "/api/sessions" &&
       url.pathname !== "/api/login/start" &&
       url.pathname !== "/api/login/callback" &&
       url.pathname !== "/api/login/confirm" &&
+      url.pathname !== "/api/authorize" &&
       !url.pathname.startsWith("/api/login/approvals/") &&
       url.pathname !== "/attachments" &&
       url.pathname !== "/logout" &&
@@ -225,7 +227,11 @@ export default {
       );
     }
 
-    if (url.pathname === "/api/hosts" || url.pathname.startsWith("/api/hosts/")) {
+    if (
+      url.pathname === "/api/hosts" ||
+      url.pathname.startsWith("/api/hosts/") ||
+      url.pathname === "/api/sessions"
+    ) {
       const accountSession = await verifyAccountSessionRequest({
         env,
         request,
@@ -245,13 +251,31 @@ export default {
         .then((response) => withWorkbenchApiCors(response, request, env));
     }
 
-    if (url.pathname === "/authorize") {
+    if (url.pathname === "/authorize" && request.method === "GET") {
+      const workbenchOrigin = resolveWorkbenchOrigin({ env, request });
+      if (workbenchOrigin) {
+        const workbenchUrl = new URL("/authorize", workbenchOrigin);
+        url.searchParams.forEach((value, key) => {
+          workbenchUrl.searchParams.append(key, value);
+        });
+        return Response.redirect(workbenchUrl.toString(), 302);
+      }
+    }
+
+    if (url.pathname === "/authorize" || url.pathname === "/api/authorize") {
       const accountSession = await verifyAccountSessionRequest({
         env,
         request,
         requestedAccountId: resolveRequestedAccountId(request, url),
       });
       if (!accountSession.ok) {
+        if (url.pathname === "/api/authorize") {
+          return withWorkbenchApiCors(
+            json({ error: accountSession.reason }, { status: accountSession.status }),
+            request,
+            env,
+          );
+        }
         return createAuthorizationSessionFailureResponse({
           env,
           failure: accountSession,
@@ -265,7 +289,12 @@ export default {
       );
       return env.ACP_RELAY_SHARDS
         .get(shardId)
-        .fetch(withVerifiedAccountSession(request, accountSession.session));
+        .fetch(withVerifiedAccountSession(request, accountSession.session))
+        .then((response) =>
+          url.pathname === "/api/authorize"
+            ? withWorkbenchApiCors(response, request, env)
+            : response,
+        );
     }
 
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
@@ -432,7 +461,7 @@ export class AcpRelayShard {
     if (url.pathname === "/internal/reconcile-authorizations") {
       return this.reconcileAuthorizations(request);
     }
-    if (url.pathname === "/authorize") {
+    if (url.pathname === "/authorize" || url.pathname === "/api/authorize") {
       return this.authorize(request, url);
     }
 
@@ -442,6 +471,10 @@ export class AcpRelayShard {
 
     if (url.pathname === "/api/hosts" || url.pathname.startsWith("/api/hosts/")) {
       return this.handleHostApi(request, url);
+    }
+
+    if (url.pathname === "/api/sessions") {
+      return this.handleSessionsApi(request, url);
     }
 
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
@@ -886,11 +919,37 @@ export class AcpRelayShard {
     }
 
     const hostsResult = await this.broker.discoverableHostsForConnection(connectionId);
+    const fallbackHostsResult = hostsResult.ok
+      ? undefined
+      : await this.broker.discoverableHostsForAccount({
+        accountId,
+        clientId:
+          request.headers.get("x-acp-verified-client-id") ??
+          request.headers.get("x-acp-verified-principal-id") ??
+          undefined,
+      });
+    const hosts = hostsResult.ok
+      ? hostsResult.hosts
+      : fallbackHostsResult?.ok
+        ? fallbackHostsResult.hosts
+        : hostsResult.hosts ?? [];
+    if (url.pathname === "/api/authorize") {
+      return json({
+        accountId,
+        connectionId,
+        hosts,
+        unavailableReason: hostsResult.ok ? undefined : hostsResult.reason,
+      }, {
+        headers: {
+          "Cache-Control": "no-store",
+        },
+      });
+    }
     return html(
       createRelayAuthorizationPage({
         accountId,
         connectionId,
-        hosts: hostsResult.ok ? hostsResult.hosts : [],
+        hosts,
         requestUrl: request.url,
         unavailableReason: hostsResult.ok ? undefined : hostsResult.reason,
       }),
@@ -989,6 +1048,35 @@ export class AcpRelayShard {
       return json({ error: "Host not found." }, { status: 404 });
     }
     return json(host);
+  }
+
+  private async handleSessionsApi(request: Request, url: URL): Promise<Response> {
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      return json({ error: "Method not allowed." }, {
+        headers: { allow: "GET, HEAD" },
+        status: 405,
+      });
+    }
+    const accountId = resolveVerifiedAccountId(request);
+    if (!accountId) {
+      return json({ error: "ACP relay account session is required." }, { status: 401 });
+    }
+    const clientId =
+      request.headers.get("x-acp-verified-client-id") ??
+      request.headers.get("x-acp-verified-principal-id") ??
+      "";
+    const rawLimit = url.searchParams.get("limit");
+    const limit = rawLimit ? Number.parseInt(rawLimit, 10) : undefined;
+    const result = await this.broker.listSessions({
+      accountId,
+      clientId,
+      limit: Number.isFinite(limit) ? limit : undefined,
+    });
+    return json({ sessions: result.sessions }, {
+      headers: {
+        "Cache-Control": "no-store",
+      },
+    });
   }
 
   private async handleAttachmentUpload(
@@ -1207,10 +1295,12 @@ function isWorkbenchApiCorsPath(pathname: string): boolean {
   return (
     pathname === "/health" ||
     pathname === "/api/session" ||
+    pathname === "/api/sessions" ||
     pathname === "/api/login/start" ||
     pathname === "/api/login/callback" ||
     pathname === "/api/login/confirm" ||
     pathname.startsWith("/api/login/approvals/") ||
+    pathname === "/api/authorize" ||
     pathname === "/api/hosts" ||
     pathname.startsWith("/api/hosts/")
   );
@@ -1663,14 +1753,14 @@ function resolveWorkbenchOrigin(input: {
     return new URL(requestOrigin).origin;
   }
 
-  const configuredOrigin = readConfiguredWorkbenchOrigin(input.env);
-  if (configuredOrigin) {
-    return configuredOrigin;
-  }
-
   const relayLocalOrigin = deriveLocalWorkbenchOriginFromRelayRequest(input.request);
   if (relayLocalOrigin) {
     return relayLocalOrigin;
+  }
+
+  const configuredOrigin = readConfiguredWorkbenchOrigin(input.env);
+  if (configuredOrigin) {
+    return configuredOrigin;
   }
 
   if (!input.returnTo) {

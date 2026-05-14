@@ -15,6 +15,8 @@ import {
   type AcpRemoteWebSocketConstructor,
 } from "../shared/relay-socket.js";
 import { ACP_REMOTE_DEFAULT_RELAY_URL } from "../defaults.js";
+import { FREE_LOCAL_RELAY_URL } from "../relay-environment.js";
+import { getSessionPath } from "../host/host-login.js";
 import {
   createFreeBridgeStdioConfig,
   createFreeBridgeZedConfig,
@@ -121,10 +123,10 @@ function appendLogSuffix(
   parts.push(`${name}=${value}`);
 }
 
-function loadCachedAccountCredential(): AcpRemoteAccountSessionCredential | undefined {
+function loadCachedAccountCredential(relayUrl: string): AcpRemoteAccountSessionCredential | undefined {
   try {
     const data = JSON.parse(
-      readFileSync(join(homedir(), ".free", "account-session.json"), "utf8"),
+      readFileSync(getSessionPath(undefined, relayUrl), "utf8"),
     ) as unknown;
     if (
       typeof data === "object" &&
@@ -181,7 +183,7 @@ async function resolveBridgeHostId(input: {
     : [];
   const onlineHosts = hosts.filter((host) => host.online !== false);
   if (onlineHosts.length === 0) {
-    throw new Error("No online Free host found. Run `free auth login` or `free host run` first.");
+    throw new Error(createNoOnlineHostMessage(input.relayUrl));
   }
   if (onlineHosts.length === 1) {
     return {
@@ -206,9 +208,37 @@ async function resolveBridgeHostId(input: {
   };
 }
 
+function createNoOnlineHostMessage(relayUrl: string): string {
+  return [
+    `No online Free host found for ${describeRelayTarget(relayUrl)}.`,
+    `Run \`${authLoginCommandForRelay(relayUrl)}\` to sign in and start the local Free host.`,
+  ].join(" ");
+}
+
+function describeRelayTarget(relayUrl: string): string {
+  if (relayUrl === FREE_LOCAL_RELAY_URL) {
+    return `local relay (${relayUrl})`;
+  }
+  if (relayUrl === ACP_REMOTE_DEFAULT_RELAY_URL) {
+    return `online relay (${relayUrl})`;
+  }
+  return `custom relay (${relayUrl})`;
+}
+
+function authLoginCommandForRelay(relayUrl: string): string {
+  if (relayUrl === FREE_LOCAL_RELAY_URL) {
+    return "free auth login --relay-env local";
+  }
+  if (relayUrl === ACP_REMOTE_DEFAULT_RELAY_URL) {
+    return "free auth login --relay-env online";
+  }
+  return `free auth login --relay-url ${relayUrl}`;
+}
+
 type HostDiscoveryEntry = {
   hostId: string;
   metadata?: {
+    displayName?: string;
     machine?: string;
   };
   online?: boolean;
@@ -228,6 +258,25 @@ function compareHostDiscoveryEntries(
   right: HostDiscoveryEntry,
 ): number {
   return left.hostId.localeCompare(right.hostId);
+}
+
+function createHostDisplayNameMap(
+  hosts: readonly HostDiscoveryEntry[],
+): ReadonlyMap<string, string> {
+  const labels = new Map<string, string>();
+  for (const host of hosts) {
+    const displayName = readHostMetadataString(host.metadata?.displayName);
+    const machine = readHostMetadataString(host.metadata?.machine);
+    const label = displayName || machine;
+    if (label) {
+      labels.set(host.hostId, label);
+    }
+  }
+  return labels;
+}
+
+function readHostMetadataString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 async function main(): Promise<void> {
@@ -282,10 +331,10 @@ async function main(): Promise<void> {
     env: process.env,
   });
   const accountCredential =
-    readAccountCredentialFromEnv() ?? loadCachedAccountCredential();
+    readAccountCredentialFromEnv() ?? loadCachedAccountCredential(relayUrl);
   if (!accountCredential) {
     throw new Error(
-      `${ACP_ACCOUNT_SESSION_ENV} or ~/.free/account-session.json is required.`,
+      `${ACP_ACCOUNT_SESSION_ENV} or ${getSessionPath(undefined, relayUrl)} is required.`,
     );
   }
   const clientId = accountCredential.accountSession.principalId;
@@ -337,9 +386,11 @@ async function main(): Promise<void> {
   const bridge = createAcpRemoteStdioBridge({
     connectionId,
     connectionProof,
+    connectionProofCredential: accountCredential,
     connectionProofs,
     clientId,
     debugLog,
+    hostDisplayNames: createHostDisplayNameMap(hostSelection.hosts),
     onClose() {
       log("bridge closed.");
       exitAfterLogUpload(0);

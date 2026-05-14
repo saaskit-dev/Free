@@ -78,7 +78,7 @@ export function LoginApprovalScreen({ approvalId, language }: LoginApprovalScree
         <View style={{ padding: compact ? 18 : 26, gap: 18 }}>
           {approval.status === "loading" ? (
             <Text style={common.body}>
-              {t(language, "正在从 relay 读取登录授权。", "Reading login approval from the relay.")}
+              {t(language, "正在读取登录授权。", "Reading login approval.")}
             </Text>
           ) : null}
 

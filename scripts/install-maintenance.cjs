@@ -217,7 +217,7 @@ function restartLaunchdService(input) {
   try {
     execFileSync("launchctl", ["kickstart", "-k", input.target], { stdio: "ignore" });
   } catch {
-    // The next explicit host status command remains the source of truth.
+    // Workbench host discovery and the host logs remain the source of truth.
   }
 }
 

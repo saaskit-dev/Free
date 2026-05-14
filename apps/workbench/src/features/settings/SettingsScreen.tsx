@@ -71,8 +71,8 @@ export function SettingsScreen({
         <SettingsPanel
           description={t(
             language,
-            "选择工作台在 Web 和 Electron 容器中的显示方式。跟随系统会读取当前设备外观设置。",
-            "Choose how the workbench appears on Web and Electron. System follows the device appearance.",
+            "跟随系统会自动匹配当前设备外观。",
+            "System follows the current device appearance.",
           )}
           title={t(language, "外观", "Appearance")}
         >
@@ -92,8 +92,8 @@ export function SettingsScreen({
         <SettingsPanel
           description={t(
             language,
-            "语言会立即应用到现有工作台页面。后续新增页面也必须先接入同一套文案。",
-            "Language applies immediately to current workbench pages. New pages must use the same copy layer first.",
+            "切换后会立即应用到工作台界面。",
+            "Changes apply to the workbench immediately.",
           )}
           title={t(language, "语言", "Language")}
         >
@@ -110,11 +110,7 @@ export function SettingsScreen({
 
       {category === "account" ? (
         <SettingsPanel
-          description={t(
-            language,
-            "账号状态来自 /api/session。这里不展示模拟账号，也不提供尚未接入 API 的账号功能。",
-            "Account state comes from /api/session. This panel does not show mock accounts or API-free account features.",
-          )}
+          description={t(language, "当前登录账号和会话状态。", "Current account and session status.")}
           title={t(language, "账号", "Account")}
         >
           <AccountState language={language} session={session} />
@@ -125,8 +121,8 @@ export function SettingsScreen({
         <SettingsPanel
           description={t(
             language,
-            "当前偏好只保存在本机浏览器 localStorage，不会写入 relay。清除后会回到默认设置。",
-            "Current preferences are stored only in this browser localStorage and are not written to the relay.",
+            "清除后会恢复默认主题和语言。",
+            "Clearing restores the default theme and language.",
           )}
           title={t(language, "隐私与本机数据", "Privacy and local data")}
         >

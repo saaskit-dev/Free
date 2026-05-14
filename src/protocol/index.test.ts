@@ -9,10 +9,19 @@ import {
   createAcpRemoteConnectionProof,
   exportEd25519PrivateKey,
   exportEd25519PublicKey,
+  readAcpRemoteAccountSessionVerificationKeys,
   verifyAcpRemoteConnectionProof,
 } from "./index.js";
 
 describe("remote account sessions", () => {
+  it("includes production and local development authority keys by default", () => {
+    expect(readAcpRemoteAccountSessionVerificationKeys().map((key) => key.kid))
+      .toEqual([
+        "free-prod-2026-05-10",
+        "free-default-2026-05-10",
+      ]);
+  });
+
   it("verifies an authority-signed account session and client-held connection proof", async () => {
     const { authority, client } = await createIdentityKeys();
     const accountSession = await createAcpRemoteAccountSession({

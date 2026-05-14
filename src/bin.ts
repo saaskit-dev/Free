@@ -10,10 +10,6 @@ async function main(argv: readonly string[]): Promise<void> {
     printHelp();
     return;
   }
-  if (command === "host") {
-    await runInternalBin("host/bin.js", rest);
-    return;
-  }
   if (command === "auth") {
     await runInternalBin("auth-bin.js", rest);
     return;
@@ -55,13 +51,10 @@ function printHelp(): void {
       "  free auth login",
       "  free auth status",
       "  free auth logout",
-      "  free host install",
-      "  free host status",
-      "  free host restart",
-      "  free host run",
       "  free bridge run",
       "  free bridge config",
       "",
+      "free auth login signs in and starts the local Free host service.",
       "Default relay environment is online. Use --relay-env local for ws://127.0.0.1:8791.",
       "",
       "Run a subcommand with --help for details.",

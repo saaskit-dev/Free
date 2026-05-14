@@ -7,10 +7,155 @@ import type {
   AcpWebSocketLike,
   AcpWebSocketMessageListener,
 } from "../protocol/websocket-stream.js";
-import type { AcpRemoteConnectionProof } from "../protocol/index.js";
+import {
+  createAcpRemoteAccountSession,
+  decodeAcpRemoteConnectionProof,
+  type AcpRemoteAccountSessionCredential,
+  type AcpRemoteConnectionProof,
+} from "../protocol/index.js";
 import { createAcpRemoteStdioBridge } from "./stdio-bridge.js";
 
 describe("createAcpRemoteStdioBridge", () => {
+  it("returns an ACP error when browser authorization is not completed", async () => {
+    const previousTimeout = process.env.FREE_BRIDGE_AUTH_REQUEST_TIMEOUT_MS;
+    process.env.FREE_BRIDGE_AUTH_REQUEST_TIMEOUT_MS = "1000";
+    const input = new PassThrough();
+    const output = new PassThrough();
+    let outputText = "";
+    const openedUrls: string[] = [];
+    output.setEncoding("utf8");
+    output.on("data", (chunk: string) => {
+      outputText += chunk;
+    });
+    const sockets: TestSocket[] = [];
+    const bridge = createAcpRemoteStdioBridge({
+      clientId: "client-1",
+      connectionId: "connection-1",
+      input,
+      openAuthUrl(url) {
+        openedUrls.push(url);
+      },
+      output,
+      relayUrl: "ws://127.0.0.1:8791",
+      socketFactory() {
+        const socket = new TestSocket();
+        sockets.push(socket);
+        return socket;
+      },
+    });
+
+    try {
+      sockets[0]?.emitMessage(
+        JSON.stringify({
+          id: 1,
+          jsonrpc: "2.0",
+          result: {
+            authMethods: [{
+              _meta: {
+                "acp-runtime/remote/authUrl":
+                  "http://127.0.0.1:8791/authorize?connectionId=connection-1",
+              },
+              id: "acp-runtime-browser",
+              name: "Sign in with Free",
+            }],
+          },
+        }),
+      );
+      input.write(
+        `${JSON.stringify({
+          id: 2,
+          jsonrpc: "2.0",
+          method: "session/new",
+          params: { cwd: "/tmp/project", mcpServers: [] },
+        })}\n`,
+      );
+      await new Promise<void>((resolve) => process.nextTick(resolve));
+
+      expect(openedUrls).toEqual([
+        expect.stringContaining("http://127.0.0.1:8790/authorize?connectionId=connection-1"),
+      ]);
+      await waitFor(() => outputText.includes('"id":2'), 1300);
+
+      const messages = outputText
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { error?: { data?: { authUrl?: string }; message?: string }; id?: number });
+      expect(messages.at(-1)).toMatchObject({
+        error: {
+          data: {
+            authUrl: expect.stringContaining("http://127.0.0.1:8790/authorize?connectionId=connection-1"),
+          },
+          message: "Free authorization was not completed in time. Start a new session from the ACP client to continue.",
+        },
+        id: 2,
+      });
+    } finally {
+      bridge.close();
+      if (previousTimeout === undefined) {
+        delete process.env.FREE_BRIDGE_AUTH_REQUEST_TIMEOUT_MS;
+      } else {
+        process.env.FREE_BRIDGE_AUTH_REQUEST_TIMEOUT_MS = previousTimeout;
+      }
+    }
+  });
+
+  it("rewrites relay authorization metadata to the Workbench origin", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    let outputText = "";
+    output.setEncoding("utf8");
+    output.on("data", (chunk: string) => {
+      outputText += chunk;
+    });
+    const sockets: TestSocket[] = [];
+    const bridge = createAcpRemoteStdioBridge({
+      clientId: "client-1",
+      connectionId: "connection-1",
+      input,
+      output,
+      relayUrl: "ws://127.0.0.1:8791",
+      socketFactory() {
+        const socket = new TestSocket();
+        sockets.push(socket);
+        return socket;
+      },
+    });
+
+    try {
+      sockets[0]?.emitMessage(
+        JSON.stringify({
+          id: 1,
+          jsonrpc: "2.0",
+          result: {
+            authMethods: [{
+              _meta: {
+                "acp-runtime/remote/authUrl":
+                  "http://127.0.0.1:8791/authorize?connectionId=conn-1",
+              },
+              id: "acp-runtime-browser",
+              name: "Sign in with Free",
+            }],
+          },
+        }),
+      );
+
+      await waitFor(() => outputText.trim().length > 0);
+      const outputMessage = JSON.parse(outputText.trim()) as {
+        result?: {
+          authMethods?: {
+            _meta?: Record<string, string>;
+          }[];
+        };
+      };
+      expect(
+        outputMessage.result?.authMethods?.[0]?._meta?.["acp-runtime/remote/authUrl"],
+      ).toBe("http://127.0.0.1:8790/authorize?connectionId=conn-1");
+    } finally {
+      bridge.close();
+    }
+  });
+
   it("injects trace metadata and reuses it for response debug context", async () => {
     const input = new PassThrough();
     const output = new PassThrough();
@@ -152,11 +297,15 @@ describe("createAcpRemoteStdioBridge", () => {
     const sockets: TestSocket[] = [];
     const imageBody = Buffer.from("image-bytes");
     const proof = createFakeConnectionProof();
+    const credential = await createTestAccountCredential();
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const requestUrl = new URL(String(url));
       const headers = init?.headers as Record<string, string>;
       const body = init?.body as Uint8Array;
       const attachmentId = requestUrl.searchParams.get("attachmentId") ?? "";
+      const uploadProof = decodeAcpRemoteConnectionProof(
+        headers["x-acp-connection-proof"] ?? "",
+      );
 
       expect(requestUrl.protocol).toBe("http:");
       expect(requestUrl.pathname).toBe("/attachments");
@@ -166,6 +315,11 @@ describe("createAcpRemoteStdioBridge", () => {
       expect(headers["content-type"]).toBe("image/png");
       expect(headers["x-acp-client-id"]).toBe("client-1");
       expect(headers["x-acp-connection-proof"]).toBeTruthy();
+      expect(uploadProof.connectionId).toBe("connection-1");
+      expect(uploadProof.hostId).toBe("host-1");
+      expect(Date.parse(uploadProof.timestamp)).toBeGreaterThan(
+        Date.parse(proof.timestamp),
+      );
       expect(headers["x-free-attachment-id"]).toBe(attachmentId);
       expect(Buffer.from(body).toString("utf8")).toBe("image-bytes");
 
@@ -186,6 +340,7 @@ describe("createAcpRemoteStdioBridge", () => {
       clientId: "client-1",
       connectionId: "connection-1",
       connectionProof: proof,
+      connectionProofCredential: credential,
       input,
       output,
       relayUrl: "ws://relay.test/socket",
@@ -532,7 +687,7 @@ describe("createAcpRemoteStdioBridge", () => {
     }
   });
 
-  it("fails non-replayable in-flight requests when relay disconnects", async () => {
+  it("replays session/new after relay reconnect", async () => {
     const input = new PassThrough();
     const output = new PassThrough();
     let outputText = "";
@@ -563,6 +718,75 @@ describe("createAcpRemoteStdioBridge", () => {
         `${JSON.stringify({
           id: 6,
           jsonrpc: "2.0",
+          method: "session/new",
+          params: {
+            cwd: "/Users/dev",
+            mcpServers: [],
+          },
+        })}\n`,
+      );
+      await waitFor(() => sockets[0]?.sent.length === 1);
+      sockets[0]?.emitClose();
+
+      await waitFor(() => sockets.length === 2);
+      await waitFor(() => sockets[1]!.sent.length === 1);
+      expect(JSON.parse(sockets[1]!.sent[0])).toMatchObject({
+        id: 6,
+        method: "session/new",
+      });
+      expect(outputText).not.toContain(
+        "Relay connection closed before this request completed",
+      );
+
+      sockets[1]?.emitMessage(
+        JSON.stringify({
+          id: 6,
+          jsonrpc: "2.0",
+          result: { sessionId: "session-2" },
+        }),
+      );
+
+      await waitFor(() => outputText.includes('"id":6'));
+      expect(JSON.parse(outputText.trim().split("\n")[0]!)).toMatchObject({
+        id: 6,
+        result: { sessionId: "session-2" },
+      });
+    } finally {
+      bridge.close();
+    }
+  });
+
+  it("fails non-replayable in-flight requests when relay disconnects", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    let outputText = "";
+    output.setEncoding("utf8");
+    output.on("data", (chunk: string) => {
+      outputText += chunk;
+    });
+    const sockets: TestSocket[] = [];
+    const bridge = createAcpRemoteStdioBridge({
+      clientId: "client-1",
+      connectionId: "connection-1",
+      input,
+      output,
+      reconnect: {
+        maxDelayMs: 1,
+        minDelayMs: 1,
+      },
+      relayUrl: "ws://relay.test",
+      socketFactory() {
+        const socket = new TestSocket();
+        sockets.push(socket);
+        return socket;
+      },
+    });
+
+    try {
+      input.write(
+        `${JSON.stringify({
+          id: 7,
+          jsonrpc: "2.0",
           method: "session/cancel",
           params: {
             sessionId: "session-1",
@@ -572,12 +796,12 @@ describe("createAcpRemoteStdioBridge", () => {
       await waitFor(() => sockets[0]?.sent.length === 1);
       sockets[0]?.emitClose();
 
-      await waitFor(() => outputText.includes('"id":6'));
+      await waitFor(() => outputText.includes('"id":7'));
       expect(JSON.parse(outputText.trim().split("\n")[0]!)).toMatchObject({
         error: {
           code: -32001,
         },
-        id: 6,
+        id: 7,
         jsonrpc: "2.0",
       });
       await waitFor(() => sockets.length === 2);
@@ -725,6 +949,7 @@ describe("createAcpRemoteStdioBridge", () => {
     const bridge = createAcpRemoteStdioBridge({
       clientId: "client-1",
       connectionId: "connection-1",
+      hostDisplayNames: new Map([["host-a", "Studio"]]),
       input,
       output,
       relayUrl: "ws://relay.test",
@@ -784,23 +1009,18 @@ describe("createAcpRemoteStdioBridge", () => {
         expect.arrayContaining([
           expect.objectContaining({ id: "real-option" }),
           expect.objectContaining({
-            currentValue: "dev.local",
+            currentValue: "Studio · /Users/dev/07",
             id: "acp-runtime.remote.context",
             options: [
               {
-                description: "dev.local",
-                name: "dev.local",
-                value: "dev.local",
+                description: "Studio · /Users/dev/07",
+                name: "Studio · /Users/dev/07",
+                value: "Studio · /Users/dev/07",
               },
               {
                 description: "claude-acp",
                 name: "claude-acp",
                 value: "claude-acp",
-              },
-              {
-                description: "/Users/dev/07",
-                name: "/Users/dev/07",
-                value: "/Users/dev/07",
               },
               {
                 description: "session-1",
@@ -847,7 +1067,7 @@ describe("createAcpRemoteStdioBridge", () => {
       expect(secondResponse.result.configOptions).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
-            currentValue: "dev.local",
+            currentValue: "Studio · /Users/dev/07",
             id: "acp-runtime.remote.context",
             options: expect.arrayContaining([
               {
@@ -920,7 +1140,7 @@ describe("createAcpRemoteStdioBridge", () => {
             id: "real-option",
           }),
           expect.objectContaining({
-            currentValue: "dev.local",
+            currentValue: "Studio · /Users/dev/07",
             id: "acp-runtime.remote.context",
           }),
         ]),
@@ -1018,13 +1238,13 @@ describe("createAcpRemoteStdioBridge", () => {
         expect.arrayContaining([
           expect.objectContaining({ id: "real-option" }),
           expect.objectContaining({
-            currentValue: "dev.local",
+            currentValue: "dev.local · /Users/dev/acp-runtime",
             id: "acp-runtime.remote.context",
             options: expect.arrayContaining([
               {
-                description: "dev.local",
-                name: "dev.local",
-                value: "dev.local",
+                description: "dev.local · /Users/dev/acp-runtime",
+                name: "dev.local · /Users/dev/acp-runtime",
+                value: "dev.local · /Users/dev/acp-runtime",
               },
               {
                 description: "session-1",
@@ -1112,7 +1332,7 @@ describe("createAcpRemoteStdioBridge", () => {
       };
       expect(response.result.configOptions).toEqual([
         expect.objectContaining({
-          currentValue: "dev.local",
+          currentValue: "dev.local · /Users/dev/acp-runtime",
           id: "acp-runtime.remote.context",
         }),
       ]);
@@ -1223,7 +1443,7 @@ describe("createAcpRemoteStdioBridge", () => {
       expect(response.result.configOptions).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
-            currentValue: "one.local",
+            currentValue: "one.local · /Users/dev/acp-runtime",
             id: "acp-runtime.remote.context",
           }),
           expect.objectContaining({ id: "real-session-1" }),
@@ -1311,8 +1531,9 @@ class TestSocket implements AcpWebSocketLike {
   }
 }
 
-async function waitFor(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+async function waitFor(predicate: () => boolean, timeoutMs = 100): Promise<void> {
+  const attempts = Math.max(1, Math.ceil(timeoutMs / 5));
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (predicate()) {
       return;
     }
@@ -1377,5 +1598,33 @@ function createFakeConnectionProof(): AcpRemoteConnectionProof {
     nonce: "nonce-1",
     signature: "proof-signature",
     timestamp: "2026-05-12T00:00:00.000Z",
+  };
+}
+
+async function createTestAccountCredential(): Promise<AcpRemoteAccountSessionCredential> {
+  const authority = await crypto.subtle.generateKey(
+    { name: "Ed25519" },
+    true,
+    ["sign", "verify"],
+  );
+  const client = await crypto.subtle.generateKey(
+    { name: "Ed25519" },
+    true,
+    ["sign", "verify"],
+  );
+  return {
+    accountSession: await createAcpRemoteAccountSession({
+      accountId: "acct-1",
+      expiresAt: "2026-06-12T00:00:00.000Z",
+      issuedAt: "2026-05-12T00:00:00.000Z",
+      principalId: "client-1",
+      principalPublicKey: client.publicKey,
+      principalType: "client",
+      signingKey: {
+        kid: "authority-1",
+        privateKey: authority.privateKey,
+      },
+    }),
+    privateKey: client.privateKey,
   };
 }

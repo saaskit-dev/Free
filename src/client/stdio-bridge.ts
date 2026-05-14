@@ -28,9 +28,12 @@ import {
   type AcpRemotePayloadLogSummary,
 } from "../shared/payload-log-summary.js";
 import {
+  createAcpRemoteConnectionProof,
   encodeAcpRemoteConnectionProof,
+  type AcpRemoteAccountSessionCredential,
   type AcpRemoteConnectionProof,
 } from "../protocol/account-session.js";
+import { resolveFreeWorkbenchOriginForRelayUrl } from "../relay-environment.js";
 
 export type AcpRemoteStdioBridgeOptions = Omit<
   ConnectAcpRemoteClientRelayOptions,
@@ -40,6 +43,8 @@ export type AcpRemoteStdioBridgeOptions = Omit<
     accountSession: string;
     hostId?: string;
   };
+  connectionProofCredential?: AcpRemoteAccountSessionCredential;
+  hostDisplayNames?: ReadonlyMap<string, string>;
   input?: Readable;
   debugLog?: (
     message: string,
@@ -75,6 +80,7 @@ export type AcpRemoteStdioBridgeHandle = {
 };
 
 const MAX_BRIDGE_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+const DEFAULT_BRIDGE_AUTH_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 
 export function createAcpRemoteStdioBridge(
   options: AcpRemoteStdioBridgeOptions,
@@ -107,6 +113,8 @@ export function createAcpRemoteStdioBridge(
   const requestTraceContexts = new Map<string | number, AcpRemoteTraceContext>();
   const requestSpans = new Map<string | number, FreeSpanHandle>();
   const inFlightOutbound = new Map<string | number, PendingOutboundMessage>();
+  const authRequestTimers = new Map<string | number, ReturnType<typeof setTimeout>>();
+  const authRequestTimeoutMs = readBridgeAuthRequestTimeoutMs(process.env);
   const debugLog = options.debugLog ?? (() => {});
   const sessionBindings = createSessionBindingStore({
     debugLog,
@@ -155,6 +163,7 @@ export function createAcpRemoteStdioBridge(
           return;
         }
         if (responseId !== undefined) {
+          clearAuthRequestTimer(responseId);
           inFlightOutbound.delete(responseId);
         }
         sessionBindings.storeFromResponse(message, requestMethods);
@@ -169,6 +178,7 @@ export function createAcpRemoteStdioBridge(
           displaySessionId
             ? remoteDisplayConfigOptionsBySessionId.get(displaySessionId)
             : undefined,
+          options.hostDisplayNames,
         );
         const clientSessionId =
           readResultSessionId(clientMessage) ?? displaySessionId;
@@ -189,10 +199,13 @@ export function createAcpRemoteStdioBridge(
           }
         }
         const nativeClientAckSeq = readNativeClientAckSeq(clientMessage);
-        const outputMessage =
+        let outputMessage =
           nativeClientAckSeq !== undefined
             ? stripNativeClientAckSeq(clientMessage)
             : clientMessage;
+        const relayAuthUrl = readRelayAuthUrl(outputMessage);
+        authUrl = relayAuthUrl ?? authUrl;
+        outputMessage = rewriteRelayAuthUrlForWorkbench(outputMessage);
         const relayOutputInfo = logRelayMessage(
           outputMessage,
           requestMethods,
@@ -201,7 +214,6 @@ export function createAcpRemoteStdioBridge(
           connectionId,
           debugLog,
         );
-        authUrl = readRelayAuthUrl(outputMessage) ?? authUrl;
         if (authUrl && options.autoAuthorize && !authorizePromise) {
           debugLog("auto-authorize relay browser authentication");
           authorizePromise = authorizeRelay({
@@ -394,6 +406,7 @@ export function createAcpRemoteStdioBridge(
       reconnectTimer = undefined;
     }
     connection?.close();
+    clearAuthRequestTimers();
     pendingOutbound.splice(0);
     inFlightOutbound.clear();
     resumeInputAfterReconnectQueue();
@@ -462,6 +475,7 @@ export function createAcpRemoteStdioBridge(
           const attachment = await uploadPromptImageAttachment({
             block,
             connectionId,
+            credential: options.connectionProofCredential,
             hostId,
             messageId,
             proof,
@@ -570,6 +584,7 @@ export function createAcpRemoteStdioBridge(
       if (isReplayableRelayClientRequest(entry.method)) {
         continue;
       }
+      clearAuthRequestTimer(entry.id);
       inFlightOutbound.delete(entry.id!);
       requestMethods.delete(entry.id!);
       requestSessionIds.delete(entry.id!);
@@ -598,6 +613,74 @@ export function createAcpRemoteStdioBridge(
         },
       );
     }
+  };
+
+  const clearAuthRequestTimer = (id: string | number | undefined): void => {
+    if (id === undefined) {
+      return;
+    }
+    const timer = authRequestTimers.get(id);
+    if (!timer) {
+      return;
+    }
+    clearTimeout(timer);
+    authRequestTimers.delete(id);
+  };
+
+  const clearAuthRequestTimers = (): void => {
+    for (const timer of authRequestTimers.values()) {
+      clearTimeout(timer);
+    }
+    authRequestTimers.clear();
+  };
+
+  const armAuthRequestTimeout = (message: string, authorizationUrl: string): void => {
+    const request = readJsonRpcRequest(message);
+    if (!request || !isAuthGatedRequest(request.method)) {
+      return;
+    }
+    clearAuthRequestTimer(request.id);
+    const timer = setTimeout(() => {
+      authRequestTimers.delete(request.id);
+      const inFlight = inFlightOutbound.get(request.id);
+      const queuedIndex = pendingOutbound.findIndex((entry) => entry.id === request.id);
+      if (!inFlight && queuedIndex === -1) {
+        return;
+      }
+      if (queuedIndex !== -1) {
+        pendingOutbound.splice(queuedIndex, 1);
+      }
+      inFlightOutbound.delete(request.id);
+      deliveredResponseIds.add(request.id);
+      const response = createAuthorizationTimeoutResponse({
+        authorizationUrl: toWorkbenchAuthorizationUrl(authorizationUrl),
+        connectionId,
+        request,
+        timeoutMs: authRequestTimeoutMs,
+      });
+      endClientRequestSpan(
+        request.id,
+        {
+          "acp.remote.failure": "authorization_timeout",
+          hasError: true,
+          method: request.method,
+        },
+        new Error("Free authorization was not completed before the bridge timeout."),
+      );
+      writeOutput(output, `${response}\n`, () => close());
+      setTimeout(() => close(), 0);
+      debugLog(
+        `authorization timed out id=${formatJsonRpcId(request.id)} method=${request.method}`,
+        {
+          connectionId,
+          eventName: "acp.remote.bridge.authorization_timeout",
+          jsonRpcId: request.id,
+          method: request.method,
+          severityText: "ERROR",
+        },
+      );
+    }, authRequestTimeoutMs);
+    authRequestTimers.set(request.id, timer);
   };
 
   connect();
@@ -657,14 +740,14 @@ export function createAcpRemoteStdioBridge(
                 isSessionNew ? "session/new" : "authenticate"
               }`,
             );
-            openAuthUrl(
-              sessionSelection?.selectionId
-                ? addSessionSelectionIdToAuthUrl(
-                    authUrl,
-                    sessionSelection.selectionId,
-                  )
-                : authUrl,
-            );
+            const urlWithSelection = sessionSelection?.selectionId
+              ? addSessionSelectionIdToAuthUrl(
+                  authUrl,
+                  sessionSelection.selectionId,
+                )
+              : authUrl;
+            openAuthUrl(toWorkbenchAuthorizationUrl(urlWithSelection));
+            armAuthRequestTimeout(outbound, urlWithSelection);
           }
         }
         sendToRelay(outbound);
@@ -813,6 +896,20 @@ function openUrl(url: string): void {
   });
   child.on("error", () => {});
   child.unref();
+}
+
+function readBridgeAuthRequestTimeoutMs(
+  env: Record<string, string | undefined>,
+): number {
+  const raw = env.FREE_BRIDGE_AUTH_REQUEST_TIMEOUT_MS;
+  if (!raw) {
+    return DEFAULT_BRIDGE_AUTH_REQUEST_TIMEOUT_MS;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_BRIDGE_AUTH_REQUEST_TIMEOUT_MS;
+  }
+  return Math.max(1000, Math.floor(parsed));
 }
 
 function writeOutput(
@@ -1004,6 +1101,25 @@ function addSessionSelectionIdToAuthUrl(
   }
 }
 
+function toWorkbenchAuthorizationUrl(authUrl: string): string {
+  try {
+    const relayUrl = new URL(authUrl);
+    const workbenchOrigin = resolveFreeWorkbenchOriginForRelayUrl({
+      relayUrl: relayUrl.toString(),
+    });
+    if (!workbenchOrigin) {
+      return authUrl;
+    }
+    const workbenchUrl = new URL("/authorize", workbenchOrigin);
+    relayUrl.searchParams.forEach((value, key) => {
+      workbenchUrl.searchParams.append(key, value);
+    });
+    return workbenchUrl.toString();
+  } catch {
+    return authUrl;
+  }
+}
+
 function sessionBindingKey(relayUrl: string, sessionId: string): string {
   return `${relayUrl}#${sessionId}`;
 }
@@ -1147,6 +1263,7 @@ function selectConnectionProofForHost(input: {
 async function uploadPromptImageAttachment(input: {
   block: { data: string; mimeType: string };
   connectionId: string;
+  credential?: AcpRemoteAccountSessionCredential;
   hostId: string;
   messageId: string;
   proof: AcpRemoteConnectionProof;
@@ -1174,12 +1291,19 @@ async function uploadPromptImageAttachment(input: {
     messageId: input.messageId,
     relayUrl: input.relayUrl,
   });
+  const proof = input.credential
+    ? await createAcpRemoteConnectionProof({
+        connectionId: input.connectionId,
+        credential: input.credential,
+        hostId: input.hostId,
+      })
+    : input.proof;
   const response = await fetch(url, {
     body,
     headers: {
       "content-type": input.block.mimeType,
-      "x-acp-client-id": input.proof.clientId,
-      "x-acp-connection-proof": encodeAcpRemoteConnectionProof(input.proof),
+      "x-acp-client-id": proof.clientId,
+      "x-acp-connection-proof": encodeAcpRemoteConnectionProof(proof),
       "x-free-attachment-id": attachmentId,
       "x-free-attachment-sha256": sha256,
       "x-free-message-id": input.messageId,
@@ -1281,6 +1405,28 @@ function createJsonRpcErrorResponse(
       message,
     },
     id: id ?? null,
+    jsonrpc: "2.0",
+  });
+}
+
+function createAuthorizationTimeoutResponse(input: {
+  authorizationUrl: string;
+  connectionId: string;
+  request: { id: string | number; method: string };
+  timeoutMs: number;
+}): string {
+  return JSON.stringify({
+    error: {
+      code: -32002,
+      data: {
+        authUrl: input.authorizationUrl,
+        connectionId: input.connectionId,
+        timeoutMs: input.timeoutMs,
+      },
+      message:
+        "Free authorization was not completed in time. Start a new session from the ACP client to continue.",
+    },
+    id: input.request.id,
     jsonrpc: "2.0",
   });
 }
@@ -1387,6 +1533,51 @@ function readRelayAuthUrl(message: string): string | undefined {
   return undefined;
 }
 
+function rewriteRelayAuthUrlForWorkbench(message: string): string {
+  const parsed = parseJson(message);
+  if (!isRecord(parsed)) {
+    return message;
+  }
+  const result = isRecord(parsed.result) ? parsed.result : undefined;
+  const methods = result?.authMethods;
+  if (!Array.isArray(methods)) {
+    return message;
+  }
+  let changed = false;
+  const authMethods = methods.map((method) => {
+    if (!isRecord(method)) {
+      return method;
+    }
+    const meta = isRecord(method._meta) ? method._meta : undefined;
+    const value = readString(meta?.["acp-runtime/remote/authUrl"]);
+    if (!value) {
+      return method;
+    }
+    const rewritten = toWorkbenchAuthorizationUrl(value);
+    if (rewritten === value) {
+      return method;
+    }
+    changed = true;
+    return {
+      ...method,
+      _meta: {
+        ...meta,
+        "acp-runtime/remote/authUrl": rewritten,
+      },
+    };
+  });
+  if (!changed) {
+    return message;
+  }
+  return JSON.stringify({
+    ...parsed,
+    result: {
+      ...result,
+      authMethods,
+    },
+  });
+}
+
 async function readOptionalJsonResponse(
   response: Response,
 ): Promise<Record<string, unknown> | undefined> {
@@ -1436,6 +1627,7 @@ function createRemoteConfigSetResponse(
 function injectRemoteDisplayConfigOption(
   message: string,
   fallbackOption?: unknown,
+  hostDisplayNames?: ReadonlyMap<string, string>,
 ): string {
   const parsed = parseJson(message);
   const result = isRecord(parsed?.result) ? parsed.result : undefined;
@@ -1446,7 +1638,11 @@ function injectRemoteDisplayConfigOption(
   }
   const meta = isRecord(result?._meta) ? result._meta : undefined;
   const option = meta
-    ? createRemoteDisplayConfigOption(meta, readString(result?.sessionId))
+    ? createRemoteDisplayConfigOption(
+        meta,
+        readString(result?.sessionId),
+        hostDisplayNames,
+      )
     : undefined;
   const remoteOption = option ?? fallbackOption;
   if (!remoteOption) {
@@ -1571,20 +1767,23 @@ function formatSessionAgent(agent: Record<string, unknown> | undefined): string 
 function createRemoteDisplayConfigOption(
   meta: Record<string, unknown>,
   sessionId?: string,
+  hostDisplayNames?: ReadonlyMap<string, string>,
 ): Record<string, unknown> | undefined {
-  if (!readString(meta[REMOTE_HOST_ID_META])) {
+  const hostId = readString(meta[REMOTE_HOST_ID_META]);
+  if (!hostId) {
     return undefined;
   }
   const machine =
     readString(meta[REMOTE_SESSION_MACHINE_META]) ?? "Unknown machine";
+  const hostName = hostDisplayNames?.get(hostId) ?? machine;
   const agent = formatSessionAgent(readSessionAgent(meta[REMOTE_SESSION_AGENT_META]));
   const workspace =
     readStringArray(meta[REMOTE_SESSION_WORKSPACE_ROOTS_META])?.[0] ??
     "No workspace preference";
+  const hostWorkspace = `${hostName} · ${workspace}`;
   const entries = [
-    { description: machine, name: machine, value: machine },
+    { description: hostWorkspace, name: hostWorkspace, value: hostWorkspace },
     { description: agent, name: agent, value: agent },
-    { description: workspace, name: workspace, value: workspace },
     ...(sessionId
       ? [
           {
@@ -1600,7 +1799,7 @@ function createRemoteDisplayConfigOption(
     category: "remote",
     currentValue,
     description:
-      "Remote machine, agent, workspace, and session selected in ACP relay authorization.",
+      "Remote host, workspace, agent, and session selected in ACP relay authorization.",
     id: `${REMOTE_CONFIG_OPTION_PREFIX}context`,
     name: "Remote Context",
     options: entries,
@@ -1642,12 +1841,18 @@ function readJsonRpcResponseId(message: string): string | number | undefined {
 
 function isReplayableRelayClientRequest(method: string | undefined): boolean {
   return (
+    method === "authenticate" ||
     method === "initialize" ||
     method === "session/list" ||
     method === "session/load" ||
+    method === "session/new" ||
     method === "session/prompt" ||
     method === "session/resume"
   );
+}
+
+function isAuthGatedRequest(method: string | undefined): boolean {
+  return method === "authenticate" || method === "session/new";
 }
 
 function createRelayConnectionLostResponse(

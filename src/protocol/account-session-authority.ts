@@ -5,6 +5,10 @@ export const ACP_REMOTE_BUILTIN_ACCOUNT_SESSION_VERIFICATION_KEYS = [
     kid: "free-prod-2026-05-10",
     publicKey: "j_MbPwTNayLeKLl9e5EWHCfkQzW1kpNeEPFQPGBiAVw",
   },
+  {
+    kid: "free-default-2026-05-10",
+    publicKey: "D9wpO03lAtMNl2FFXCCuGpm64weG7IbRH8ZDFtEs0wA",
+  },
 ] as const satisfies readonly [
   AcpRemoteAccountSessionVerificationKey,
   ...AcpRemoteAccountSessionVerificationKey[],

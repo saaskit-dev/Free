@@ -20,6 +20,7 @@ import {
 } from "../../src/protocol/attachments.js";
 import {
   AcpRelayInMemoryControlPlaneStore,
+  type AcpRelaySessionBindingRecord,
   type AcpRelayHostMetadata,
   type AcpRelayWritableControlPlaneStore,
 } from "./control-plane-store.js";
@@ -266,11 +267,25 @@ export type AcpRelayAuthorizableHostsResult =
   | {
       ok: true;
       hosts: { hostId: string; metadata?: HostMetadata; online?: boolean }[];
+      unavailableReason?: string;
     }
   | {
       ok: false;
       reason: string;
+      hosts?: { hostId: string; metadata?: HostMetadata; online?: boolean }[];
     };
+
+export type AcpRelaySessionSummary = {
+  agent?: AcpRemoteAgentGrant;
+  createdAt?: string;
+  hostId: string;
+  hostName?: string;
+  hostOnline?: boolean;
+  hostMetadata?: HostMetadata;
+  sessionId: string;
+  updatedAt?: string;
+  workspaceRoots: readonly string[];
+};
 
 type HostWorkspaceListRequestPayload = {
   kind: "workspace/list";
@@ -1085,32 +1100,119 @@ export class AcpRelayBroker {
     hostId?: string;
     hostIds?: readonly string[];
   }): Promise<AcpRelayAuthorizableHostsResult> {
-    const activeHostRouteIds = new Set(this.activeHostRouteIds());
-    const allowedInputHostIds = input.hostIds
-      ? new Set(input.hostIds)
-      : undefined;
-    const hosts = await this.controlPlaneStore.listAuthorizableHosts({
-      accountId: input.accountId,
-      clientId: input.clientId,
-    });
     return {
-      hosts: hosts
-        .filter((host) => !input.hostId || host.hostId === input.hostId)
-        .filter((host) => !allowedInputHostIds || allowedInputHostIds.has(host.hostId))
-        .map((host) => {
-          const online = activeHostRouteIds.has(host.hostId);
-          return {
-            hostId: host.hostId,
-            metadata: mergeHostMetadata(
-              host.metadata,
-              this.activeHostMetadata.get(host.hostId),
-            ),
-            online,
-          };
-        })
-        .sort((a, b) => a.hostId.localeCompare(b.hostId)),
+      hosts: await this.discoverableHostRecords(input),
       ok: true,
     };
+  }
+
+  async listSessions(input: {
+    accountId: string;
+    clientId: string;
+    limit?: number;
+  }): Promise<{ ok: true; sessions: AcpRelaySessionSummary[] }> {
+    const storedBindings = await this.controlPlaneStore.listSessionBindings({
+      accountId: input.accountId,
+      limit: input.limit,
+    });
+    const bindingsByKey = new Map<string, AcpRelaySessionBindingRecord>();
+    for (const binding of storedBindings) {
+      bindingsByKey.set(sessionBindingKey(binding), binding);
+    }
+    for (const binding of this.activeSessionBindings(input.accountId)) {
+      bindingsByKey.set(sessionBindingKey(binding), binding);
+    }
+    const bindings = [...bindingsByKey.values()];
+    const visibleHosts = await this.discoverableHostRecords({
+      accountId: input.accountId,
+      clientId: input.clientId,
+      hostIds: [...new Set(bindings.map((binding) => binding.hostId))],
+    });
+    const hostsById = new Map(visibleHosts.map((host) => [host.hostId, host]));
+    const sessions: AcpRelaySessionSummary[] = [];
+    for (const binding of bindings) {
+      const host = hostsById.get(binding.hostId);
+      if (!host) {
+        continue;
+      }
+      sessions.push({
+        hostId: binding.hostId,
+        hostOnline: host.online,
+        sessionId: binding.sessionId,
+        workspaceRoots: binding.workspaceRoots ?? [],
+        ...(binding.agent ? { agent: binding.agent } : {}),
+        ...(binding.createdAt ? { createdAt: binding.createdAt } : {}),
+        ...(binding.updatedAt ? { updatedAt: binding.updatedAt } : {}),
+        ...(host.metadata ? { hostMetadata: host.metadata } : {}),
+        ...(host.metadata?.displayName || host.metadata?.machine
+          ? { hostName: host.metadata.displayName ?? host.metadata.machine }
+          : {}),
+      });
+    }
+    return {
+      ok: true,
+      sessions: sessions.slice(0, input.limit),
+    };
+  }
+
+  private activeSessionBindings(accountId: string): AcpRelaySessionBindingRecord[] {
+    const bindings: AcpRelaySessionBindingRecord[] = [];
+    for (const client of this.clients.values()) {
+      if (client.accountId !== accountId) {
+        continue;
+      }
+      const hostId = client.hostId ?? client.lastAuthorization?.hostId;
+      if (!hostId) {
+        continue;
+      }
+      const sessions = new Map<
+        string,
+        Pick<AcpRelaySessionBindingRecord, "agent" | "workspaceRoots">
+      >();
+      for (const request of client.hostRequests.values()) {
+        const sessionId = readRequestSessionId(request);
+        if (sessionId) {
+          const selection = readSessionRestoreSelection(request);
+          sessions.set(sessionId, {
+            agent: selection?.agent ?? client.lastAuthorization?.agent,
+            workspaceRoots:
+              selection?.workspaceRoots ?? client.lastAuthorization?.workspaceRoots,
+          });
+        }
+      }
+      for (const request of client.sessionControlRequests.values()) {
+        const sessionId = readRequestSessionId(request);
+        if (sessionId && !sessions.has(sessionId)) {
+          sessions.set(sessionId, {
+            agent: client.lastAuthorization?.agent,
+            workspaceRoots: client.lastAuthorization?.workspaceRoots,
+          });
+        }
+      }
+      for (const response of client.completedClientResponses.values()) {
+        const sessionId = readResultSessionId(response.result);
+        if (!sessionId) {
+          continue;
+        }
+        const binding = readSessionBindingMetadata(response.result);
+        sessions.set(sessionId, {
+          agent: binding?.agent ?? client.lastAuthorization?.agent,
+          workspaceRoots:
+            binding?.workspaceRoots ?? client.lastAuthorization?.workspaceRoots,
+        });
+      }
+      for (const [sessionId, session] of sessions) {
+        bindings.push({
+          accountId: client.accountId,
+          agent: session.agent,
+          clientId: client.clientId,
+          hostId,
+          sessionId,
+          workspaceRoots: session.workspaceRoots,
+        });
+      }
+    }
+    return bindings;
   }
 
   async setHostDisplayName(input: {
@@ -1177,6 +1279,7 @@ export class AcpRelayBroker {
     const client = this.clients.get(connectionId);
     if (!client) {
       return {
+        hosts: [],
         ok: false,
         reason: "Client connection is no longer active. Restart the remote session from the ACP client.",
       };
@@ -1191,6 +1294,50 @@ export class AcpRelayBroker {
             ? [client.connectionProof.hostId]
             : undefined,
     });
+  }
+
+  async discoverableHostsForAccount(input: {
+    accountId: string;
+    clientId?: string;
+  }): Promise<AcpRelayAuthorizableHostsResult> {
+    return {
+      hosts: await this.discoverableHostRecords({
+        accountId: input.accountId,
+        clientId: input.clientId ?? "",
+      }),
+      ok: true,
+    };
+  }
+
+  private async discoverableHostRecords(input: {
+    accountId: string;
+    clientId: string;
+    hostId?: string;
+    hostIds?: readonly string[];
+  }): Promise<{ hostId: string; metadata?: HostMetadata; online?: boolean }[]> {
+    const activeHostRouteIds = new Set(this.activeHostRouteIds());
+    const allowedInputHostIds = input.hostIds
+      ? new Set(input.hostIds)
+      : undefined;
+    const hosts = await this.controlPlaneStore.listAuthorizableHosts({
+      accountId: input.accountId,
+      clientId: input.clientId,
+    });
+    return hosts
+      .filter((host) => !input.hostId || host.hostId === input.hostId)
+      .filter((host) => !allowedInputHostIds || allowedInputHostIds.has(host.hostId))
+      .map((host) => {
+        const online = activeHostRouteIds.has(host.hostId);
+        return {
+          hostId: host.hostId,
+          metadata: mergeHostMetadata(
+            host.metadata,
+            this.activeHostMetadata.get(host.hostId),
+          ),
+          online,
+        };
+      })
+      .sort((a, b) => a.hostId.localeCompare(b.hostId));
   }
 
   pingHosts(): void {
@@ -1876,7 +2023,7 @@ export class AcpRelayBroker {
               [ACP_REMOTE_CONNECTION_ID_META]: connectionId,
             },
             description:
-              "Open the authorization URL, sign in, and select a host host.",
+              "Open the authorization URL, sign in, and select a host.",
             id: ACP_BOOTSTRAP_AUTH_METHOD_ID,
             name: "Sign in with Free",
           },
@@ -4926,6 +5073,10 @@ function readPayloadSessionId(payload: Record<string, unknown>): string | undefi
   const params = isRecord(payload.params) ? payload.params : undefined;
   const result = isRecord(payload.result) ? payload.result : undefined;
   return readString(params?.sessionId) ?? readString(result?.sessionId);
+}
+
+function sessionBindingKey(binding: AcpRelaySessionBindingRecord): string {
+  return `${binding.accountId}:${binding.clientId}:${binding.hostId}:${binding.sessionId}`;
 }
 
 function isJsonRpcRequestPayload(value: unknown): value is RelayJsonRpcRequest {

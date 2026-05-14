@@ -199,7 +199,7 @@ describe("AcpRelayD1ControlPlaneStore", () => {
         clientId: "client-2",
         sessionId: "session-2",
       }),
-    ).resolves.toEqual({
+    ).resolves.toMatchObject({
       accountId: "acct-2",
       agent: { id: "codex-acp" },
       clientId: "client-2",
@@ -207,6 +207,45 @@ describe("AcpRelayD1ControlPlaneStore", () => {
       sessionId: "session-2",
       workspaceRoots: ["/work/project"],
     });
+    await expect(
+      store.listSessionBindings({
+        accountId: "acct-2",
+        clientId: "client-2",
+      }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        accountId: "acct-2",
+        agent: { id: "codex-acp" },
+        clientId: "client-2",
+        hostId: "host-2",
+        sessionId: "session-2",
+        workspaceRoots: ["/work/project"],
+      }),
+    ]);
+    await store.upsertSessionBinding({
+      accountId: "acct-2",
+      agent: { id: "cursor" },
+      clientId: "client-other",
+      hostId: "host-2",
+      sessionId: "session-other",
+      workspaceRoots: ["/work/project"],
+    });
+    await expect(
+      store.listSessionBindings({
+        accountId: "acct-2",
+      }),
+    ).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          clientId: "client-2",
+          sessionId: "session-2",
+        }),
+        expect.objectContaining({
+          clientId: "client-other",
+          sessionId: "session-other",
+        }),
+      ]),
+    );
 
     await expect(
       store.resolveGrant({
@@ -296,8 +335,10 @@ type FakeSessionBindingRow = {
   account_id: string;
   agent_json: string | null;
   client_device_id: string;
+  created_at?: string | null;
   host_id: string;
   session_id: string;
+  updated_at?: string | null;
   workspace_roots_json: string | null;
 };
 
@@ -422,8 +463,10 @@ class FakeD1PreparedStatement implements D1PreparedStatementLike {
         account_id: this.readStringBinding(0),
         agent_json: this.readNullableStringBinding(4),
         client_device_id: this.readStringBinding(1),
+        created_at: "2026-05-11T10:00:00.000Z",
         host_id: this.readStringBinding(3),
         session_id: this.readStringBinding(2),
+        updated_at: "2026-05-11T10:00:00.000Z",
         workspace_roots_json: this.readNullableStringBinding(5),
       };
       this.rows.sessionBindings ??= [];
@@ -470,6 +513,20 @@ class FakeD1PreparedStatement implements D1PreparedStatementLike {
       );
     }
     if (query.includes("from acp_remote_session_bindings")) {
+      if (!query.includes("session_id = ?3")) {
+        return (this.rows.sessionBindings ?? [])
+          .filter(
+            (row) =>
+              row.account_id === accountId &&
+              (!query.includes("client_device_id = ?2") ||
+                row.client_device_id === second),
+          )
+          .sort((left, right) =>
+            (right.updated_at ?? right.created_at ?? right.session_id).localeCompare(
+              left.updated_at ?? left.created_at ?? left.session_id,
+            ),
+          );
+      }
       return (this.rows.sessionBindings ?? []).filter(
         (row) =>
           row.account_id === accountId &&

@@ -8,13 +8,16 @@ import {
   encodeAcpRemoteConnectionProof,
   type AcpRemoteAccountSessionSigningKey,
 } from "../../src/protocol/index.js";
-import worker, { type Env } from "./index.js";
+import worker, { AcpRelayShard, type Env } from "./index.js";
 
 describe("relay worker", () => {
   it("serves health without auth", async () => {
     const response = await worker.fetch(
       new Request("https://relay.test/health"),
-      createEnv(),
+      createEnv({
+        ACP_RELAY_ACCOUNT_SESSION_PUBLIC_KEYS: undefined,
+        ACP_RELAY_DB: new FakeAuthD1Database() as unknown as D1Database,
+      }),
     );
 
     expect(response.status).toBe(200);
@@ -164,6 +167,59 @@ describe("relay worker", () => {
     expect(body).toContain("Free Authorization");
     expect(body).toContain("Authorize Free");
     expect(body).toContain("Sign in required");
+  });
+
+  it("redirects local browser authorization to the local Workbench", async () => {
+    const response = await worker.fetch(
+      new Request("http://127.0.0.1:8791/authorize?connectionId=conn-1&sessionSelectionId=sel-1"),
+      createEnv({ ACP_RELAY_WORKBENCH_ORIGIN: "https://free.saaskit.app" }),
+    );
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe(
+      "http://127.0.0.1:8790/authorize?connectionId=conn-1&sessionSelectionId=sel-1",
+    );
+  });
+
+  it("returns CORS JSON for unauthenticated Workbench authorization API requests", async () => {
+    const response = await worker.fetch(
+      new Request("http://127.0.0.1:8791/api/authorize?connectionId=conn-1", {
+        headers: {
+          origin: "http://127.0.0.1:8790",
+        },
+      }),
+      createEnv({
+        ACP_RELAY_ACCOUNT_SESSION_PUBLIC_KEYS: undefined,
+        ACP_RELAY_DB: new FakeAuthD1Database() as unknown as D1Database,
+      }),
+    );
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("access-control-allow-origin")).toBe("http://127.0.0.1:8790");
+    expect(response.headers.get("content-type")).toContain("application/json");
+    await expect(response.json()).resolves.toEqual({
+      error: "ACP account session is required.",
+    });
+  });
+
+  it("serves Workbench authorization API requests from the account shard", async () => {
+    const shard = new AcpRelayShard(createFakeDurableObjectState(), createEnv());
+    const response = await shard.fetch(
+      new Request("https://relay.test/api/authorize?connectionId=conn-1", {
+        headers: {
+          "x-acp-verified-account-id": "acct-1",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    await expect(response.json()).resolves.toMatchObject({
+      accountId: "acct-1",
+      connectionId: "conn-1",
+      hosts: [],
+      unavailableReason: "Client connection is no longer active. Restart the remote session from the ACP client.",
+    });
   });
 
   it("returns a CORS JSON error when Workbench starts login without GitHub config", async () => {
@@ -548,6 +604,25 @@ function createEnv(overrides: Partial<Env> = {}): Env {
     } as unknown as DurableObjectNamespace,
     ...overrides,
   };
+}
+
+function createFakeDurableObjectState(): DurableObjectState {
+  const storage = new Map<string, unknown>();
+  return {
+    getWebSockets: () => [],
+    storage: {
+      async delete(key: string) {
+        storage.delete(key);
+      },
+      async get<T>(key: string): Promise<T | undefined> {
+        return storage.get(key) as T | undefined;
+      },
+      async put<T>(key: string, value: T): Promise<void> {
+        storage.set(key, value);
+      },
+      async setAlarm(): Promise<void> {},
+    },
+  } as unknown as DurableObjectState;
 }
 
 async function createTestAccountSession(): Promise<string> {

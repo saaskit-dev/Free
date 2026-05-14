@@ -1,4 +1,4 @@
-export type RouteId = "access" | "hosts" | "settings";
+export type RouteId = "access" | "sessions" | "hosts" | "settings";
 
 export type AccountSession = {
   account?: {
@@ -23,6 +23,52 @@ export type HostRecord = {
     workspaceRoots?: ({ label?: string; path: string } | string)[];
     [key: string]: unknown;
   };
+};
+
+export type SessionRecord = {
+  agent?: {
+    command?: string;
+    id?: string;
+    type?: string;
+  };
+  createdAt?: string;
+  hostId: string;
+  hostMetadata?: HostRecord["metadata"];
+  hostName?: string;
+  hostOnline?: boolean;
+  sessionId: string;
+  updatedAt?: string;
+  workspaceRoots: string[];
+};
+
+export type AuthorizationAgent = {
+  command?: string;
+  id?: string;
+  label?: string;
+  type?: string;
+};
+
+export type AuthorizationWorkspaceRoot = {
+  label?: string;
+  path: string;
+};
+
+export type AuthorizationHost = {
+  hostId: string;
+  online?: boolean;
+  metadata?: {
+    agentTypes?: AuthorizationAgent[];
+    displayName?: string;
+    machine?: string;
+    workspaceRoots?: AuthorizationWorkspaceRoot[];
+  };
+};
+
+export type AuthorizationSession = {
+  accountId: string;
+  connectionId: string;
+  hosts: AuthorizationHost[];
+  unavailableReason?: string;
 };
 
 export type LoadState<T> =

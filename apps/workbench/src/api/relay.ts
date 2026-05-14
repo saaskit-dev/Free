@@ -1,4 +1,10 @@
-import type { AccountSession, HostRecord, LoginApproval } from "../types";
+import type {
+  AccountSession,
+  AuthorizationSession,
+  HostRecord,
+  LoginApproval,
+  SessionRecord,
+} from "../types";
 
 const configuredRelayUrl =
   process.env.EXPO_PUBLIC_RELAY_URL?.replace(/\/$/, "") || "";
@@ -50,6 +56,8 @@ async function readJsonResult<T>(
       message:
         value && typeof value === "object" && "error" in value
           ? String(value.error)
+          : value && typeof value === "object" && "reason" in value
+            ? String(value.reason)
           : `Request failed with ${response.status}.`,
     };
   }
@@ -63,6 +71,18 @@ export function createLoginUrl(returnTo?: string): string {
   const url = new URL("/login/start", defaultWorkbenchOrigin());
   if (returnTo) {
     url.searchParams.set("returnTo", returnTo);
+  }
+  return url.toString();
+}
+
+export function currentWorkbenchUrl(): string {
+  if (typeof window === "undefined") return "http://127.0.0.1:8790/";
+  const url = new URL(
+    `${window.location.pathname}${window.location.search}${window.location.hash}`,
+    window.location.origin,
+  );
+  if (url.hostname === "localhost" && url.port === "8790") {
+    url.hostname = "127.0.0.1";
   }
   return url.toString();
 }
@@ -140,12 +160,101 @@ export async function confirmLoginApproval(approvalId: string) {
   };
 }
 
+export async function loadAuthorizationSession(input: {
+  connectionId: string;
+  sessionSelectionId?: string;
+}) {
+  const params = new URLSearchParams({ connectionId: input.connectionId });
+  if (input.sessionSelectionId) {
+    params.set("sessionSelectionId", input.sessionSelectionId);
+  }
+  return readJsonResult<AuthorizationSession>(`/api/authorize?${params.toString()}`);
+}
+
+export async function loadHostWorkspaceDirectory(input: {
+  connectionId: string;
+  hostId: string;
+  path?: string;
+  root: string;
+}) {
+  const params = new URLSearchParams({
+    connectionId: input.connectionId,
+    root: input.root,
+  });
+  if (input.path) {
+    params.set("path", input.path);
+  }
+  return readJsonResult<{
+    entries: { name: string; path: string; type: "directory" }[];
+    ok: true;
+    path: string;
+  }>(`/api/hosts/${encodeURIComponent(input.hostId)}/workspaces?${params.toString()}`);
+}
+
+export async function authorizeSession(input: {
+  agentCommand?: string;
+  agentId?: string;
+  agentType?: string;
+  connectionId: string;
+  hostId: string;
+  sessionSelectionId?: string;
+  workspaceRoots?: string[];
+}) {
+  const params = new URLSearchParams({ connectionId: input.connectionId });
+  if (input.sessionSelectionId) {
+    params.set("sessionSelectionId", input.sessionSelectionId);
+  }
+  const response = await fetch(`${defaultRelayUrl()}/api/authorize?${params.toString()}`, {
+    body: JSON.stringify({
+      agentCommand: input.agentCommand,
+      agentId: input.agentId,
+      agentType: input.agentType,
+      hostId: input.hostId,
+      sessionSelectionId: input.sessionSelectionId,
+      workspaceRoots: input.workspaceRoots,
+    }),
+    credentials: "include",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+    },
+    method: "POST",
+  });
+  const value = (await response.json().catch(() => null)) as {
+    ok?: unknown;
+    reason?: unknown;
+  } | null;
+  if (!response.ok) {
+    return {
+      message:
+        value && typeof value.reason === "string"
+          ? value.reason
+          : `Request failed with ${response.status}.`,
+      ok: false as const,
+    };
+  }
+  if (value?.ok === true) {
+    return { ok: true as const };
+  }
+  return {
+    message:
+      value && typeof value.reason === "string"
+        ? value.reason
+        : "Authorization failed.",
+    ok: false as const,
+  };
+}
+
 export async function loadSession() {
   return readJsonResult<AccountSession>("/api/session");
 }
 
 export async function loadHosts() {
   return readJsonResult<{ hosts: HostRecord[] }>("/api/hosts");
+}
+
+export async function loadSessions() {
+  return readJsonResult<{ sessions: SessionRecord[] }>("/api/sessions");
 }
 
 export async function updateHostName(hostId: string, name: string) {

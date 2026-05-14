@@ -5,7 +5,6 @@ import { parseFreeAuthCommand } from "./auth-bin.js";
 describe("remote auth CLI", () => {
   it("parses login with defaults", () => {
     expect(parseFreeAuthCommand(["login"])).toEqual({
-      ensureHost: true,
       force: false,
       name: "login",
       relayUrl: "wss://free-relay.saaskit.app",
@@ -21,7 +20,6 @@ describe("remote auth CLI", () => {
         "--force",
       ]),
     ).toEqual({
-      ensureHost: true,
       force: true,
       name: "login",
       relayUrl: "ws://127.0.0.1:8787",
@@ -30,19 +28,9 @@ describe("remote auth CLI", () => {
 
   it("parses login relay environment", () => {
     expect(parseFreeAuthCommand(["login", "--relay-env", "local"])).toEqual({
-      ensureHost: true,
       force: false,
       name: "login",
       relayUrl: "ws://127.0.0.1:8791",
-    });
-  });
-
-  it("parses login without host install", () => {
-    expect(parseFreeAuthCommand(["login", "--no-host"])).toEqual({
-      ensureHost: false,
-      force: false,
-      name: "login",
-      relayUrl: "wss://free-relay.saaskit.app",
     });
   });
 

@@ -37,6 +37,18 @@ export async function acpRemoteHostServiceUsesExecutable(input: {
   nodePath?: string;
   scope?: AcpRemoteHostServiceScope;
 }): Promise<boolean> {
+  return acpRemoteHostServiceMatchesConfig(input);
+}
+
+export async function acpRemoteHostServiceMatchesConfig(input: {
+  homeDir?: string;
+  hostBinPath: string;
+  label?: string;
+  nodePath?: string;
+  relayUrl?: string;
+  scope?: AcpRemoteHostServiceScope;
+  workspaceRoots?: readonly string[];
+}): Promise<boolean> {
   const scope = input.scope ?? "user";
   const label = input.label ?? ACP_REMOTE_HOST_LAUNCHD_LABEL;
   const homeDir = input.homeDir ?? homedir();
@@ -48,7 +60,13 @@ export async function acpRemoteHostServiceUsesExecutable(input: {
   return (
     plist.includes(`<string>${escapePlist(input.hostBinPath)}</string>`) &&
     (!input.nodePath ||
-      plist.includes(`<string>${escapePlist(input.nodePath)}</string>`))
+      plist.includes(`<string>${escapePlist(input.nodePath)}</string>`)) &&
+    (!input.relayUrl ||
+      plist.includes(`<string>${escapePlist(input.relayUrl)}</string>`)) &&
+    (!input.workspaceRoots ||
+      input.workspaceRoots.every((root) =>
+        plist.includes(`<string>${escapePlist(root)}</string>`),
+      ))
   );
 }
 

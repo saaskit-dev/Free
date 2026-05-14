@@ -7,6 +7,7 @@ import { WorkbenchAppFrame } from "./workbench/WorkbenchAppFrame";
 import { LoginCallbackScreen } from "./features/access/LoginCallbackScreen";
 import { LoginApprovalScreen } from "./features/access/LoginApprovalScreen";
 import { LoginStartScreen } from "./features/access/LoginStartScreen";
+import { AuthorizationScreen } from "./features/authorization/AuthorizationScreen";
 import type { RouteId } from "./types";
 import { t, useWorkbenchPreferences } from "./workbench/preferences";
 import { colors, typography } from "./ui/theme";
@@ -72,6 +73,20 @@ export default function App() {
     );
   }
 
+  const authorization = readAuthorizationFromLocation();
+  if (authorization) {
+    return (
+      <>
+        <StatusBar style="dark" />
+        <AuthorizationScreen
+          connectionId={authorization.connectionId}
+          language={preferences.language}
+          sessionSelectionId={authorization.sessionSelectionId}
+        />
+      </>
+    );
+  }
+
   return (
     <>
       <StatusBar style="dark" />
@@ -89,6 +104,7 @@ export default function App() {
 function readWorkbenchRouteFromLocation(): RouteId {
   if (typeof window === "undefined") return "access";
   if (window.location.pathname === "/access") return "access";
+  if (window.location.pathname === "/sessions") return "sessions";
   if (window.location.pathname === "/hosts") return "hosts";
   if (window.location.pathname === "/settings") return "settings";
   return "access";
@@ -117,6 +133,19 @@ function readLoginCallbackFromLocation(): { code: string; state: string } | unde
   const state = params.get("state");
   if (!code || !state) return undefined;
   return { code, state };
+}
+
+function readAuthorizationFromLocation(): {
+  connectionId: string;
+  sessionSelectionId?: string;
+} | undefined {
+  if (typeof window === "undefined") return undefined;
+  if (window.location.pathname !== "/authorize") return undefined;
+  const params = new URLSearchParams(window.location.search);
+  const connectionId = params.get("connectionId");
+  if (!connectionId) return undefined;
+  const sessionSelectionId = params.get("sessionSelectionId") ?? undefined;
+  return { connectionId, sessionSelectionId };
 }
 
 function normalizeWorkbenchReturnTo(value: string | null): string {

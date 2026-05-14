@@ -50,8 +50,10 @@ export type AcpRelaySessionBindingRecord = {
   accountId: AcpRemoteId;
   agent?: AcpRemoteAgentGrant;
   clientId: AcpRemoteId;
+  createdAt?: string;
   hostId: AcpRemoteId;
   sessionId: AcpRemoteId;
+  updatedAt?: string;
   workspaceRoots?: readonly string[];
 };
 
@@ -84,6 +86,11 @@ export type AcpRelayControlPlaneStore = {
     clientId: AcpRemoteId;
     sessionId: AcpRemoteId;
   }): Promise<AcpRelaySessionBindingRecord | undefined>;
+  listSessionBindings(input: {
+    accountId: AcpRemoteId;
+    clientId?: AcpRemoteId;
+    limit?: number;
+  }): Promise<readonly AcpRelaySessionBindingRecord[]>;
   resolveGrant(input: {
     accountId: AcpRemoteId;
     clientId: AcpRemoteId;
@@ -176,8 +183,10 @@ type SessionBindingRow = {
   account_id: string;
   agent_json: string | null;
   client_device_id: string;
+  created_at?: string | null;
   host_id: string;
   session_id: string;
+  updated_at?: string | null;
   workspace_roots_json: string | null;
 };
 
@@ -297,6 +306,26 @@ export class AcpRelayInMemoryControlPlaneStore
     sessionId: AcpRemoteId;
   }): Promise<AcpRelaySessionBindingRecord | undefined> {
     return this.sessionBindings.get(sessionBindingKey(input));
+  }
+
+  async listSessionBindings(input: {
+    accountId: AcpRemoteId;
+    clientId?: AcpRemoteId;
+    limit?: number;
+  }): Promise<readonly AcpRelaySessionBindingRecord[]> {
+    const limit = Math.max(1, Math.min(input.limit ?? 100, 500));
+    return [...this.sessionBindings.values()]
+      .filter(
+        (binding) =>
+          binding.accountId === input.accountId &&
+          (!input.clientId || binding.clientId === input.clientId),
+      )
+      .sort((left, right) =>
+        (right.updatedAt ?? right.createdAt ?? right.sessionId).localeCompare(
+          left.updatedAt ?? left.createdAt ?? left.sessionId,
+        ),
+      )
+      .slice(0, limit);
   }
 
   async resolveGrant(input: {
@@ -599,7 +628,7 @@ export class AcpRelayD1ControlPlaneStore
     const row = await this.database
       .prepare(
         `select account_id, client_device_id, session_id, host_id, agent_json,
-                workspace_roots_json
+                workspace_roots_json, created_at, updated_at
          from acp_remote_session_bindings
          where account_id = ?1 and client_device_id = ?2 and session_id = ?3
          limit 1`,
@@ -607,6 +636,40 @@ export class AcpRelayD1ControlPlaneStore
       .bind(input.accountId, input.clientId, input.sessionId)
       .first<SessionBindingRow>();
     return row ? mapSessionBindingRow(row) : undefined;
+  }
+
+  async listSessionBindings(input: {
+    accountId: AcpRemoteId;
+    clientId?: AcpRemoteId;
+    limit?: number;
+  }): Promise<readonly AcpRelaySessionBindingRecord[]> {
+    const limit = Math.max(1, Math.min(input.limit ?? 100, 500));
+    if (input.clientId) {
+      const rows = await this.database
+        .prepare(
+          `select account_id, client_device_id, session_id, host_id, agent_json,
+                  workspace_roots_json, created_at, updated_at
+           from acp_remote_session_bindings
+           where account_id = ?1 and client_device_id = ?2
+           order by updated_at desc, created_at desc, session_id asc
+           limit ?3`,
+        )
+        .bind(input.accountId, input.clientId, limit)
+        .all<SessionBindingRow>();
+      return rows.results.map(mapSessionBindingRow);
+    }
+    const rows = await this.database
+      .prepare(
+        `select account_id, client_device_id, session_id, host_id, agent_json,
+                workspace_roots_json, created_at, updated_at
+         from acp_remote_session_bindings
+         where account_id = ?1
+         order by updated_at desc, created_at desc, session_id asc
+         limit ?2`,
+      )
+      .bind(input.accountId, limit)
+      .all<SessionBindingRow>();
+    return rows.results.map(mapSessionBindingRow);
   }
 
   async resolveGrant(input: {
@@ -785,8 +848,10 @@ function mapSessionBindingRow(
     accountId: row.account_id,
     agent: row.agent_json ? parseAgentGrant(row.agent_json) : undefined,
     clientId: row.client_device_id,
+    createdAt: row.created_at ?? undefined,
     hostId: row.host_id,
     sessionId: row.session_id,
+    updatedAt: row.updated_at ?? undefined,
     workspaceRoots: row.workspace_roots_json
       ? parseStringArray(row.workspace_roots_json, "session binding workspace roots")
       : undefined,

@@ -7,6 +7,7 @@ import { Image, Linking, Pressable, ScrollView, Text, useColorScheme, useWindowD
 import { createLogoutUrl } from "../api/relay";
 import { AccessScreen } from "../features/access/AccessScreen";
 import { HostsScreen } from "../features/hosts/HostsScreen";
+import { SessionsScreen } from "../features/sessions/SessionsScreen";
 import { SettingsScreen } from "../features/settings/SettingsScreen";
 import type { LanguageMode, RouteId, ThemeMode, WorkbenchPreferences } from "../types";
 import { Icon } from "../ui/Icon";
@@ -55,16 +56,23 @@ export function WorkbenchAppFrame({
             width: compact ? "100%" : 280,
           }}
         >
-          <View style={{ alignItems: "center", flexDirection: "row", gap: 12, marginBottom: 22 }}>
-            <Image source={require("../../assets/images/icon.png")} style={{ height: 42, width: 42 }} />
-            <View>
-              <Text style={{ color: foreground, fontFamily: typography.display, fontSize: 24 }}>
-                Free
-              </Text>
-              <Text style={[common.eyebrow, { color: muted }]}>
-                {t(language, "Bridge 工作台", "Bridge workbench")}
-              </Text>
+          <View style={{ alignItems: "center", flexDirection: "row", gap: 12, justifyContent: "space-between", marginBottom: 22 }}>
+            <View style={{ alignItems: "center", flexDirection: "row", flex: 1, gap: 12, minWidth: 0 }}>
+              <Image source={require("../../assets/images/icon.png")} style={{ height: 42, width: 42 }} />
+              <View style={{ minWidth: 0 }}>
+                <Text style={{ color: foreground, fontFamily: typography.display, fontSize: 24 }}>
+                  Free
+                </Text>
+                <Text numberOfLines={1} style={[common.eyebrow, { color: muted }]}>
+                  {t(language, "Bridge 工作台", "Bridge workbench")}
+                </Text>
+              </View>
             </View>
+            <HeaderActions
+              canSignOut={data.session.status === "ready"}
+              language={language}
+              onRefresh={data.refresh}
+            />
           </View>
 
           <View style={{ flexDirection: compact ? "row" : "column", gap: 10 }}>
@@ -86,16 +94,24 @@ export function WorkbenchAppFrame({
                     borderRadius: 8,
                     borderWidth: 1,
                     flex: compact ? 1 : undefined,
-                    flexDirection: "row",
-                    gap: 10,
+                    flexDirection: compact ? "column" : "row",
+                    gap: compact ? 5 : 10,
                     minHeight: 52,
-                    paddingHorizontal: 12,
+                    paddingHorizontal: compact ? 6 : 12,
                     paddingVertical: 10,
                   }}
                 >
                   <Icon icon={item.icon} size={21} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={{ color: active || !dark ? colors.ink : colors.paper, fontFamily: typography.sansSemi, fontSize: 14 }}>
+                  <View style={{ alignItems: compact ? "center" : "flex-start", flex: compact ? undefined : 1, minWidth: 0 }}>
+                    <Text
+                      numberOfLines={1}
+                      style={{
+                        color: active || !dark ? colors.ink : colors.paper,
+                        fontFamily: typography.sansSemi,
+                        fontSize: compact ? 12 : 14,
+                        textAlign: "center",
+                      }}
+                    >
                       {label}
                     </Text>
                     {!compact ? (
@@ -111,36 +127,20 @@ export function WorkbenchAppFrame({
         </View>
 
         <ScrollView contentContainerStyle={{ padding: compact ? 16 : 28, paddingBottom: 40 }}>
-          <View style={{ alignItems: "center", flexDirection: "row", gap: 12, justifyContent: "space-between", marginBottom: 20 }}>
-            <View style={{ flex: 1 }}>
-              <Text style={[common.eyebrow, { color: muted }]}>
-                {sessionStatusLabel(data.session.status, language)}
-              </Text>
-              <Text style={[common.title, { color: foreground, marginTop: 6 }]}>
-                {t(language, "Session 工作台", "Session workbench")}
-              </Text>
-            </View>
-            <View style={{ flexDirection: "row", gap: 8 }}>
-              <Pressable
-                accessibilityLabel={t(language, "刷新", "Refresh")}
-                onPress={() => void data.refresh()}
-                style={[common.panel, { alignItems: "center", height: 42, justifyContent: "center", width: 42 }]}
-              >
-                <Icon icon={RefreshIcon} size={19} />
-              </Pressable>
-              {data.session.status === "ready" ? (
-                <Pressable
-                  accessibilityLabel={t(language, "退出登录", "Sign out")}
-                  onPress={() => void Linking.openURL(createLogoutUrl())}
-                  style={[common.panel, { alignItems: "center", height: 42, justifyContent: "center", width: 42 }]}
-                >
-                  <Icon icon={Logout03Icon} size={19} />
-                </Pressable>
-              ) : null}
-            </View>
+          <View style={{ marginBottom: 18 }}>
+            <Text style={[common.title, { color: foreground }]}>
+              {routeTitle(route, language)}
+            </Text>
           </View>
 
           {route === "access" ? <AccessScreen language={language} session={data.session} /> : null}
+          {route === "sessions" ? (
+            <SessionsScreen
+              hosts={data.hosts}
+              language={language}
+              sessions={data.sessions}
+            />
+          ) : null}
           {route === "hosts" ? (
             <HostsScreen hosts={data.hosts} language={language} onChanged={data.refresh} />
           ) : null}
@@ -158,33 +158,70 @@ export function WorkbenchAppFrame({
   );
 }
 
-function pushRoutePath(route: RouteId): void {
-  if (typeof window === "undefined") return;
-  const pathname = route === "hosts" ? "/hosts" : route === "settings" ? "/settings" : "/access";
-  if (window.location.pathname === pathname) return;
-  window.history.pushState({}, "", `${pathname}${window.location.search}`);
+function HeaderActions({
+  canSignOut,
+  language,
+  onRefresh,
+}: {
+  canSignOut: boolean;
+  language: LanguageMode;
+  onRefresh: () => Promise<void>;
+}) {
+  return (
+    <View style={{ flexDirection: "row", gap: 8 }}>
+      <Pressable
+        accessibilityLabel={t(language, "刷新", "Refresh")}
+        onPress={() => void onRefresh()}
+        style={[common.panel, { alignItems: "center", height: 40, justifyContent: "center", width: 40 }]}
+      >
+        <Icon icon={RefreshIcon} size={18} />
+      </Pressable>
+      {canSignOut ? (
+        <Pressable
+          accessibilityLabel={t(language, "退出登录", "Sign out")}
+          onPress={() => void Linking.openURL(createLogoutUrl())}
+          style={[common.panel, { alignItems: "center", height: 40, justifyContent: "center", width: 40 }]}
+        >
+          <Icon icon={Logout03Icon} size={18} />
+        </Pressable>
+      ) : null}
+    </View>
+  );
 }
 
-function sessionStatusLabel(
-  status: ReturnType<typeof useWorkbenchData>["session"]["status"],
-  language: LanguageMode,
-): string {
-  switch (status) {
-    case "loading":
-      return t(language, "正在检查账号会话", "Checking account session");
-    case "ready":
-      return t(language, "已登录 Bridge 工作区", "Authenticated bridge surface");
-    case "unauthorized":
-      return t(language, "未登录 Bridge 工作区", "Signed-out bridge surface");
-    case "error":
-      return t(language, "账号会话异常", "Account session issue");
-  }
+function pushRoutePath(route: RouteId): void {
+  if (typeof window === "undefined") return;
+  const pathname =
+    route === "sessions"
+      ? "/sessions"
+      : route === "hosts"
+        ? "/hosts"
+        : route === "settings"
+          ? "/settings"
+          : "/access";
+  if (window.location.pathname === pathname) return;
+  window.history.pushState({}, "", `${pathname}${window.location.search}`);
 }
 
 function routeLabel(route: RouteId, language: LanguageMode): string {
   switch (route) {
     case "access":
       return t(language, "访问", "Access");
+    case "sessions":
+      return t(language, "Session", "Sessions");
+    case "hosts":
+      return t(language, "主机", "Hosts");
+    case "settings":
+      return t(language, "设置", "Settings");
+  }
+}
+
+function routeTitle(route: RouteId, language: LanguageMode): string {
+  switch (route) {
+    case "access":
+      return t(language, "访问", "Access");
+    case "sessions":
+      return t(language, "Session 管理", "Session management");
     case "hosts":
       return t(language, "主机", "Hosts");
     case "settings":
@@ -196,6 +233,8 @@ function routeSubtitle(route: RouteId, language: LanguageMode): string {
   switch (route) {
     case "access":
       return t(language, "账号会话", "Account session");
+    case "sessions":
+      return t(language, "会话管理", "Session management");
     case "hosts":
       return t(language, "Bridge 主机", "Bridge machines");
     case "settings":

@@ -22,11 +22,9 @@ bash "$ROOT_DIR/scripts/install.sh" \
   --ref "$FREE_REF" \
   --acp-runtime-repo-url "file://$(cd "$ROOT_DIR/../acp-runtime" >/dev/null 2>&1 && pwd -P)" \
   --acp-runtime-ref "$ACP_RUNTIME_REF" \
-  --no-login \
-  --no-host
+  --no-login
 
 free --help >/dev/null
-free host --help >/dev/null
 free bridge config \
   --relay-url ws://127.0.0.1:8791 \
   --command free \

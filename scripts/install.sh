@@ -10,8 +10,6 @@ RELAY_URL="${FREE_RELAY_URL:-}"
 RUN_LOGIN=1
 FORCE_LOGIN=0
 FORCE_GIT_SOURCE=0
-NO_HOST=0
-SYSTEM_HOST=0
 CLEANUP_DIRS=()
 INSTALLED_FREE_BIN=""
 
@@ -26,14 +24,12 @@ usage() {
   cat <<'EOF'
 Usage:
   curl -fsSL https://raw.githubusercontent.com/saaskit-dev/Free/HEAD/scripts/install.sh | bash
-  ./scripts/install.sh [--system] [--force-login] [--no-login] [--no-host] [--relay-url <ws-url>]
+  ./scripts/install.sh [--force-login] [--no-login] [--relay-url <ws-url>]
 
 Options:
-  --system       After login, install the boot-time macOS host service.
   --force-login  Force browser login refresh and reinstall the active host mode.
   --no-login     Only install the Free CLI.
-  --no-host      Login only; do not install the default user host.
-  --relay-url    Relay WebSocket URL passed to auth/host commands.
+  --relay-url    Relay WebSocket URL passed to auth commands.
   --repo-url     Git repository URL, default: https://github.com/saaskit-dev/Free.git.
   --ref          Git ref to checkout, default: repository default branch.
   --source-git   Force the installer to clone source instead of using the current checkout.
@@ -50,10 +46,6 @@ EOF
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --system)
-      SYSTEM_HOST=1
-      shift
-      ;;
     --force-login)
       FORCE_LOGIN=1
       shift
@@ -64,10 +56,6 @@ while [ "$#" -gt 0 ]; do
       ;;
     --no-login)
       RUN_LOGIN=0
-      shift
-      ;;
-    --no-host)
-      NO_HOST=1
       shift
       ;;
     --relay-url|--repo-url|--ref|--acp-runtime-repo-url|--acp-runtime-ref)
@@ -341,26 +329,15 @@ if ! command -v free >/dev/null 2>&1; then
 fi
 
 auth_args=(auth login)
-host_args=(host install --system)
 if [ -n "$RELAY_URL" ]; then
   auth_args+=(--relay-url "$RELAY_URL")
-  host_args+=(--relay-url "$RELAY_URL")
 fi
 if [ "$FORCE_LOGIN" -eq 1 ]; then
   auth_args+=(--force)
 fi
 
 if [ "$RUN_LOGIN" -eq 1 ]; then
-  if [ "$SYSTEM_HOST" -eq 1 ]; then
-    auth_args+=(--no-host)
-    "$FREE_BIN" "${auth_args[@]}"
-    "$FREE_BIN" "${host_args[@]}"
-  else
-    if [ "$NO_HOST" -eq 1 ]; then
-      auth_args+=(--no-host)
-    fi
-    "$FREE_BIN" "${auth_args[@]}"
-  fi
+  "$FREE_BIN" "${auth_args[@]}"
 fi
 
 echo "Free installed: $FREE_BIN"

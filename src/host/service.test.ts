@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  acpRemoteHostServiceMatchesConfig,
   acpRemoteHostServiceUsesExecutable,
   createMacOSLaunchAgentPlist,
   launchHostPlistPath,
@@ -180,6 +181,52 @@ gui/501/dev.saaskit.free.host = {
         homeDir,
         hostBinPath: "/old/free/dist/host/bin.js",
         nodePath: "/opt/node",
+      }),
+    ).resolves.toBe(false);
+
+    await rm(homeDir, { force: true, recursive: true });
+  });
+
+  it("detects whether an installed plist matches the selected relay and workspace roots", async () => {
+    const homeDir = join(tmpdir(), `free-service-${randomUUID()}`);
+    const plistPath = join(
+      homeDir,
+      "Library",
+      "LaunchAgents",
+      "dev.saaskit.free.host.plist",
+    );
+    await mkdir(join(homeDir, "Library", "LaunchAgents"), { recursive: true });
+    await writeFile(
+      plistPath,
+      createMacOSLaunchAgentPlist({
+        hostBinPath: "/opt/free/dist/host/bin.js",
+        homeDir,
+        label: "dev.saaskit.free.host",
+        nodePath: "/opt/node",
+        relayUrl: "ws://127.0.0.1:8791",
+        standardErrorPath: join(homeDir, ".free", "logs", "host.err.log"),
+        standardOutPath: join(homeDir, ".free", "logs", "host.out.log"),
+        workspaceRoots: ["/Users/dev"],
+      }),
+      "utf8",
+    );
+
+    await expect(
+      acpRemoteHostServiceMatchesConfig({
+        homeDir,
+        hostBinPath: "/opt/free/dist/host/bin.js",
+        nodePath: "/opt/node",
+        relayUrl: "ws://127.0.0.1:8791",
+        workspaceRoots: ["/Users/dev"],
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      acpRemoteHostServiceMatchesConfig({
+        homeDir,
+        hostBinPath: "/opt/free/dist/host/bin.js",
+        nodePath: "/opt/node",
+        relayUrl: "wss://free-relay.saaskit.app",
+        workspaceRoots: ["/Users/dev"],
       }),
     ).resolves.toBe(false);
 

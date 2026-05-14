@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 
 import { ACP_REMOTE_DEFAULT_RELAY_URL } from "./defaults.js";
-import { resolveFreeRelayUrl } from "./relay-environment.js";
+import {
+  FREE_LOCAL_RELAY_URL,
+  resolveFreeRelayUrl,
+} from "./relay-environment.js";
 import {
   clearCachedSession,
   getSessionPath,
@@ -11,7 +14,7 @@ import {
   validateRelaySession,
 } from "./host/host-login.js";
 import {
-  acpRemoteHostServiceUsesExecutable,
+  acpRemoteHostServiceMatchesConfig,
   getAcpRemoteHostUserServiceStatus,
   installAcpRemoteHostUserService,
   restartAcpRemoteHostUserService,
@@ -23,7 +26,7 @@ import { fileURLToPath } from "node:url";
 
 type AuthCommand =
   | { name: "help" }
-  | { ensureHost: boolean; force: boolean; name: "login"; relayUrl: string }
+  | { force: boolean; name: "login"; relayUrl: string }
   | { name: "logout" }
   | { name: "status"; relayUrl: string };
 
@@ -71,7 +74,6 @@ function parseLoginCommand(
   argv: readonly string[],
   env: Record<string, string | undefined>,
 ): AuthCommand {
-  let ensureHost = true;
   let force = false;
   let relayEnvironment: string | undefined;
   let relayUrl: string | undefined;
@@ -81,9 +83,6 @@ function parseLoginCommand(
       case "--force":
       case "-f":
         force = true;
-        break;
-      case "--no-host":
-        ensureHost = false;
         break;
       case "--relay-url":
         relayUrl = readArgValue(argv, index, arg);
@@ -101,7 +100,6 @@ function parseLoginCommand(
     }
   }
   return {
-    ensureHost,
     force,
     name: "login",
     relayUrl: resolveFreeRelayUrl({
@@ -166,9 +164,10 @@ function readArgValue(
 }
 
 async function login(command: Extract<AuthCommand, { name: "login" }>): Promise<void> {
+  const sessionPath = getSessionPath(undefined, command.relayUrl);
   if (!command.force) {
-    process.stderr.write(`Checking cached account session at ${getSessionPath()}...\n`);
-    const cached = await loadCachedSession();
+    process.stderr.write(`Checking cached account session at ${sessionPath}...\n`);
+    const cached = await loadCachedSession(undefined, command.relayUrl);
     if (cached) {
       process.stderr.write("Validating cached account session with relay...\n");
       const validation = await withWaitingStatus(
@@ -181,7 +180,7 @@ async function login(command: Extract<AuthCommand, { name: "login" }>): Promise<
       );
       if (!validation.ok) {
         if (!validation.retryable) {
-          await clearCachedSession();
+          await clearCachedSession(undefined, command.relayUrl);
         }
         process.stdout.write(
           [
@@ -197,12 +196,15 @@ async function login(command: Extract<AuthCommand, { name: "login" }>): Promise<
           return;
         }
       } else {
+        const hostMessage = await ensureDefaultHostInstalled(command.relayUrl);
         process.stdout.write(
           [
             "Already authenticated.",
+            `relay: ${describeRelayTarget(command.relayUrl)}`,
             `account: ${validation.accountId}`,
-            `session: ${getSessionPath()}`,
-            "Use `free auth login --force` to refresh the session.",
+            `session: ${sessionPath}`,
+            `Use \`${loginCommandForRelay(command.relayUrl)} --force\` to refresh the session.`,
+            hostMessage,
           ].join("\n") + "\n",
         );
         return;
@@ -216,22 +218,19 @@ async function login(command: Extract<AuthCommand, { name: "login" }>): Promise<
 
   process.stderr.write("Starting Free browser sign in...\n");
   const session = await loginViaOAuth(command.relayUrl);
-  process.stderr.write(`Saving account session at ${getSessionPath()}...\n`);
-  await saveSession(session);
+  process.stderr.write(`Saving account session at ${sessionPath}...\n`);
+  await saveSession(session, undefined, command.relayUrl);
   process.stderr.write("Account session saved.\n");
-  if (command.ensureHost) {
-    process.stderr.write("Preparing Free host service...\n");
-  }
-  const hostMessage = command.ensureHost
-    ? await ensureDefaultHostInstalled(command.relayUrl, {
-        reinstall: command.force,
-      })
-    : "Host install skipped because --no-host was set.";
+  process.stderr.write("Preparing Free host service...\n");
+  const hostMessage = await ensureDefaultHostInstalled(command.relayUrl, {
+    reinstall: command.force,
+  });
   process.stdout.write(
     [
       "Authentication successful.",
+      `relay: ${describeRelayTarget(command.relayUrl)}`,
       `account: ${session.accountId}`,
-      `session: ${getSessionPath()}`,
+      `session: ${sessionPath}`,
       hostMessage,
     ].join("\n") + "\n",
   );
@@ -259,14 +258,17 @@ async function ensureDefaultHostInstalled(
     return reinstallSystemHostService(relayUrl);
   }
   const hostBinPath = join(dirname(fileURLToPath(import.meta.url)), "host", "bin.js");
+  const workspaceRoots = [homeDir];
   if (userStatus.installed && !options.reinstall) {
-    const usesCurrentExecutable = await acpRemoteHostServiceUsesExecutable({
+    const matchesCurrentConfig = await acpRemoteHostServiceMatchesConfig({
       homeDir,
       hostBinPath,
       nodePath: process.execPath,
+      relayUrl,
       scope: "user",
+      workspaceRoots,
     });
-    if (!usesCurrentExecutable) {
+    if (!matchesCurrentConfig) {
       const status = await installAcpRemoteHostUserService({
         hostBinPath,
         env: {
@@ -276,9 +278,9 @@ async function ensureDefaultHostInstalled(
         nodePath: process.execPath,
         relayUrl,
         scope: "user",
-        workspaceRoots: [homeDir],
+        workspaceRoots,
       });
-      return `Host service updated to current Free install: ${status.running ? "running" : "not running"} (${status.plistPath})`;
+      return `Host service updated for ${describeRelayTarget(relayUrl)}: ${status.running ? "running" : "not running"} (${status.plistPath})`;
     }
     if (userStatus.running) {
       return `Host service already installed: running (${userStatus.plistPath})`;
@@ -299,7 +301,7 @@ async function ensureDefaultHostInstalled(
     nodePath: process.execPath,
     relayUrl,
     scope: "user",
-    workspaceRoots: [homeDir],
+    workspaceRoots,
   });
   return `Host service ${options.reinstall ? "reinstalled" : "installed"}: ${status.running ? "running" : "not running"} (${status.plistPath})`;
 }
@@ -337,7 +339,7 @@ async function logout(): Promise<void> {
 }
 
 async function status(command: Extract<AuthCommand, { name: "status" }>): Promise<void> {
-  const cached = await loadCachedSession();
+  const cached = await loadCachedSession(undefined, command.relayUrl);
   if (cached) {
     process.stderr.write("Validating cached account session with relay...\n");
   }
@@ -354,6 +356,7 @@ async function status(command: Extract<AuthCommand, { name: "status" }>): Promis
   process.stdout.write(
     [
       `authenticated: ${validation?.ok ? "yes" : "no"}`,
+      `relay: ${describeRelayTarget(command.relayUrl)}`,
       ...(validation?.ok && cached
         ? [
             `account: ${validation.accountId}`,
@@ -363,7 +366,7 @@ async function status(command: Extract<AuthCommand, { name: "status" }>): Promis
       ...(!validation?.ok && cached
         ? [`reason: ${validation?.reason ?? "cached session missing"}`]
         : []),
-      `session: ${getSessionPath()}`,
+      `session: ${getSessionPath(undefined, command.relayUrl)}`,
     ].join("\n") + "\n",
   );
 }
@@ -385,11 +388,16 @@ async function withWaitingStatus<T>(
 }
 
 function printHelp(): void {
+  const envRelayUrl = resolveFreeRelayUrl({
+    env: process.env,
+    envRelayEnvironmentName: "FREE_RELAY_ENV",
+    envRelayUrlName: "FREE_RELAY_URL",
+  });
   process.stdout.write(
     [
       "Usage:",
-      "  free auth login [--relay-env online|local] [--force] [--no-host]",
-      "  free auth login [--relay-url <ws-url>] [--force] [--no-host]",
+      "  free auth login [--relay-env online|local] [--force]",
+      "  free auth login [--relay-url <ws-url>] [--force]",
       "  free auth status [--relay-env online|local]",
       "  free auth status [--relay-url <ws-url>]",
       "  free auth logout",
@@ -398,14 +406,37 @@ function printHelp(): void {
       `  --relay-url   Relay WebSocket URL (default: ${ACP_REMOTE_DEFAULT_RELAY_URL})`,
       "  --relay-env   Relay environment name. online is the default, local uses ws://127.0.0.1:8791.",
       "  --force       Ignore any cached account session and open browser OAuth.",
-      "  --no-host   Only cache the login session; do not install the default user host.",
       "",
-      "The auth login command caches the account session. After a fresh login,",
-      "it installs the default user host service on macOS if no service exists.",
+      "The auth login command caches the account session and ensures the default",
+      "user host service is installed, running, and pointed at the selected relay.",
       "--force refreshes login and reinstalls the default user host service.",
-      `Cached session: ${getSessionPath()}`,
+      "",
+      `Current relay: ${describeRelayTarget(envRelayUrl)}`,
+      `Current cached session: ${getSessionPath(undefined, envRelayUrl)}`,
+      `Current login command: ${loginCommandForRelay(envRelayUrl)}`,
+      `Local login command: ${loginCommandForRelay(FREE_LOCAL_RELAY_URL)}`,
     ].join("\n") + "\n",
   );
+}
+
+function describeRelayTarget(relayUrl: string): string {
+  if (relayUrl === FREE_LOCAL_RELAY_URL) {
+    return `local (${relayUrl})`;
+  }
+  if (relayUrl === ACP_REMOTE_DEFAULT_RELAY_URL) {
+    return `online (${relayUrl})`;
+  }
+  return `custom (${relayUrl})`;
+}
+
+function loginCommandForRelay(relayUrl: string): string {
+  if (relayUrl === FREE_LOCAL_RELAY_URL) {
+    return "free auth login --relay-env local";
+  }
+  if (relayUrl === ACP_REMOTE_DEFAULT_RELAY_URL) {
+    return "free auth login --relay-env online";
+  }
+  return `free auth login --relay-url ${relayUrl}`;
 }
 
 if (fileURLToPath(import.meta.url) === process.argv[1]) {

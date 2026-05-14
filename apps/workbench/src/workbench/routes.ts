@@ -1,4 +1,5 @@
 import {
+  ActivityCircleIcon,
   ComputerIcon,
   Settings02Icon,
   UserShield01Icon,
@@ -13,6 +14,10 @@ export const routes: readonly {
   {
     id: "access",
     icon: UserShield01Icon,
+  },
+  {
+    id: "sessions",
+    icon: ActivityCircleIcon,
   },
   {
     id: "hosts",

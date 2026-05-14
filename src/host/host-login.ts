@@ -25,10 +25,11 @@ export type HostSession = {
 
 const SESSION_FILE_NAME = "account-session.json";
 const SESSION_DIR = (homeDir = homedir()) => join(homeDir, ".free");
-const SESSION_PATH = (homeDir = homedir()) => join(SESSION_DIR(homeDir), SESSION_FILE_NAME);
+const SESSION_PATH = (homeDir = homedir(), relayUrl?: string) =>
+  join(SESSION_DIR(homeDir), sessionFileNameForRelayUrl(relayUrl));
 
-export function getSessionPath(homeDir?: string): string {
-  return SESSION_PATH(homeDir);
+export function getSessionPath(homeDir?: string, relayUrl?: string): string {
+  return SESSION_PATH(homeDir, relayUrl);
 }
 
 export function encodeHostAccountSession(session: HostSession): string {
@@ -44,8 +45,11 @@ export function decodeHostAccountSession(value: string): HostSession {
   };
 }
 
-export async function loadCachedSession(homeDir?: string): Promise<HostSession | undefined> {
-  return readSessionFile(SESSION_PATH(homeDir));
+export async function loadCachedSession(
+  homeDir?: string,
+  relayUrl?: string,
+): Promise<HostSession | undefined> {
+  return readSessionFile(SESSION_PATH(homeDir, relayUrl));
 }
 
 async function readSessionFile(path: string): Promise<HostSession | undefined> {
@@ -69,7 +73,11 @@ async function readSessionFile(path: string): Promise<HostSession | undefined> {
   }
 }
 
-export async function saveSession(session: HostSession, homeDir?: string): Promise<void> {
+export async function saveSession(
+  session: HostSession,
+  homeDir?: string,
+  relayUrl?: string,
+): Promise<void> {
   if (!session.privateKey) {
     throw new Error("Cannot save an account session without its private key.");
   }
@@ -78,7 +86,7 @@ export async function saveSession(session: HostSession, homeDir?: string): Promi
     await mkdir(dir, { recursive: true });
   }
   await writeFile(
-    SESSION_PATH(homeDir),
+    SESSION_PATH(homeDir, relayUrl),
     JSON.stringify(
       {
         accountSession: session.accountSession,
@@ -92,8 +100,29 @@ export async function saveSession(session: HostSession, homeDir?: string): Promi
   );
 }
 
-export async function clearCachedSession(homeDir?: string): Promise<void> {
-  await rm(SESSION_PATH(homeDir), { force: true });
+export async function clearCachedSession(homeDir?: string, relayUrl?: string): Promise<void> {
+  await rm(SESSION_PATH(homeDir, relayUrl), { force: true });
+}
+
+function sessionFileNameForRelayUrl(relayUrl?: string): string {
+  if (!relayUrl) {
+    return SESSION_FILE_NAME;
+  }
+  try {
+    const url = new URL(relayUrl.replace(/^ws(s?):\/\//, "http$1://"));
+    if (
+      (url.hostname === "127.0.0.1" || url.hostname === "localhost") &&
+      url.port === "8791"
+    ) {
+      return "account-session.local.json";
+    }
+    if (url.hostname === "free-relay.saaskit.app") {
+      return SESSION_FILE_NAME;
+    }
+    return `account-session.${Buffer.from(url.origin).toString("base64url")}.json`;
+  } catch {
+    return SESSION_FILE_NAME;
+  }
 }
 
 export type SessionValidationResult =
@@ -378,10 +407,15 @@ function createLocalOAuthResultPage(input: {
   const isSuccess = input.tone === "success";
   const title = isSuccess ? "Free sign in complete" : "Free sign in failed";
   const status = isSuccess ? "Connected" : "Action required";
-  const accent = isSuccess ? "#8cff54" : "#ff6d5a";
+  const titleZh = isSuccess ? "Free 登录完成" : "Free 登录失败";
+  const statusZh = isSuccess ? "已连接" : "需要处理";
+  const messageZh = translateLocalOAuthMessage(input.message);
+  const detailZh = input.detail ? translateLocalOAuthMessage(input.detail) : undefined;
   const script = input.autoClose
     ? `<script>
       (function() {
+        var zh = (navigator.language || "").toLowerCase().indexOf("zh") === 0;
+        var closeCopy = zh ? "Free 已连接，可以关闭此标签页。" : "Free is connected. This tab can be closed.";
         try {
           if (window.parent && window.parent !== window) {
             window.parent.postMessage({ type: "free:login-complete" }, "*");
@@ -395,13 +429,13 @@ function createLocalOAuthResultPage(input: {
         window.setTimeout(tryClose, 1800);
         window.setTimeout(function() {
           var detail = document.getElementById("detail");
-          if (detail) detail.textContent = "Free is connected. This tab can be closed.";
+          if (detail) detail.textContent = closeCopy;
         }, 2600);
       })();
     </script>`
     : "";
   return `<!doctype html>
-<html lang="en">
+<html lang="en" data-tone="${escapeHtml(input.tone)}">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -409,99 +443,250 @@ function createLocalOAuthResultPage(input: {
     <style>
       :root {
         color-scheme: light;
-        --bg: #0a0f1f;
-        --surface: #121a33;
-        --surface-2: #1b2550;
-        --ink: #ecf2ff;
-        --muted: #aab7d6;
-        --line: #2f3a63;
-        --accent: ${accent};
+        --paper: oklch(0.982 0.018 95);
+        --ink: oklch(0.18 0.025 274);
+        --muted: oklch(0.48 0.028 278);
+        --line: oklch(0.81 0.035 276);
+        --panel: oklch(0.995 0.012 98);
+        --surface: oklch(0.94 0.026 276);
+        --lime: oklch(0.91 0.205 128);
+        --blue: oklch(0.63 0.2 252);
+        --coral: oklch(0.68 0.19 28);
+        --accent: var(--lime);
       }
+      html[data-tone="error"] { --accent: var(--coral); }
       * { box-sizing: border-box; }
       body {
         margin: 0;
         min-height: 100vh;
-        background:
-          radial-gradient(1200px 500px at 12% -10%, #5d3df433 0%, transparent 70%),
-          radial-gradient(1000px 420px at 100% 0%, #00e7ff2a 0%, transparent 75%),
-          var(--bg);
+        background: var(--paper);
         color: var(--ink);
-        font: 15px/1.5 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font: 15px/1.5 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        overflow-x: hidden;
       }
       .shell {
         min-height: 100vh;
-        display: grid;
-        grid-template-rows: auto 1fr;
+        display: flex;
+        flex-direction: column;
+        position: relative;
+        isolation: isolate;
+      }
+      .shell::before,
+      .shell::after {
+        content: "";
+        position: absolute;
+        z-index: -1;
+        pointer-events: none;
+      }
+      .shell::before {
+        inset: 126px auto auto -54px;
+        width: min(42vw, 520px);
+        aspect-ratio: 1;
+        background: var(--lime);
+        clip-path: polygon(0 0, 100% 12%, 78% 82%, 9% 100%);
+      }
+      .shell::after {
+        inset: 0 -120px auto auto;
+        width: min(45vw, 620px);
+        height: 230px;
+        background: var(--blue);
+        clip-path: polygon(18% 0, 100% 0, 100% 86%, 0 64%);
+        opacity: 0.92;
       }
       header {
         display: flex;
         justify-content: space-between;
         align-items: center;
         gap: 16px;
-        padding: 18px clamp(20px, 5vw, 52px);
-        border-bottom: 1px solid var(--line);
-        background: color-mix(in oklch, var(--surface) 90%, #000000);
+        padding: 22px clamp(18px, 5vw, 56px);
+        border-bottom: 1px solid var(--ink);
+        background: color-mix(in oklch, var(--paper) 88%, var(--surface));
       }
-      .brand { font-weight: 780; letter-spacing: 0.02em; }
-      .status {
-        border: 1px solid color-mix(in oklch, var(--accent) 40%, var(--line));
-        border-radius: 999px;
-        color: var(--accent);
-        padding: 5px 10px;
-        font-size: 0.86rem;
-        white-space: nowrap;
-      }
-      main {
-        display: grid;
-        place-items: center;
-        padding: 34px clamp(20px, 5vw, 52px);
-      }
-      .panel {
-        width: min(560px, 100%);
-        border: 1px solid var(--line);
-        border-radius: 14px;
-        background: linear-gradient(180deg, var(--surface) 0%, var(--surface-2) 100%);
-        padding: clamp(24px, 5vw, 38px);
-        box-shadow: 0 14px 46px #00000052;
-      }
-      h1 {
-        margin: 0 0 10px;
-        font-size: clamp(1.45rem, 4vw, 2.15rem);
-        line-height: 1.08;
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        font-weight: 760;
         letter-spacing: 0;
       }
-      p { margin: 0; color: var(--muted); }
-      .detail {
-        margin-top: 18px;
-        border-left: 3px solid var(--accent);
-        background: color-mix(in oklch, var(--surface) 75%, #000000);
+      .mark {
+        display: grid;
+        place-items: center;
+        width: 42px;
+        height: 42px;
+        background: var(--ink);
+        color: var(--panel);
+        border: 1px solid var(--ink);
+        font-size: 26px;
+        line-height: 1;
+        box-shadow: 5px 5px 0 var(--accent);
+      }
+      .brand small {
+        display: block;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 620;
+        margin-top: 1px;
+      }
+      .status {
+        border: 1px solid var(--ink);
         border-radius: 8px;
-        padding: 10px 12px;
+        background: var(--accent);
         color: var(--ink);
+        padding: 8px 12px;
+        font-size: 13px;
+        font-weight: 720;
+        white-space: nowrap;
+        box-shadow: 4px 4px 0 var(--ink);
+      }
+      main {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: clamp(34px, 9vh, 84px) clamp(18px, 5vw, 56px);
+      }
+      .panel {
+        width: min(680px, 100%);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        padding: clamp(24px, 6vw, 44px);
+        box-shadow: 10px 10px 0 var(--ink);
+        position: relative;
+      }
+      .panel::before {
+        content: "";
+        position: absolute;
+        inset: 16px 16px auto auto;
+        width: 72px;
+        height: 72px;
+        background:
+          linear-gradient(90deg, var(--ink) 1px, transparent 1px),
+          linear-gradient(var(--ink) 1px, transparent 1px);
+        background-size: 12px 12px;
+        opacity: 0.14;
+      }
+      h1 {
+        max-width: 13ch;
+        margin: 0 0 12px;
+        font-size: 42px;
+        line-height: 1.02;
+        letter-spacing: 0;
+      }
+      p {
+        max-width: 62ch;
+        margin: 0;
+        color: var(--muted);
+      }
+      .detail {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-top: 24px;
+        border: 1px solid var(--ink);
+        background: color-mix(in oklch, var(--accent) 24%, var(--panel));
+        border-radius: 8px;
+        padding: 12px 14px;
+        color: var(--ink);
+        font-weight: 640;
+      }
+      .dot {
+        flex: 0 0 auto;
+        width: 12px;
+        height: 12px;
+        border: 1px solid var(--ink);
+        background: var(--accent);
+        transform: rotate(45deg);
       }
       code {
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         font-size: 0.92em;
+      }
+      @media (max-width: 620px) {
+        header {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+        .status { align-self: flex-start; }
+        main { align-items: flex-start; }
+        .panel {
+          box-shadow: 6px 6px 0 var(--ink);
+        }
+        h1 {
+          font-size: 32px;
+          max-width: 12ch;
+        }
+        .panel::before {
+          width: 48px;
+          height: 48px;
+        }
       }
     </style>
   </head>
   <body>
     <div class="shell">
       <header>
-        <div class="brand">Free</div>
-        <div class="status">${escapeHtml(status)}</div>
+        <div class="brand" aria-label="Free">
+          <span class="mark">F</span>
+          <span>
+            Free
+            <small data-en="Device connection" data-zh="设备连接">Device connection</small>
+          </span>
+        </div>
+        <div class="status" data-en="${escapeHtml(status)}" data-zh="${escapeHtml(statusZh)}">${escapeHtml(status)}</div>
       </header>
       <main>
         <section class="panel" aria-labelledby="title">
-          <h1 id="title">${escapeHtml(title)}</h1>
-          <p>${escapeHtml(input.message)}</p>
-          ${input.detail ? `<p class="detail" id="detail">${escapeHtml(input.detail)}</p>` : ""}
+          <h1 id="title" data-en="${escapeHtml(title)}" data-zh="${escapeHtml(titleZh)}">${escapeHtml(title)}</h1>
+          <p data-en="${escapeHtml(input.message)}" data-zh="${escapeHtml(messageZh)}">${escapeHtml(input.message)}</p>
+          ${input.detail ? `<p class="detail" id="detail" data-en="${escapeHtml(input.detail)}" data-zh="${escapeHtml(detailZh ?? input.detail)}"><span class="dot" aria-hidden="true"></span><span>${escapeHtml(input.detail)}</span></p>` : ""}
         </section>
       </main>
     </div>
+    <script>
+      (function() {
+        var zh = (navigator.language || "").toLowerCase().indexOf("zh") === 0;
+        if (!zh) return;
+        document.documentElement.lang = "zh-CN";
+        document.querySelectorAll("[data-zh]").forEach(function(node) {
+          var value = node.getAttribute("data-zh");
+          if (!value) return;
+          if (node.id === "detail") {
+            var text = node.querySelector("span:last-child");
+            if (text) text.textContent = value;
+            return;
+          }
+          node.textContent = value;
+        });
+      })();
+    </script>
     ${script}
   </body>
 </html>`;
+}
+
+function translateLocalOAuthMessage(value: string): string {
+  switch (value) {
+    case "Free is connected to your account on this device.":
+      return "Free 已连接到此设备上的账号。";
+    case "This tab can be closed.":
+      return "可以关闭此标签页。";
+    case "The relay completed sign in, but did not return the account credential this device needs.":
+      return "Relay 已完成登录，但未返回此设备需要的账号凭证。";
+    case "Run `free auth login --force` to start a fresh browser sign in.":
+      return "运行 `free auth login --force` 重新开始浏览器登录。";
+    case "The relay returned an account credential that this version of Free could not read.":
+      return "Relay 返回的账号凭证无法被当前版本的 Free 读取。";
+    case "Run `free auth login --force` to request a new account credential.":
+      return "运行 `free auth login --force` 请求新的账号凭证。";
+    case "The returned account credential does not match this device.":
+      return "返回的账号凭证与此设备不匹配。";
+    case "Run `free auth login --force` from the same terminal session and browser.":
+      return "在同一个终端会话和浏览器中运行 `free auth login --force`。";
+    default:
+      return value;
+  }
 }
 
 function escapeHtml(value: string): string {

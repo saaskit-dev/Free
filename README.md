@@ -23,8 +23,6 @@ packs Free, installs the resulting CLI globally with npm, then runs
 Useful install flags:
 
 - `--no-login` installs only the `free` CLI.
-- `--no-host` logs in without installing the default user host.
-- `--system` installs the macOS host as a boot-time system service after login.
 - `--force-login` refreshes browser login and reinstalls the active host mode.
 - `--relay-url <ws-url>` uses a non-default relay.
 - `--ref <git-ref>` installs a specific Free branch, tag, or commit.
@@ -43,10 +41,6 @@ The installed package exposes `free`:
 free auth login
 free auth status
 free auth logout
-free host install
-free host status
-free host restart
-free host run
 free bridge run
 free bridge config
 ```
@@ -54,8 +48,7 @@ free bridge config
 The normal user flow is:
 
 1. Run `free auth login` on each machine that should host agents.
-2. Keep `free host run` or the installed host service running on those machines.
-3. Configure the editor ACP client to launch `free bridge run`.
+2. Configure the editor ACP client to launch `free bridge run`.
 
 Hosts are registered in the relay control plane. Offline hosts can still appear
 in discovery using their last known metadata, but only currently connected hosts
@@ -66,7 +59,7 @@ are selectable for a new route.
 The user-facing path is:
 
 ```text
-Editor ACP client -> free bridge run -> Relay Worker -> free host run -> acp-runtime -> Agent
+Editor ACP client -> free bridge run -> Relay Worker -> local Free host -> acp-runtime -> Agent
 ```
 
 The relay control plane stores account, client, host, grant, session binding,
@@ -195,7 +188,6 @@ The default bridge, auth, and host environment is online:
 free bridge config
 free bridge run
 free auth login
-free host run
 ```
 
 Use the local environment when testing against `make relay-dev` on port `8791`
@@ -205,7 +197,6 @@ and Workbench Web on port `8790`:
 free bridge config --relay-env local
 free bridge run --relay-env local
 free auth login --relay-env local
-free host run --relay-env local
 ```
 
 `--relay-url <ws-url>` remains available for custom relay deployments, but it

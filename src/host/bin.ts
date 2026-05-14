@@ -33,10 +33,12 @@ import {
   readAcpRemoteAccountSessionVerificationKeys,
 } from "../protocol/account-session-authority.js";
 import { ACP_REMOTE_DEFAULT_RELAY_URL } from "../defaults.js";
+import { FREE_LOCAL_RELAY_URL, resolveFreeRelayUrl } from "../relay-environment.js";
 import {
   clearCachedSession,
   decodeHostAccountSession,
   encodeHostAccountSession,
+  getSessionPath,
   loadCachedSession,
   saveSession,
   loginViaOAuth,
@@ -210,7 +212,7 @@ async function resolveSession(
 
   // 2. Cached session
   if (!options.forceLogin) {
-    const cached = await loadCachedSession(options.homeDir);
+    const cached = await loadCachedSession(options.homeDir, relayUrl);
     if (cached) {
       const validation = await validateRelaySession({ relayUrl, session: cached });
       if (validation.ok) {
@@ -218,7 +220,7 @@ async function resolveSession(
         return { ...cached, accountId: validation.accountId };
       }
       if (!validation.retryable) {
-        await clearCachedSession(options.homeDir);
+        await clearCachedSession(options.homeDir, relayUrl);
       }
       throw new Error(
         [
@@ -238,8 +240,8 @@ async function resolveSession(
     "No cached session. Opening browser for GitHub login...\n",
   );
   const session = await loginViaOAuth(relayUrl);
-  await saveSession(session, options.homeDir);
-  process.stderr.write(`Account session saved for account ${session.accountId} at ~/.free/account-session.json.\n`);
+  await saveSession(session, options.homeDir, relayUrl);
+  process.stderr.write(`Account session saved for account ${session.accountId} at ${getSessionPath(options.homeDir, relayUrl)}.\n`);
   return session;
 }
 
@@ -455,6 +457,7 @@ async function runHost(argv: readonly string[]): Promise<void> {
           .filter(Boolean)
           .join(", ")
       : "(none configured)";
+  const workspaceRootList = workspaceRoots.join(", ");
   let stopping = false;
   let active: { close(): void } | undefined;
   let pendingHostRestart:
@@ -464,6 +467,18 @@ async function runHost(argv: readonly string[]): Promise<void> {
     stopping = true;
     active?.close();
   };
+  writeHostLog(
+    [
+      "Foreground host started.",
+      "Keep this terminal open while debugging.",
+      `For Zed and regular use, run \`${hostInstallCommandForRelay(config.relayUrl)}\` instead.`,
+      `Workspace roots: ${workspaceRootList}`,
+    ].join(" "),
+    {
+      "acp.remote.relay_url": config.relayUrl,
+      "acp.remote.workspace_roots": workspaceRoots,
+    },
+  );
   const exitForHostBinaryChange = (change: {
     currentMtimeMs: number;
     initialMtimeMs: number;
@@ -871,6 +886,11 @@ function shellEscape(value: string): string {
 }
 
 function printHelp(): void {
+  const currentRelayUrl = resolveFreeRelayUrl({
+    env: process.env,
+    envRelayEnvironmentName: "ACP_REMOTE_HOST_RELAY_ENV",
+    envRelayUrlName: "ACP_REMOTE_HOST_RELAY_URL",
+  });
   process.stdout.write(
     [
       "Usage:",
@@ -915,14 +935,49 @@ function printHelp(): void {
       "",
       "Login flow:",
       "  If no --account-session or env var is set, the host checks",
-      "  ~/.free/account-session.json, otherwise opens browser OAuth and saves it.",
+      "  the account session for the selected relay, otherwise opens browser OAuth and saves it.",
       "  Use --force-login to refresh an expired or mismatched cached session.",
       "",
       "Defaults:",
       `  relay: ${ACP_REMOTE_DEFAULT_RELAY_URL}`,
       "  workspace root: home directory",
+      "",
+      `Current relay: ${describeHostRelayTarget(currentRelayUrl)}`,
+      `Current cached session: ${getSessionPath(undefined, currentRelayUrl)}`,
+      `Background host: ${hostInstallCommandForRelay(currentRelayUrl)}`,
+      `Foreground debug host: ${hostRunCommandForRelay(currentRelayUrl)}`,
     ].join("\n") + "\n",
   );
+}
+
+function describeHostRelayTarget(relayUrl: string): string {
+  if (relayUrl === FREE_LOCAL_RELAY_URL) {
+    return `local (${relayUrl})`;
+  }
+  if (relayUrl === ACP_REMOTE_DEFAULT_RELAY_URL) {
+    return `online (${relayUrl})`;
+  }
+  return `custom (${relayUrl})`;
+}
+
+function hostInstallCommandForRelay(relayUrl: string): string {
+  if (relayUrl === FREE_LOCAL_RELAY_URL) {
+    return "free host install --relay-env local --workspace-root /Users/dev";
+  }
+  if (relayUrl === ACP_REMOTE_DEFAULT_RELAY_URL) {
+    return "free host install --relay-env online";
+  }
+  return `free host install --relay-url ${relayUrl}`;
+}
+
+function hostRunCommandForRelay(relayUrl: string): string {
+  if (relayUrl === FREE_LOCAL_RELAY_URL) {
+    return "free host run --relay-env local";
+  }
+  if (relayUrl === ACP_REMOTE_DEFAULT_RELAY_URL) {
+    return "free host run --relay-env online";
+  }
+  return `free host run --relay-url ${relayUrl}`;
 }
 
 function printServiceStatus(status: {

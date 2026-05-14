@@ -83,7 +83,7 @@ async function listHosts(accountSessionValue) {
 function resolveHost(hosts) {
   const host = chooseHost(hosts);
   if (!host?.hostId) {
-    throw new Error("No online host found. Start it with `free host run`.");
+    throw new Error("No online host found. Run `free auth login` on the target machine.");
   }
   return host;
 }

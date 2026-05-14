@@ -1,7 +1,7 @@
 import { GithubIcon, Login03Icon } from "@hugeicons/core-free-icons";
 import { Pressable, Text, View } from "react-native";
 
-import { createLoginUrl } from "../../api/relay";
+import { createLoginUrl, currentWorkbenchUrl } from "../../api/relay";
 import type { AccountSession, LanguageMode, LoadState } from "../../types";
 import { Icon } from "../../ui/Icon";
 import { colors, common, typography } from "../../ui/theme";
@@ -13,12 +13,10 @@ type AccessScreenProps = {
 };
 
 export function AccessScreen({ language, session }: AccessScreenProps) {
-  const returnTo = "http://127.0.0.1:8790/";
-
   if (session.status === "loading") {
     return (
       <StatePanel
-        body={t(language, "正在读取 /api/session。", "Reading /api/session.")}
+        body={t(language, "正在检查当前浏览器的登录状态。", "Checking the sign-in state for this browser.")}
         title={t(language, "正在检查账号会话", "Checking account session")}
       />
     );
@@ -31,12 +29,12 @@ export function AccessScreen({ language, session }: AccessScreenProps) {
           title={t(language, "需要登录", "Sign in required")}
           body={t(
             language,
-            "建立 relay 账号会话后，工作台才会展示 Bridge 资源。",
-            "The workbench only shows bridge resources after the relay account session is established.",
+            "登录后可以管理主机、Session 和授权请求。",
+            "Sign in to manage hosts, sessions, and authorization requests.",
           )}
         />
         <Pressable
-          onPress={() => navigateToLogin(createLoginUrl(returnTo))}
+          onPress={() => navigateToLogin(createLoginUrl(currentWorkbenchUrl()))}
           style={[common.panel, { alignItems: "center", backgroundColor: colors.lime, flexDirection: "row", gap: 12, padding: 16 }]}
         >
           <Icon icon={GithubIcon} size={22} />
