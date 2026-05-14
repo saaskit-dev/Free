@@ -20,6 +20,7 @@ type SessionsScreenProps = {
 
 type AvailabilityFilter = "all" | "online" | "offline";
 type StatusFilter = "all" | NonNullable<SessionRecord["status"]>;
+type FilterId = "agent" | "availability" | "host" | "status" | "workspace";
 
 export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProps) {
   const { width } = useWindowDimensions();
@@ -30,6 +31,7 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
   const [workspaceRoot, setWorkspaceRoot] = useState("all");
   const [availability, setAvailability] = useState<AvailabilityFilter>("all");
   const [status, setStatus] = useState<StatusFilter>("all");
+  const [openFilter, setOpenFilter] = useState<FilterId | undefined>();
   const [copiedKey, setCopiedKey] = useState<string | undefined>();
 
   const hostLabels = useMemo(() => {
@@ -136,7 +138,10 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
         <TextInput
           accessibilityLabel={t(language, "搜索 Session", "Search sessions")}
           autoCapitalize="none"
-          onChangeText={setQuery}
+          onChangeText={(value) => {
+            setOpenFilter(undefined);
+            setQuery(value);
+          }}
           placeholder={t(language, "搜索 Session、主机、Agent、目录、ID", "Search session, host, agent, workspace, ID")}
           placeholderTextColor={colors.muted}
           style={[inputStyle, { flex: compact ? undefined : 1, width: compact ? "100%" : undefined }]}
@@ -150,7 +155,9 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
       <View style={filterRailStyle}>
         <SelectFilter
           allLabel={t(language, "全部状态", "All states")}
+          filterId="status"
           label={t(language, "状态", "State")}
+          openFilter={openFilter}
           options={[
             ["active", t(language, "运行中", "Active")],
             ["starting", t(language, "启动中", "Starting")],
@@ -158,38 +165,66 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
             ["failed", t(language, "失败", "Failed")],
           ]}
           value={status}
-          onChange={(value) => setStatus(value as StatusFilter)}
+          onChange={(value) => {
+            setStatus(value as StatusFilter);
+            setOpenFilter(undefined);
+          }}
+          onToggle={setOpenFilter}
         />
         <SelectFilter
           allLabel={t(language, "全部在线状态", "All availability")}
+          filterId="availability"
           label={t(language, "在线状态", "Availability")}
+          openFilter={openFilter}
           options={[
             ["online", t(language, "在线", "Online")],
             ["offline", t(language, "离线", "Offline")],
           ]}
           value={availability}
-          onChange={(value) => setAvailability(value as AvailabilityFilter)}
+          onChange={(value) => {
+            setAvailability(value as AvailabilityFilter);
+            setOpenFilter(undefined);
+          }}
+          onToggle={setOpenFilter}
         />
         <SelectFilter
           allLabel={t(language, "全部主机", "All hosts")}
+          filterId="host"
           label={t(language, "主机", "Host")}
+          openFilter={openFilter}
           options={filterOptions.hosts.map((id) => [id, hostLabels.get(id) ?? shortId(id)] as const)}
           value={hostId}
-          onChange={setHostId}
+          onChange={(value) => {
+            setHostId(value);
+            setOpenFilter(undefined);
+          }}
+          onToggle={setOpenFilter}
         />
         <SelectFilter
           allLabel={t(language, "全部 Agent", "All agents")}
+          filterId="agent"
           label={t(language, "Agent", "Agent")}
+          openFilter={openFilter}
           options={filterOptions.agents}
           value={agentKey}
-          onChange={setAgentKey}
+          onChange={(value) => {
+            setAgentKey(value);
+            setOpenFilter(undefined);
+          }}
+          onToggle={setOpenFilter}
         />
         <SelectFilter
           allLabel={t(language, "全部目录", "All workspaces")}
+          filterId="workspace"
           label={t(language, "目录", "Workspace")}
+          openFilter={openFilter}
           options={filterOptions.workspaces}
           value={workspaceRoot}
-          onChange={setWorkspaceRoot}
+          onChange={(value) => {
+            setWorkspaceRoot(value);
+            setOpenFilter(undefined);
+          }}
+          onToggle={setOpenFilter}
         />
       </View>
 
@@ -229,45 +264,51 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
 
 function SelectFilter({
   allLabel,
+  filterId,
   label,
   onChange,
+  onToggle,
+  openFilter,
   options,
   value,
 }: {
   allLabel: string;
+  filterId: FilterId;
   label: string;
   onChange: (value: string) => void;
+  onToggle: (filter: FilterId | undefined) => void;
+  openFilter: FilterId | undefined;
   options: readonly (readonly [string, string])[];
   value: string;
 }) {
-  const [open, setOpen] = useState(false);
+  const open = openFilter === filterId;
   const items = [["all", allLabel] as const, ...options];
   const selectedLabel = items.find(([optionValue]) => optionValue === value)?.[1] ?? allLabel;
+  const active = value !== "all";
   return (
-    <View style={{ minWidth: 156, position: "relative", zIndex: open ? 30 : 1 }}>
+    <View style={{ minWidth: 150, position: "relative", zIndex: open ? 50 : 1 }}>
       <Text style={[common.eyebrow, { marginBottom: 4 }]}>{label}</Text>
       <Pressable
         accessibilityLabel={label}
         accessibilityRole="button"
-        onPress={() => setOpen((current) => !current)}
-        style={selectButtonStyle}
+        onPress={() => onToggle(open ? undefined : filterId)}
+        style={[selectButtonStyle, active ? selectButtonActiveStyle : null]}
       >
         <Text numberOfLines={1} style={selectButtonTextStyle}>{selectedLabel}</Text>
-        <Text style={selectCaretStyle}>{open ? "⌃" : "⌄"}</Text>
+        <Text style={selectCaretStyle}>{open ? "▲" : "▼"}</Text>
       </Pressable>
       {open ? (
         <View style={selectMenuStyle}>
-          <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 220 }}>
+          <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: 168 }}>
             {items.map(([optionValue, optionLabel]) => (
               <Pressable
                 key={optionValue}
                 onPress={() => {
                   onChange(optionValue);
-                  setOpen(false);
                 }}
                 style={[
                   selectOptionStyle,
-                  optionValue === value ? { backgroundColor: colors.lime } : null,
+                  optionValue === value ? selectOptionActiveStyle : null,
                 ]}
               >
                 <Text numberOfLines={1} style={selectOptionTextStyle}>
@@ -554,7 +595,7 @@ const filterRailStyle = {
   alignItems: "flex-start" as const,
   flexDirection: "row" as const,
   flexWrap: "wrap" as const,
-  gap: 10,
+  gap: 8,
   paddingBottom: 2,
 };
 
@@ -562,25 +603,30 @@ const selectButtonStyle = {
   alignItems: "center" as const,
   backgroundColor: "#FFFFFF",
   borderColor: colors.ink,
-  borderRadius: 8,
+  borderRadius: 7,
   borderWidth: 1,
   flexDirection: "row" as const,
-  gap: 8,
-  minHeight: 34,
+  gap: 6,
+  minHeight: 32,
   paddingHorizontal: 10,
+};
+
+const selectButtonActiveStyle = {
+  backgroundColor: "#F8FFE3",
+  borderColor: colors.graphite,
 };
 
 const selectButtonTextStyle = {
   color: colors.ink,
   flex: 1,
   fontFamily: typography.sansSemi,
-  fontSize: 13,
+  fontSize: 12,
 };
 
 const selectCaretStyle = {
   color: colors.muted,
   fontFamily: typography.sansSemi,
-  fontSize: 13,
+  fontSize: 9,
 };
 
 const selectMenuStyle = {
@@ -594,24 +640,28 @@ const selectMenuStyle = {
   position: "absolute" as const,
   right: 0,
   shadowColor: colors.ink,
-  shadowOffset: { width: 3, height: 3 },
+  shadowOffset: { width: 2, height: 2 },
   shadowOpacity: 1,
   shadowRadius: 0,
-  top: 56,
+  top: 52,
 };
 
 const selectOptionStyle = {
   borderBottomColor: colors.line,
   borderBottomWidth: 1,
-  minHeight: 34,
+  minHeight: 30,
   justifyContent: "center" as const,
   paddingHorizontal: 10,
+};
+
+const selectOptionActiveStyle = {
+  backgroundColor: "#F5F1E8",
 };
 
 const selectOptionTextStyle = {
   color: colors.ink,
   fontFamily: typography.sans,
-  fontSize: 13,
+  fontSize: 12,
 };
 
 const rowStyle = {
