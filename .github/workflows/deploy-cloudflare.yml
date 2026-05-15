@@ -132,9 +132,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          make relay-migrate-remote
-          make relay-deploy-dry-run
-          cd relay && bunx wrangler deploy --domain "$RELAY_DOMAIN"
+          scripts/retry-network.sh make relay-migrate-remote
+          scripts/retry-network.sh make relay-deploy-dry-run
+          scripts/retry-network.sh bash -lc 'cd relay && bunx wrangler deploy --domain "$RELAY_DOMAIN"'
 
   deploy-workbench:
     name: Deploy Workbench Pages
@@ -190,6 +190,9 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Deploy Workbench
+        shell: bash
         run: |
+          set -euo pipefail
           bun run --cwd apps/workbench typecheck
-          make workbench-deploy
+          make workbench-export
+          scripts/retry-network.sh bash -lc 'cd relay && bunx wrangler pages deploy ../apps/workbench/dist --project-name "${WORKBENCH_PAGES_PROJECT:-free-app}" --commit-dirty=true --commit-message "deploy $(git rev-parse --short HEAD 2>/dev/null || printf manual)"'
