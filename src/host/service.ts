@@ -14,7 +14,7 @@ export type AcpRemoteHostServiceInstallOptions = {
   homeDir?: string;
   identityPath?: string;
   label?: string;
-  nodePath: string;
+  nodePath?: string;
   relayUrl: string;
   scope?: AcpRemoteHostServiceScope;
   userName?: string;
@@ -209,7 +209,7 @@ export function createMacOSLaunchAgentPlist(input: {
   homeDir?: string;
   identityPath?: string;
   label: string;
-  nodePath: string;
+  nodePath?: string;
   relayUrl: string;
   scope?: AcpRemoteHostServiceScope;
   standardErrorPath: string;
@@ -220,8 +220,9 @@ export function createMacOSLaunchAgentPlist(input: {
   const homeDir = input.homeDir ?? homedir();
   const scope = input.scope ?? "user";
   const args = [
-    input.nodePath,
+    ...(input.nodePath ? [input.nodePath] : []),
     input.hostBinPath,
+    ...(input.nodePath ? [] : ["host"]),
     "run",
     "--relay-url",
     input.relayUrl,

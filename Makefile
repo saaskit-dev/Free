@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: help install build build-self dev typecheck lint test verify source-install-smoke local-full-test local-stop \
+.PHONY: help install build build-self build-binary verify-binary dev typecheck lint test verify source-install-smoke local-full-test local-stop \
 	workbench-export workbench-deploy \
 	relay-typecheck relay-dev relay-deploy relay-deploy-dry-run \
 	relay-e2e relay-e2e-local relay-migrate-local relay-migrate-remote remote-prod-smoke pack-local package-install-check clean
@@ -14,12 +14,14 @@ help:
 	@printf "%s\n" \
 		"Free commands:" \
 		"  make install              Install workspace dependencies" \
-		"  make build                Build acp-runtime dependency and Free" \
+			"  make build                Build acp-runtime dependency and Free" \
+			"  make build-binary         Build Bun compiled Free binary for the current platform" \
 		"  make build-self           Build only Free TypeScript" \
 		"  make dev                  Watch Free TypeScript" \
 		"  make typecheck            Typecheck Free and relay" \
 		"  make test                 Run unit tests" \
-		"  make verify               Run typecheck, tests, package, and install smoke" \
+			"  make verify               Run typecheck, tests, package, and install smoke" \
+			"  make verify-binary        Build and smoke-test the Bun compiled Free binary" \
 		"  make source-install-smoke Run the source installer from a clean git clone" \
 		"  make local-full-test      Run verify plus local Wrangler relay e2e" \
 		"  make local-stop           Stop local Free Workbench and relay dev servers" \
@@ -39,30 +41,41 @@ help:
 		"  make remote-prod-smoke    Run hosted relay smoke"
 
 install:
-	pnpm --dir ../acp-runtime install --frozen-lockfile
-	pnpm install --frozen-lockfile
+	cd ../acp-runtime && bun install --frozen-lockfile
+	bun install --frozen-lockfile
 
 build:
-	pnpm --dir ../acp-runtime --filter @saaskit-dev/simulator-agent-acp build
-	pnpm --dir ../acp-runtime run build:lib
+	cd ../acp-runtime && bun run --cwd packages/simulator-agent build
+	cd ../acp-runtime && bun run build:lib
 	rm -rf dist
-	pnpm exec tsc -p tsconfig.json
+	bunx tsc -p tsconfig.json
 	chmod +x dist/bin.js
 
 build-self:
 	rm -rf dist
-	pnpm exec tsc -p tsconfig.json
+	bunx tsc -p tsconfig.json
 	chmod +x dist/bin.js
 
+build-binary: build
+	node scripts/build-binary.mjs
+
+verify-binary: build-binary
+	@binary="$$(find dist-bin -type f -name 'free-*' | head -1)"; \
+	test -n "$$binary"; \
+	"$$binary" --help >/dev/null; \
+	"$$binary" auth --help >/dev/null; \
+	"$$binary" host --help >/dev/null; \
+	"$$binary" bridge config --relay-url ws://127.0.0.1:8791 --command "$$binary" --format generic >/dev/null
+
 dev:
-	pnpm exec tsc -p tsconfig.json --watch
+	bunx tsc -p tsconfig.json --watch
 
 typecheck: build-self relay-typecheck
 
 lint: build relay-typecheck
 
 test:
-	pnpm exec vitest run
+	bunx vitest run
 
 verify: typecheck test pack-local package-install-check source-install-smoke relay-deploy-dry-run
 
@@ -75,26 +88,26 @@ local-stop:
 	scripts/stop-local-dev.sh
 
 relay-typecheck:
-	pnpm --dir relay exec tsc --noEmit -p tsconfig.json
+	cd relay && bunx tsc --noEmit -p tsconfig.json
 
 relay-dev: relay-migrate-local
-	pnpm --dir relay exec wrangler dev --ip 127.0.0.1 --port "$${RELAY_PORT:-8791}"
+	cd relay && bunx wrangler dev --ip 127.0.0.1 --port "$${RELAY_PORT:-8791}"
 
 relay-deploy: relay-migrate-remote
-	pnpm --dir relay exec wrangler deploy --domain "$${RELAY_DOMAIN:-free-relay.saaskit.app}"
+	cd relay && bunx wrangler deploy --domain "$${RELAY_DOMAIN:-free-relay.saaskit.app}"
 
 relay-deploy-dry-run:
-	pnpm --dir relay exec wrangler deploy --dry-run --domain "$${RELAY_DOMAIN:-free-relay.saaskit.app}"
+	cd relay && bunx wrangler deploy --dry-run --domain "$${RELAY_DOMAIN:-free-relay.saaskit.app}"
 
 workbench-export:
 	: "$${EXPO_PUBLIC_RELAY_URL:?Set EXPO_PUBLIC_RELAY_URL to the public relay/API origin.}"
 	: "$${EXPO_PUBLIC_WORKBENCH_ORIGIN:?Set EXPO_PUBLIC_WORKBENCH_ORIGIN to the public Workbench origin.}"
-	pnpm --dir apps/workbench export:web
+	cd apps/workbench && bun run export:web
 	printf '%s\n' '{"version":1,"include":["/*"],"exclude":["/_expo/*","/assets/*","/*.js","/*.css","/*.wasm","/*.ico","/*.png","/*.jpg","/*.svg","/*.ttf"]}' > apps/workbench/dist/_routes.json
 	printf '%s\n' '/* /index.html 200' > apps/workbench/dist/_redirects
 
 workbench-deploy: workbench-export
-	pnpm --dir relay exec wrangler pages deploy ../apps/workbench/dist --project-name "$${WORKBENCH_PAGES_PROJECT:-free-app}" --commit-dirty=true --commit-message "deploy $$(git rev-parse --short HEAD 2>/dev/null || printf manual)"
+	cd relay && bunx wrangler pages deploy ../apps/workbench/dist --project-name "$${WORKBENCH_PAGES_PROJECT:-free-app}" --commit-dirty=true --commit-message "deploy $$(git rev-parse --short HEAD 2>/dev/null || printf manual)"
 
 relay-e2e:
 	node relay/test-e2e.mjs
@@ -121,7 +134,7 @@ relay-e2e-local:
 	trap cleanup EXIT; \
 	scripts/stop-local-relay-port.sh "$${RELAY_PORT:-8791}"; \
 	$(MAKE) relay-migrate-local >/dev/null; \
-	pnpm --dir relay exec wrangler dev --ip 127.0.0.1 --port "$${RELAY_PORT:-8791}" > .tmp/relay-e2e-wrangler.log 2>&1 & \
+		(cd relay && bunx wrangler dev --ip 127.0.0.1 --port "$${RELAY_PORT:-8791}" > ../.tmp/relay-e2e-wrangler.log 2>&1) & \
 	worker_pid=$$!; \
 	for _ in {1..60}; do \
 		if curl -fsS "http://127.0.0.1:$${RELAY_PORT:-8791}/health" >/dev/null 2>&1; then break; fi; \
@@ -131,10 +144,10 @@ relay-e2e-local:
 	RELAY_URL="http://127.0.0.1:$${RELAY_PORT:-8791}" node relay/test-e2e.mjs
 
 relay-migrate-local:
-	pnpm --dir relay exec wrangler d1 migrations apply acp-relay --local
+	cd relay && bunx wrangler d1 migrations apply acp-relay --local
 
 relay-migrate-remote:
-	pnpm --dir relay exec wrangler d1 migrations apply acp-relay --remote
+	cd relay && bunx wrangler d1 migrations apply acp-relay --remote
 
 remote-prod-smoke:
 	node scripts/remote-prod-smoke.mjs

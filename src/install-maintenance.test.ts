@@ -114,4 +114,75 @@ describe("install maintenance", () => {
       await rm(root, { force: true, recursive: true });
     }
   });
+
+  it("migrates an installed launchd service to the free binary launcher", async () => {
+    const root = join(tmpdir(), `free-install-maintenance-${randomUUID()}`);
+    const prefix = join(root, "prefix");
+    const home = join(root, "home");
+    const packageRoot = join(prefix, "lib", "node_modules", "free");
+    const installedBin = join(prefix, "bin", "free");
+    const launchctl = join(root, "bin", "launchctl");
+    const plistPath = join(
+      home,
+      "Library",
+      "LaunchAgents",
+      "dev.saaskit.free.host.plist",
+    );
+
+    await mkdir(join(packageRoot, "dist"), { recursive: true });
+    await mkdir(join(prefix, "bin"), { recursive: true });
+    await mkdir(join(root, "bin"), { recursive: true });
+    await mkdir(join(home, "Library", "LaunchAgents"), { recursive: true });
+    await writeFile(join(packageRoot, "dist", "bin.js"), "#!/usr/bin/env node\n", {
+      mode: 0o755,
+    });
+    await symlink(join(packageRoot, "dist", "bin.js"), installedBin);
+    await writeFile(
+      launchctl,
+      "#!/bin/sh\nexit 0\n",
+      { mode: 0o755 },
+    );
+    await writeFile(
+      plistPath,
+      `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/old/node</string>
+    <string>/old/free/dist/host/bin.js</string>
+    <string>run</string>
+    <string>--relay-url</string>
+    <string>wss://relay.example.com</string>
+  </array>
+</dict>
+</plist>`,
+      "utf8",
+    );
+
+    try {
+      await execFileAsync(process.execPath, ["scripts/install-maintenance.cjs"], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          FREE_INSTALLED_BIN: installedBin,
+          FREE_PACKAGE_ROOT: packageRoot,
+          HOME: home,
+          npm_config_prefix: prefix,
+          PATH: `${join(root, "bin")}:${join(prefix, "bin")}`,
+        },
+      });
+
+      const plist = await readFile(plistPath, "utf8");
+      expect(plist).toContain(`<string>${installedBin}</string>`);
+      expect(plist).toContain("<string>host</string>");
+      expect(plist).toContain("<string>run</string>");
+      expect(plist).toContain("<string>--relay-url</string>");
+      expect(plist).toContain("<string>wss://relay.example.com</string>");
+      expect(plist).not.toContain("/old/node");
+      expect(plist).not.toContain("/old/free/dist/host/bin.js");
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
 });

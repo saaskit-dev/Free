@@ -19,9 +19,9 @@ import {
   installAcpRemoteHostUserService,
   restartAcpRemoteHostUserService,
 } from "./host/service.js";
+import { resolveCurrentFreeExecutablePath } from "./launcher.js";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 type AuthCommand =
@@ -257,13 +257,12 @@ async function ensureDefaultHostInstalled(
   if (systemStatus.installed && !userStatus.installed) {
     return reinstallSystemHostService(relayUrl);
   }
-  const hostBinPath = join(dirname(fileURLToPath(import.meta.url)), "host", "bin.js");
+  const hostBinPath = resolveCurrentFreeExecutablePath();
   const workspaceRoots = [homeDir];
   if (userStatus.installed && !options.reinstall) {
     const matchesCurrentConfig = await acpRemoteHostServiceMatchesConfig({
       homeDir,
       hostBinPath,
-      nodePath: process.execPath,
       relayUrl,
       scope: "user",
       workspaceRoots,
@@ -275,7 +274,6 @@ async function ensureDefaultHostInstalled(
           ...process.env,
         },
         homeDir,
-        nodePath: process.execPath,
         relayUrl,
         scope: "user",
         workspaceRoots,
@@ -298,7 +296,6 @@ async function ensureDefaultHostInstalled(
       ...process.env,
     },
     homeDir,
-    nodePath: process.execPath,
     relayUrl,
     scope: "user",
     workspaceRoots,
@@ -307,13 +304,13 @@ async function ensureDefaultHostInstalled(
 }
 
 function reinstallSystemHostService(relayUrl: string): string {
-  const hostBinPath = join(dirname(fileURLToPath(import.meta.url)), "host", "bin.js");
+  const hostBinPath = resolveCurrentFreeExecutablePath();
   try {
     execFileSync(
       "sudo",
       [
-        process.execPath,
         hostBinPath,
+        "host",
         "install",
         "--system",
         "--relay-url",

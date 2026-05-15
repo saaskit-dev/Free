@@ -31,8 +31,7 @@ function main() {
     return;
   }
   updateLaunchdService({
-    hostBinPath: join(packageRoot, "dist", "host", "bin.js"),
-    nodePath: process.execPath,
+    freeBinPath: installedBin,
   });
 }
 
@@ -198,8 +197,15 @@ function updateLaunchdPlist(input) {
 
 function replaceProgramArgumentsExecutable(plist, input) {
   return plist.replace(
-    /(<key>ProgramArguments<\/key>\s*<array>\s*<string>)([\s\S]*?)(<\/string>\s*<string>)([\s\S]*?)(<\/string>)/,
-    `$1${escapePlist(input.nodePath)}$3${escapePlist(input.hostBinPath)}$5`,
+    /(<key>ProgramArguments<\/key>\s*<array>)([\s\S]*?)(\s*<\/array>)/,
+    (_match, open, body, close) => {
+      const existingArgs = [...body.matchAll(/<string>([\s\S]*?)<\/string>/g)]
+        .map((match) => unescapePlist(match[1]));
+      const runIndex = existingArgs.indexOf("run");
+      const runArgs = runIndex === -1 ? ["run"] : existingArgs.slice(runIndex);
+      const nextArgs = [input.freeBinPath, "host", ...runArgs];
+      return `${open}\n${nextArgs.map((arg) => `    <string>${escapePlist(arg)}</string>`).join("\n")}${close}`;
+    },
   );
 }
 
@@ -228,6 +234,15 @@ function escapePlist(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&apos;");
+}
+
+function unescapePlist(value) {
+  return String(value)
+    .replaceAll("&apos;", "'")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&gt;", ">")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&amp;", "&");
 }
 
 try {

@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Free remote relay, bridge, and host product built on acp-runtime.",
+  "packageManager": "bun@1.3.14",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -39,20 +40,23 @@
   ],
   "scripts": {
     "build": "make build",
+    "build:binary": "make build-binary",
+    "bench:startup": "node scripts/bench/free-startup.mjs",
     "build:self": "make build-self",
     "dev": "make dev",
     "lint": "make lint",
     "test": "make test",
     "relay:dev": "make relay-dev",
     "relay:deploy": "make relay-deploy",
-    "workbench:dev": "pnpm --dir apps/workbench dev",
-    "workbench:web": "pnpm --dir apps/workbench web",
-    "workbench:electron": "pnpm --dir apps/workbench electron",
+    "workbench:dev": "bun run --cwd apps/workbench dev",
+    "workbench:web": "bun run --cwd apps/workbench web",
+    "workbench:electron": "bun run --cwd apps/workbench electron",
     "workbench:export": "make workbench-export",
     "workbench:deploy": "make workbench-deploy",
-    "workbench:typecheck": "pnpm --dir apps/workbench typecheck",
+    "workbench:typecheck": "bun run --cwd apps/workbench typecheck",
     "remote:prod-smoke": "make remote-prod-smoke",
     "pack:local": "make pack-local",
+    "verify:binary": "make verify-binary",
     "postinstall": "node scripts/install-maintenance.cjs",
     "verify": "make verify"
   },
@@ -77,5 +81,9 @@
   },
   "engines": {
     "node": ">=18.0.0"
-  }
+  },
+  "workspaces": [
+    "relay",
+    "apps/*"
+  ]
 }

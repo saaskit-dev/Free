@@ -22,7 +22,6 @@ describe("remote host user service", () => {
       },
       homeDir: "/Users/dev",
       label: "dev.saaskit.free.host",
-      nodePath: "/usr/local/bin/node",
       relayUrl: "wss://relay.example.com",
       standardErrorPath: "/Users/dev/.free/logs/host.err.log",
       standardOutPath: "/Users/dev/.free/logs/host.out.log",
@@ -33,6 +32,9 @@ describe("remote host user service", () => {
     expect(plist).toContain("<key>KeepAlive</key>");
     expect(plist).toContain("<key>KeepAlive</key>\n  <true/>");
     expect(plist).not.toContain("<key>SuccessfulExit</key>");
+    expect(plist).not.toContain("<string>/usr/local/bin/node</string>");
+    expect(plist).toContain("<string>/usr/local/bin/free</string>");
+    expect(plist).toContain("<string>host</string>");
     expect(plist).toContain("<string>run</string>");
     expect(plist).toContain("<string>--relay-url</string>");
     expect(plist).toContain("<string>wss://relay.example.com</string>");
@@ -45,6 +47,24 @@ describe("remote host user service", () => {
       "<string>/Users/dev/.n/bin:/Users/dev/.local/bin:/Users/dev/Library/pnpm:" +
       "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>",
     );
+  });
+
+  it("can still create a legacy node-backed plist for migration compatibility", () => {
+    const plist = createMacOSLaunchAgentPlist({
+      hostBinPath: "/opt/free/dist/host/bin.js",
+      homeDir: "/Users/dev",
+      label: "dev.saaskit.free.host",
+      nodePath: "/opt/node",
+      relayUrl: "wss://relay.example.com",
+      standardErrorPath: "/Users/dev/.free/logs/host.err.log",
+      standardOutPath: "/Users/dev/.free/logs/host.out.log",
+      workspaceRoots: ["/Users/dev"],
+    });
+
+    expect(plist).toContain("<string>/opt/node</string>");
+    expect(plist).toContain("<string>/opt/free/dist/host/bin.js</string>");
+    expect(plist).not.toContain("<string>host</string>");
+    expect(plist).toContain("<string>run</string>");
   });
 
   it("does not persist account login state in launchd environment", () => {

@@ -50,9 +50,10 @@ async function main() {
     "Expected /authorize without auth to return 401 or redirect to login",
   );
   if (authRes.status === 302) {
+    const location = authRes.headers.get("location");
     assert(
-      authRes.headers.get("location")?.includes("/login/start"),
-      "Expected /authorize redirect to point at login start",
+      location && isExpectedAuthorizeRedirect(location),
+      `Expected /authorize redirect to point at login or Workbench authorize, got ${location}`,
     );
     console.log(`   ✓ Redirects to login without session`);
   } else {
@@ -87,21 +88,27 @@ async function main() {
   assert(Array.isArray(JSON.parse(apiAuthBody).hosts), "Expected host list response");
   console.log(`   ✓ Returns 200 with session`);
 
-  // 6. Use account session to access /authorize for an unknown connection.
-  console.log("\n6. Testing /authorize with account session and unknown connection...");
-  const authAuthRes = await fetch(`${RELAY}/authorize?connectionId=test-conn-123`, {
+  // 6. Use account session to access /api/authorize for an unknown connection.
+  console.log("\n6. Testing /api/authorize with account session and unknown connection...");
+  const authAuthRes = await fetch(`${RELAY}/api/authorize?connectionId=test-conn-123`, {
     headers: { Authorization: `Bearer ${accountSessionValue}` },
+    redirect: "manual",
   });
   console.log(`   Status: ${authAuthRes.status}`);
   const body = await authAuthRes.text();
   console.log(`   Body length: ${body.length}`);
-  assert(authAuthRes.status === 410, "Expected unknown connection authorize page to return 410");
-  assert(body.includes("connection"), "Expected connection error message");
-  console.log(`   ✓ Returns connection error page`);
+  assert(authAuthRes.status === 200, "Expected unknown connection authorization API to return 200 with unavailableReason");
+  const authorizeApiBody = JSON.parse(body);
+  assert(
+    typeof authorizeApiBody.unavailableReason === "string" &&
+      authorizeApiBody.unavailableReason.includes("Client connection"),
+    "Expected authorization API to report unavailable client connection",
+  );
+  console.log(`   ✓ Returns unavailable connection state`);
 
-  // 7. Test POST /authorize
-  console.log("\n7. Testing POST /authorize...");
-  const postRes = await fetch(`${RELAY}/authorize?connectionId=test-conn-123`, {
+  // 7. Test POST /api/authorize
+  console.log("\n7. Testing POST /api/authorize...");
+  const postRes = await fetch(`${RELAY}/api/authorize?connectionId=test-conn-123`, {
     method: "POST",
     headers: { Authorization: `Bearer ${accountSessionValue}`, "Content-Type": "application/json" },
     body: JSON.stringify({ hostId: "nonexistent-host" }),
@@ -114,6 +121,19 @@ async function main() {
   console.log(`   ✓ Returns 404 for unknown connection`);
 
   console.log("\n✅ All checks passed!");
+}
+
+function isExpectedAuthorizeRedirect(location) {
+  try {
+    const url = new URL(location);
+    return url.pathname === "/login/start" ||
+      url.pathname === "/api/login/start" ||
+      url.pathname === "/authorize";
+  } catch {
+    return location.includes("/login/start") ||
+      location.includes("/api/login/start") ||
+      location.includes("/authorize");
+  }
 }
 
 function assert(condition, message) {

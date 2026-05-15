@@ -94,6 +94,7 @@ require_command() {
 require_command npm
 require_command node
 require_command git
+require_command bun
 
 read_acp_runtime_ref_file() {
   source_dir="$1"
@@ -274,13 +275,8 @@ install_from_local_checkout() {
   echo "Installing Free from local checkout: $repo_root"
   runtime_ref="$(pinned_acp_runtime_ref "$repo_root")"
   require_local_acp_runtime_ref "$repo_root/../acp-runtime" "$runtime_ref"
-  if command -v pnpm >/dev/null 2>&1; then
-    (cd "$repo_root/../acp-runtime" && pnpm install --frozen-lockfile)
-    (cd "$repo_root" && pnpm install --frozen-lockfile)
-  else
-    (cd "$repo_root/../acp-runtime" && npm install)
-    (cd "$repo_root" && npm install)
-  fi
+  (cd "$repo_root/../acp-runtime" && bun install --frozen-lockfile)
+  (cd "$repo_root" && bun install --frozen-lockfile)
   install_packed_source "$repo_root"
 }
 
@@ -300,16 +296,10 @@ install_from_git_source() {
     git clone --depth 1 "$ACP_RUNTIME_REPO_URL" "$tmp_dir/acp-runtime"
   fi
   echo "Installing Free from source..."
-  if command -v pnpm >/dev/null 2>&1; then
-    (cd "$tmp_dir/acp-runtime" && pnpm install --frozen-lockfile)
-    (cd "$tmp_dir/acp-runtime" && pnpm --filter @saaskit-dev/simulator-agent-acp build)
-    (cd "$tmp_dir/acp-runtime" && pnpm run build:lib)
-    (cd "$tmp_dir/free" && pnpm install --frozen-lockfile)
-  else
-    (cd "$tmp_dir/acp-runtime" && npm install)
-    (cd "$tmp_dir/acp-runtime" && npm run build)
-    (cd "$tmp_dir/free" && npm install)
-  fi
+  (cd "$tmp_dir/acp-runtime" && bun install --frozen-lockfile)
+  (cd "$tmp_dir/acp-runtime" && bun run --cwd packages/simulator-agent build)
+  (cd "$tmp_dir/acp-runtime" && bun run build:lib)
+  (cd "$tmp_dir/free" && bun install --frozen-lockfile)
   install_packed_source "$tmp_dir/free"
 }
 

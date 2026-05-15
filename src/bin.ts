@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+
+import { runFreeAuthCommand } from "./auth-bin.js";
+import { runFreeBridgeCommand } from "./client/relay-bridge.js";
+import { runFreeHostCommand } from "./host/bin.js";
+import { resolveCurrentFreeExecutablePath } from "./launcher.js";
 
 async function main(argv: readonly string[]): Promise<void> {
   const [command, ...rest] = argv;
@@ -11,50 +14,36 @@ async function main(argv: readonly string[]): Promise<void> {
     return;
   }
   if (command === "auth") {
-    await runInternalBin("auth-bin.js", rest);
+    await runFreeAuthCommand(rest);
     return;
   }
   if (command === "bridge") {
     if (rest.length === 0 || rest[0] === "--help" || rest[0] === "-h") {
-      await runInternalBin("client/relay-bridge.js", ["--help"]);
+      await runFreeBridgeCommand(["--help"]);
       return;
     }
     if (rest[0] === "config") {
-      await runInternalBin("client/relay-bridge.js", rest);
+      await runFreeBridgeCommand(rest);
+      return;
+    }
+    if (rest[0] === "run-internal") {
+      await runFreeBridgeCommand(rest.slice(1));
       return;
     }
     const bridgeArgs = rest[0] === "run" ? rest.slice(1) : rest;
-    await runSupervisedBridgeBin(bridgeArgs);
+    await runSupervisedBridge(bridgeArgs);
     return;
   }
   if (command === "host") {
-    await runInternalBin("host/bin.js", rest);
+    await runFreeHostCommand(rest);
     return;
   }
   throw new Error(`Unknown free command: ${command}`);
 }
 
-function runInternalBin(relativePath: string, args: readonly string[]): Promise<void> {
+function runSupervisedBridge(args: readonly string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    const binPath = join(dirname(fileURLToPath(import.meta.url)), relativePath);
-    const child = spawn(process.execPath, [binPath, ...args], {
-      stdio: "inherit",
-    });
-    child.on("error", reject);
-    child.on("exit", (code, signal) => {
-      if (signal) {
-        process.kill(process.pid, signal);
-        return;
-      }
-      process.exitCode = code ?? 0;
-      resolve();
-    });
-  });
-}
-
-function runSupervisedBridgeBin(args: readonly string[]): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const binPath = join(dirname(fileURLToPath(import.meta.url)), "client/relay-bridge.js");
+    const launcher = resolveCurrentFreeLauncher();
     let child: ReturnType<typeof spawn> | undefined;
     let stopping = false;
     let restartCount = 0;
@@ -80,7 +69,7 @@ function runSupervisedBridgeBin(args: readonly string[]): Promise<void> {
     };
 
     const start = () => {
-      child = spawn(process.execPath, [binPath, ...args], {
+      child = spawn(launcher.command, [...launcher.args, "bridge", "run-internal", ...args], {
         stdio: "inherit",
       });
       const startedAt = Date.now();
@@ -128,6 +117,10 @@ function runSupervisedBridgeBin(args: readonly string[]): Promise<void> {
 
     start();
   });
+}
+
+function resolveCurrentFreeLauncher(): { args: string[]; command: string } {
+  return { args: [], command: resolveCurrentFreeExecutablePath() };
 }
 
 function printHelp(): void {

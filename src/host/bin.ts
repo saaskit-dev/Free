@@ -34,6 +34,7 @@ import {
 } from "../protocol/account-session-authority.js";
 import { ACP_REMOTE_DEFAULT_RELAY_URL } from "../defaults.js";
 import { FREE_LOCAL_RELAY_URL, resolveFreeRelayUrl } from "../relay-environment.js";
+import { resolveCurrentFreeExecutablePath } from "../launcher.js";
 import {
   clearCachedSession,
   decodeHostAccountSession,
@@ -333,12 +334,11 @@ async function installService(argv: readonly string[]): Promise<void> {
     ...process.env,
   };
   const status = await installAcpRemoteHostUserService({
-    hostBinPath: process.argv[1],
+    hostBinPath: resolveCurrentFreeExecutablePath(),
     hostId: config.hostId,
     env,
     homeDir: serviceOptions.homeDir,
     identityPath: config.identityPath,
-    nodePath: process.execPath,
     relayUrl: config.relayUrl,
     scope: serviceOptions.scope,
     userName: serviceOptions.userName,
@@ -512,7 +512,7 @@ async function runHost(argv: readonly string[]): Promise<void> {
       "Host executable changed on disk. Exiting so launchd can restart with the updated code.",
       {
         "acp.remote.active_connections": blockers.activeConnections,
-        "acp.remote.host_bin": process.argv[1],
+        "acp.remote.host_bin": resolveCurrentFreeExecutablePath(),
         "acp.remote.host_bin_current_mtime_ms": change.currentMtimeMs,
         "acp.remote.host_bin_initial_mtime_ms": change.initialMtimeMs,
         "acp.remote.in_flight_runtime_requests": blockers.inFlightRuntimeRequests,
@@ -521,7 +521,7 @@ async function runHost(argv: readonly string[]): Promise<void> {
     process.exit(0);
   };
   const stopWatchingHostBinary = watchHostBinaryForChanges({
-    hostBinPath: process.argv[1],
+    hostBinPath: resolveCurrentFreeExecutablePath(),
     onChange(change) {
       const blockers = readHostRestartBlockers(hostConnectionState);
       if (hasHostRestartBlockers(blockers)) {
@@ -530,7 +530,7 @@ async function runHost(argv: readonly string[]): Promise<void> {
           "Host executable changed on disk. Deferring restart until active remote work completes.",
           {
             "acp.remote.active_connections": blockers.activeConnections,
-            "acp.remote.host_bin": process.argv[1],
+            "acp.remote.host_bin": resolveCurrentFreeExecutablePath(),
             "acp.remote.host_bin_current_mtime_ms": change.currentMtimeMs,
             "acp.remote.host_bin_initial_mtime_ms": change.initialMtimeMs,
             "acp.remote.in_flight_runtime_requests": blockers.inFlightRuntimeRequests,
@@ -841,7 +841,7 @@ function shouldRerunWithSudo(
 }
 
 function rerunWithSudo(argv: readonly string[]): void {
-  execFileSync("sudo", [process.execPath, process.argv[1], ...argv], {
+  execFileSync("sudo", [resolveCurrentFreeExecutablePath(), "host", ...argv], {
     stdio: "inherit",
   });
 }
