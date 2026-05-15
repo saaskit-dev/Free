@@ -103,8 +103,9 @@ workbench-export:
 	: "$${EXPO_PUBLIC_RELAY_URL:?Set EXPO_PUBLIC_RELAY_URL to the public relay/API origin.}"
 	: "$${EXPO_PUBLIC_WORKBENCH_ORIGIN:?Set EXPO_PUBLIC_WORKBENCH_ORIGIN to the public Workbench origin.}"
 	cd apps/workbench && bun run export:web
+	cp scripts/install-binary.sh apps/workbench/dist/install.sh
 	printf '%s\n' '{"version":1,"include":["/*"],"exclude":["/_expo/*","/assets/*","/*.js","/*.css","/*.wasm","/*.ico","/*.png","/*.jpg","/*.svg","/*.ttf"]}' > apps/workbench/dist/_routes.json
-	printf '%s\n' '/* /index.html 200' > apps/workbench/dist/_redirects
+	printf '%s\n' '/install /install.sh 200' '/* /index.html 200' > apps/workbench/dist/_redirects
 
 workbench-deploy: workbench-export
 	cd relay && bunx wrangler pages deploy ../apps/workbench/dist --project-name "$${WORKBENCH_PAGES_PROJECT:-free-app}" --commit-dirty=true --commit-message "deploy $$(git rev-parse --short HEAD 2>/dev/null || printf manual)"

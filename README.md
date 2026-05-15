@@ -10,17 +10,34 @@ Worker behavior belong in this repository.
 
 ## Install
 
-Install the latest CLI from source:
+Install the latest CLI as a Bun-compiled binary:
+
+```sh
+curl -fsSL https://free.saaskit.app/install | bash
+```
+
+The binary installer downloads the current GitHub `latest` release asset for
+your platform, installs it to `~/.local/bin/free`, then runs `free auth login`
+by default.
+
+Useful binary install flags:
+
+- `--no-login` installs only the `free` CLI.
+- `--force-login` refreshes browser login and reinstalls the active host mode.
+- `--relay-env local` signs in against the local relay.
+- `--relay-url <ws-url>` uses a custom relay.
+
+Install from source when developing the installer or packaging path:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/saaskit-dev/Free/main/scripts/install.sh | bash
 ```
 
-The installer clones Free and `acp-runtime`, builds the required local packages,
-packs Free, installs the resulting CLI globally with npm, then runs
+The source installer clones Free and `acp-runtime`, builds the required local
+packages, packs Free, installs the resulting CLI globally with npm, then runs
 `free auth login` by default.
 
-Useful install flags:
+Useful source install flags:
 
 - `--no-login` installs only the `free` CLI.
 - `--force-login` refreshes browser login and reinstalls the active host mode.

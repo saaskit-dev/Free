@@ -17,7 +17,7 @@ env:
   EXPO_PUBLIC_WORKBENCH_ORIGIN: https://free.saaskit.app
   RELAY_DOMAIN: free-relay.saaskit.app
   WORKBENCH_PAGES_PROJECT: free-app
-  PNPM_VERSION: 10.30.3
+  BUN_VERSION: 1.3.14
 
 jobs:
   verify:
@@ -34,10 +34,10 @@ jobs:
         with:
           node-version: 22
 
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          version: ${{ env.PNPM_VERSION }}
+          bun-version: ${{ env.BUN_VERSION }}
 
       - name: Clone pinned acp-runtime
         shell: bash
@@ -55,20 +55,21 @@ jobs:
           git -C ../acp-runtime checkout --detach FETCH_HEAD
 
       - name: Install pinned acp-runtime dependencies
-        run: pnpm --dir ../acp-runtime install --frozen-lockfile
+        run: cd ../acp-runtime && bun install --frozen-lockfile
 
       - name: Build pinned acp-runtime
         run: |
-          pnpm --dir ../acp-runtime --filter @saaskit-dev/simulator-agent-acp build
-          pnpm --dir ../acp-runtime run build:lib
+          cd ../acp-runtime
+          bun run --cwd packages/simulator-agent build
+          bun run build:lib
 
       - name: Install Free dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       - name: Verify Free
         run: |
           make typecheck
-          pnpm --dir apps/workbench typecheck
+          bun run --cwd apps/workbench typecheck
           make test
           make pack-local
           make package-install-check
@@ -95,10 +96,10 @@ jobs:
         with:
           node-version: 22
 
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          version: ${{ env.PNPM_VERSION }}
+          bun-version: ${{ env.BUN_VERSION }}
 
       - name: Clone pinned acp-runtime
         shell: bash
@@ -116,15 +117,16 @@ jobs:
           git -C ../acp-runtime checkout --detach FETCH_HEAD
 
       - name: Install pinned acp-runtime dependencies
-        run: pnpm --dir ../acp-runtime install --frozen-lockfile
+        run: cd ../acp-runtime && bun install --frozen-lockfile
 
       - name: Build pinned acp-runtime
         run: |
-          pnpm --dir ../acp-runtime --filter @saaskit-dev/simulator-agent-acp build
-          pnpm --dir ../acp-runtime run build:lib
+          cd ../acp-runtime
+          bun run --cwd packages/simulator-agent build
+          bun run build:lib
 
       - name: Install Free dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       - name: Deploy relay
         shell: bash
@@ -132,7 +134,7 @@ jobs:
           set -euo pipefail
           make relay-migrate-remote
           make relay-deploy-dry-run
-          pnpm --dir relay exec wrangler deploy --domain "$RELAY_DOMAIN"
+          cd relay && bunx wrangler deploy --domain "$RELAY_DOMAIN"
 
   deploy-workbench:
     name: Deploy Workbench Pages
@@ -155,10 +157,10 @@ jobs:
         with:
           node-version: 22
 
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          version: ${{ env.PNPM_VERSION }}
+          bun-version: ${{ env.BUN_VERSION }}
 
       - name: Clone pinned acp-runtime
         shell: bash
@@ -176,17 +178,18 @@ jobs:
           git -C ../acp-runtime checkout --detach FETCH_HEAD
 
       - name: Install pinned acp-runtime dependencies
-        run: pnpm --dir ../acp-runtime install --frozen-lockfile
+        run: cd ../acp-runtime && bun install --frozen-lockfile
 
       - name: Build pinned acp-runtime
         run: |
-          pnpm --dir ../acp-runtime --filter @saaskit-dev/simulator-agent-acp build
-          pnpm --dir ../acp-runtime run build:lib
+          cd ../acp-runtime
+          bun run --cwd packages/simulator-agent build
+          bun run build:lib
 
       - name: Install Free dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       - name: Deploy Workbench
         run: |
-          pnpm --dir apps/workbench typecheck
+          bun run --cwd apps/workbench typecheck
           make workbench-deploy
