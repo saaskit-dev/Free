@@ -417,7 +417,7 @@ function SelectFilter({
   const selectedLabel = items.find(([optionValue]) => optionValue === value)?.[1] ?? allLabel;
   const active = value !== "all";
   return (
-    <View style={{ minWidth: 150, position: "relative", zIndex: open ? 50 : 1 }}>
+    <View style={{ elevation: open ? 20 : 1, minWidth: 150, position: "relative", zIndex: open ? 200 : 1 }}>
       <Text style={[common.eyebrow, { marginBottom: 4 }]}>{label}</Text>
       <Pressable
         accessibilityLabel={label}
@@ -762,10 +762,12 @@ const toolbarStyle = {
 
 const filterRailStyle = {
   alignItems: "flex-start" as const,
+  elevation: 10,
   flexDirection: "row" as const,
   flexWrap: "wrap" as const,
   gap: 8,
   paddingBottom: 2,
+  zIndex: 100,
 };
 
 const healthPanelStyle = {
@@ -824,6 +826,7 @@ const selectMenuStyle = {
   shadowOpacity: 1,
   shadowRadius: 0,
   top: 52,
+  zIndex: 300,
 };
 
 const selectOptionStyle = {

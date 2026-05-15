@@ -1640,6 +1640,40 @@ export class AcpRelayBroker {
     };
   }
 
+  async revokeHost(input: {
+    accountId: string;
+    clientId: string;
+    hostId: string;
+  }): Promise<{ ok: true } | { ok: false; reason: string; status: number }> {
+    const visibleHosts = await this.discoverableHosts({
+      accountId: input.accountId,
+      clientId: input.clientId,
+      hostId: input.hostId,
+    });
+    if (!visibleHosts.ok) {
+      return { ok: false, reason: visibleHosts.reason, status: 410 };
+    }
+    if (visibleHosts.hosts.length === 0) {
+      return { ok: false, reason: "Host not found.", status: 404 };
+    }
+
+    await this.controlPlaneStore.revokeHostAuthorization({
+      accountId: input.accountId,
+      hostId: input.hostId,
+    });
+
+    this.pendingHostReconnects.delete(input.hostId);
+    this.activeHostMetadata.delete(input.hostId);
+    this.activeHostAccountIds.delete(input.hostId);
+    this.hostHeartbeats.delete(input.hostId);
+    this.activeHostRoutes.get(input.hostId)?.close(1008, "Host authorization revoked.");
+    this.activeHostRoutes.delete(input.hostId);
+    this.rejectHostWorkspaceListRequests(input.hostId, "Host authorization revoked.");
+    this.rejectPendingAttachmentForwards(input.hostId, "Host authorization revoked.");
+    this.closeClientsForHost(input.hostId, 1008, "Host authorization revoked.");
+    return { ok: true };
+  }
+
   async discoverableHostsForConnection(
     connectionId: string,
   ): Promise<AcpRelayAuthorizableHostsResult> {

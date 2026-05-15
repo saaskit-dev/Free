@@ -107,6 +107,10 @@ export type AcpRelayWritableControlPlaneStore = AcpRelayControlPlaneStore & {
   ): Promise<void> | void;
   upsertGrant(record: AcpRelayGrantRecord): Promise<void> | void;
   upsertHost(record: AcpRelayHostRecord): Promise<void> | void;
+  revokeHostAuthorization(input: {
+    accountId: AcpRemoteId;
+    hostId: AcpRemoteId;
+  }): Promise<void> | void;
   updateHostRuntimeState(input: {
     accountId: AcpRemoteId;
     connectedAt?: string;
@@ -257,6 +261,22 @@ export class AcpRelayInMemoryControlPlaneStore
 
   upsertGrant(record: AcpRelayGrantRecord): void {
     this.grants.set(grantKey(record), record);
+  }
+
+  revokeHostAuthorization(input: {
+    accountId: AcpRemoteId;
+    hostId: AcpRemoteId;
+  }): void {
+    const key = hostKey(input);
+    const host = this.hosts.get(key);
+    if (host) {
+      this.hosts.set(key, { ...host, disabled: true });
+    }
+    for (const [grantId, grant] of this.grants.entries()) {
+      if (grant.accountId === input.accountId && grant.hostId === input.hostId) {
+        this.grants.set(grantId, { ...grant, revoked: true });
+      }
+    }
   }
 
   upsertSessionBinding(record: AcpRelaySessionBindingRecord): void {
@@ -515,6 +535,30 @@ export class AcpRelayD1ControlPlaneStore
         JSON.stringify(record.scopes),
         record.revoked ? 1 : 0,
       )
+      .run();
+  }
+
+  async revokeHostAuthorization(input: {
+    accountId: AcpRemoteId;
+    hostId: AcpRemoteId;
+  }): Promise<void> {
+    await this.database
+      .prepare(
+        `update acp_hosts
+         set disabled = 1,
+             updated_at = current_timestamp
+         where account_id = ?1 and host_id = ?2`,
+      )
+      .bind(input.accountId, input.hostId)
+      .run();
+    await this.database
+      .prepare(
+        `update acp_grants
+         set revoked = 1,
+             updated_at = current_timestamp
+         where account_id = ?1 and host_id = ?2`,
+      )
+      .bind(input.accountId, input.hostId)
       .run();
   }
 

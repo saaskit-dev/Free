@@ -1822,6 +1822,63 @@ describe("AcpRelayBroker", () => {
     });
   });
 
+  it("revokes and removes a host from discovery", async () => {
+    const store = new AcpRelayInMemoryControlPlaneStore({
+      accounts: [{ accountId: "acct-1" }],
+      clientDevices: [{ accountId: "acct-1", clientId: "client-1" }],
+      grants: [
+        {
+          accountId: "acct-1",
+          clientId: "client-1",
+          hostId: "host-1",
+          policyVersion: 1,
+          scopes: ["acp:connect"],
+        },
+      ],
+      hosts: [{ accountId: "acct-1", hostId: "host-1" }],
+    });
+    const broker = new AcpRelayBroker({ controlPlaneStore: store });
+    const [hostSocket, relayHostSocket] = createMemoryWebSocketPair();
+    const hostCloseEvents: { code?: number; reason?: string }[] = [];
+    hostSocket.addEventListener("close", (event) => {
+      hostCloseEvents.push(event ?? {});
+    });
+    await broker.registerHost({
+      accountId: "acct-1",
+      hostId: "host-1",
+      socket: relayHostSocket,
+    });
+
+    await expect(
+      broker.revokeHost({
+        accountId: "acct-1",
+        clientId: "client-1",
+        hostId: "host-1",
+      }),
+    ).resolves.toEqual({ ok: true });
+
+    await expect(
+      broker.discoverableHosts({
+        accountId: "acct-1",
+        clientId: "client-1",
+      }),
+    ).resolves.toEqual({ hosts: [], ok: true });
+    await expect(
+      store.resolveGrant({
+        accountId: "acct-1",
+        clientId: "client-1",
+        hostId: "host-1",
+        requiredScopes: ["acp:connect"],
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      reason: "Host is not registered for this account.",
+    });
+    expect(hostCloseEvents).toEqual([
+      { code: 1008, reason: "Host authorization revoked." },
+    ]);
+  });
+
   it("lets authorization select any host with a matching bridge proof", async () => {
     const authority = await createEd25519KeyPair();
     const client = await createEd25519KeyPair();

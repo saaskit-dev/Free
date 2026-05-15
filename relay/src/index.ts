@@ -240,9 +240,11 @@ export default {
         requestedAccountId: resolveRequestedAccountId(request, url),
       });
       if (!accountSession.ok) {
-        return new Response(accountSession.reason, {
-          status: accountSession.status,
-        });
+        return withWorkbenchApiCors(
+          json({ error: accountSession.reason }, { status: accountSession.status }),
+          request,
+          env,
+        );
       }
       const shardId = env.ACP_RELAY_SHARDS.idFromName(
         `account:${accountSession.session.accountId}`,
@@ -1022,6 +1024,17 @@ export class AcpRelayShard {
       request.headers.get("x-acp-verified-client-id") ??
       request.headers.get("x-acp-verified-principal-id") ??
       "";
+    if (request.method === "DELETE") {
+      const result = await this.broker.revokeHost({
+        accountId,
+        clientId,
+        hostId,
+      });
+      if (!result.ok) {
+        return json({ error: result.reason }, { status: result.status });
+      }
+      return json({ ok: true });
+    }
     if (request.method === "PATCH") {
       const body = await readJsonBody(request);
       if (!body.ok) {
@@ -1052,7 +1065,7 @@ export class AcpRelayShard {
     }
     if (request.method !== "GET" && request.method !== "HEAD") {
       return json({ error: "Method not allowed." }, {
-        headers: { allow: "GET, HEAD, PATCH" },
+        headers: { allow: "DELETE, GET, HEAD, PATCH" },
         status: 405,
       });
     }

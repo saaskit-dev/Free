@@ -218,6 +218,66 @@ describe("relay worker", () => {
     expect(response.headers.get("access-control-allow-methods")).toContain("DELETE");
   });
 
+  it("returns CORS JSON for unauthenticated Workbench host API requests", async () => {
+    const response = await worker.fetch(
+      new Request("https://relay.test/api/hosts/host-1", {
+        headers: {
+          origin: "https://free.saaskit.app",
+        },
+        method: "DELETE",
+      }),
+      createEnv({
+        ACP_RELAY_ACCOUNT_SESSION_PUBLIC_KEYS: undefined,
+        ACP_RELAY_DB: new FakeAuthD1Database() as unknown as D1Database,
+        ACP_RELAY_WORKBENCH_ORIGIN: "https://free.saaskit.app",
+      }),
+    );
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("access-control-allow-origin")).toBe("https://free.saaskit.app");
+    expect(response.headers.get("content-type")).toContain("application/json");
+    await expect(response.json()).resolves.toEqual({
+      error: "ACP account session is required.",
+    });
+  });
+
+  it("routes Workbench host revoke requests to the account shard broker", async () => {
+    const shard = new AcpRelayShard(
+      createFakeDurableObjectState(),
+      createEnv({ ACP_RELAY_WORKBENCH_ORIGIN: "https://free.saaskit.app" }),
+    );
+    const revoked: unknown[] = [];
+    Object.defineProperty(shard, "broker", {
+      value: {
+        async revokeHost(input: unknown) {
+          revoked.push(input);
+          return { ok: true };
+        },
+      },
+    });
+
+    const response = await shard.fetch(
+      new Request("https://relay.test/api/hosts/host-1", {
+        headers: {
+          "x-acp-verified-account-id": "acct-1",
+          "x-acp-verified-client-id": "client-1",
+          origin: "https://free.saaskit.app",
+        },
+        method: "DELETE",
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true });
+    expect(revoked).toEqual([
+      {
+        accountId: "acct-1",
+        clientId: "client-1",
+        hostId: "host-1",
+      },
+    ]);
+  });
+
   it("serves Workbench authorization API requests from the account shard", async () => {
     const shard = new AcpRelayShard(createFakeDurableObjectState(), createEnv());
     const response = await shard.fetch(
