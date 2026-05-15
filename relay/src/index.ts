@@ -1325,7 +1325,7 @@ function createWorkbenchApiCorsPreflightResponse(request: Request, env: Env): Re
   return new Response(null, {
     headers: createWorkbenchApiCorsHeaders(request, env, {
       "Access-Control-Allow-Headers": "authorization, content-type, x-acp-account-id",
-      "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS, PATCH, POST",
+      "Access-Control-Allow-Methods": "DELETE, GET, HEAD, OPTIONS, PATCH, POST",
       "Access-Control-Max-Age": "600",
     }),
     status: 204,

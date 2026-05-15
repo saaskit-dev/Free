@@ -202,6 +202,22 @@ describe("relay worker", () => {
     });
   });
 
+  it("allows Workbench host revoke preflight requests", async () => {
+    const response = await worker.fetch(
+      new Request("https://relay.test/api/hosts/host-1", {
+        headers: {
+          origin: "https://free.saaskit.app",
+        },
+        method: "OPTIONS",
+      }),
+      createEnv({ ACP_RELAY_WORKBENCH_ORIGIN: "https://free.saaskit.app" }),
+    );
+
+    expect(response.status).toBe(204);
+    expect(response.headers.get("access-control-allow-origin")).toBe("https://free.saaskit.app");
+    expect(response.headers.get("access-control-allow-methods")).toContain("DELETE");
+  });
+
   it("serves Workbench authorization API requests from the account shard", async () => {
     const shard = new AcpRelayShard(createFakeDurableObjectState(), createEnv());
     const response = await shard.fetch(
