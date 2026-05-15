@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   ACP_REMOTE_PROTOCOL_VERSION,
   AcpRemoteAttachmentFrameType,
+  AcpRemoteChannelKind,
   AcpRemoteEndpointKind,
   AcpRemoteFrameType,
   createAcpRemoteAccountSession,
@@ -23,6 +24,7 @@ import {
   AcpRelayBroker,
   createRelayAuthorizationPage,
   type AcpRelayBrokerOptions,
+  type AcpRelayClientStateSnapshot,
   type AcpRelayTraceSpanInput,
 } from "./relay-core.js";
 
@@ -841,6 +843,614 @@ describe("AcpRelayBroker", () => {
     });
   });
 
+  it("replays a completed prompt response after the native client reconnects", async () => {
+    const identity = await createProofFixture();
+    const broker = createBroker();
+    const [hostSocket, relayHostSocket] = createMemoryWebSocketPair();
+    const hostFrames: unknown[] = [];
+    hostSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        hostFrames.push(JSON.parse(event.data));
+      }
+    });
+    relayHostSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        void broker.handleHostText(event.data);
+      }
+    });
+    await broker.registerHost({
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        runtimeInstanceId: "runtime-1",
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: relayHostSocket,
+    });
+
+    const [clientSocket, relayClientSocket] = createMemoryWebSocketPair();
+    const clientMessages: unknown[] = [];
+    clientSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        clientMessages.push(JSON.parse(event.data));
+      }
+    });
+    broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      connectionProof: identity.proof,
+      nativeClientAck: true,
+      socket: relayClientSocket,
+    });
+    await broker.authorizeClient({
+      connectionId: "conn-1",
+      hostId: "host-1",
+      skipHostBootstrapInitialize: true,
+    });
+    await broker.handleClientText(
+      "conn-1",
+      JSON.stringify({
+        id: 77,
+        jsonrpc: "2.0",
+        method: "session/prompt",
+        params: { prompt: [{ text: "run", type: "text" }], sessionId: "session-1" },
+      }),
+    );
+    await waitFor(() => hostFrames.length > 0);
+
+    broker.removeClient("conn-1", relayClientSocket);
+    hostSocket.send(JSON.stringify({
+      channelId: "acp",
+      channelKind: AcpRemoteChannelKind.Acp,
+      connectionId: "conn-1",
+      frameType: AcpRemoteFrameType.Data,
+      payload: {
+        id: 77,
+        jsonrpc: "2.0",
+        result: { stopReason: "end_turn" },
+      },
+      seq: 101,
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(clientMessages).toEqual([]);
+
+    const [reconnectedClientSocket, reconnectedRelayClientSocket] =
+      createMemoryWebSocketPair();
+    const reconnectedMessages: unknown[] = [];
+    reconnectedClientSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        reconnectedMessages.push(JSON.parse(event.data));
+      }
+    });
+    broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      connectionProof: identity.proof,
+      nativeClientAck: true,
+      socket: reconnectedRelayClientSocket,
+    });
+
+    await waitFor(() => reconnectedMessages.length > 0);
+    expect(reconnectedMessages[0]).toEqual({
+      id: 77,
+      jsonrpc: "2.0",
+      result: { stopReason: "end_turn" },
+    });
+  });
+
+  it("persists completed prompt state before delivering the response to the client", async () => {
+    const identity = await createProofFixture();
+    const events: string[] = [];
+    const broker = createBroker({
+      onClientStateChanged(connectionId) {
+        events.push(`persist:${connectionId}`);
+      },
+    });
+    const [hostSocket, relayHostSocket] = createMemoryWebSocketPair();
+    const hostFrames: unknown[] = [];
+    hostSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        hostFrames.push(JSON.parse(event.data));
+      }
+    });
+    relayHostSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        void broker.handleHostText(event.data);
+      }
+    });
+    await broker.registerHost({
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        runtimeInstanceId: "runtime-1",
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: relayHostSocket,
+    });
+
+    const [clientSocket, relayClientSocket] = createMemoryWebSocketPair();
+    clientSocket.addEventListener("message", () => {
+      events.push("deliver");
+    });
+    broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      connectionProof: identity.proof,
+      nativeClientAck: true,
+      socket: relayClientSocket,
+    });
+    await broker.authorizeClient({
+      connectionId: "conn-1",
+      hostId: "host-1",
+      skipHostBootstrapInitialize: true,
+    });
+    await broker.handleClientText(
+      "conn-1",
+      JSON.stringify({
+        id: 81,
+        jsonrpc: "2.0",
+        method: "session/prompt",
+        params: { prompt: [{ text: "run", type: "text" }], sessionId: "session-1" },
+      }),
+    );
+    await waitFor(() =>
+      hostFrames.some((frame) =>
+        isRecord(frame) &&
+        isRecord(frame.payload) &&
+        frame.payload.id === 81
+      )
+    );
+
+    hostSocket.send(JSON.stringify({
+      channelId: "acp",
+      channelKind: AcpRemoteChannelKind.Acp,
+      connectionId: "conn-1",
+      frameType: AcpRemoteFrameType.Data,
+      payload: {
+        id: 81,
+        jsonrpc: "2.0",
+        result: { stopReason: "end_turn" },
+      },
+      seq: 102,
+    }));
+
+    await waitFor(() => events.includes("deliver"));
+    expect(events.slice(-2)).toEqual(["persist:conn-1", "deliver"]);
+  });
+
+  it("persists host-bound prompt state before delivering it to the host", async () => {
+    const identity = await createProofFixture();
+    let broker: AcpRelayBroker;
+    let snapshotBeforeHostDelivery: AcpRelayClientStateSnapshot | undefined;
+    const events: string[] = [];
+    broker = createBroker({
+      onClientStateChanged(connectionId) {
+        snapshotBeforeHostDelivery = broker.clientStateSnapshot(connectionId);
+        events.push(`persist:${connectionId}`);
+      },
+    });
+    const [hostSocket, relayHostSocket] = createMemoryWebSocketPair();
+    const hostFrames: unknown[] = [];
+    hostSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        hostFrames.push(JSON.parse(event.data));
+        events.push("host-deliver");
+      }
+    });
+    await broker.registerHost({
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        runtimeInstanceId: "runtime-1",
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: relayHostSocket,
+    });
+
+    const [, relayClientSocket] = createMemoryWebSocketPair();
+    await broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      connectionProof: identity.proof,
+      nativeClientAck: true,
+      socket: relayClientSocket,
+    });
+    await broker.authorizeClient({
+      connectionId: "conn-1",
+      hostId: "host-1",
+      skipHostBootstrapInitialize: true,
+    });
+    await broker.handleClientText(
+      "conn-1",
+      JSON.stringify({
+        id: 82,
+        jsonrpc: "2.0",
+        method: "session/prompt",
+        params: { prompt: [{ text: "run", type: "text" }], sessionId: "session-1" },
+      }),
+    );
+
+    await waitFor(() =>
+      hostFrames.some((frame) =>
+        isRecord(frame) &&
+        isRecord(frame.payload) &&
+        frame.payload.id === 82
+      )
+    );
+    expect(events.slice(-2)).toEqual(["persist:conn-1", "host-deliver"]);
+    expect(snapshotBeforeHostDelivery?.hostRequests).toEqual([
+      expect.objectContaining({ id: 82, method: "session/prompt" }),
+    ]);
+    expect(snapshotBeforeHostDelivery?.hostPendingFrames).toEqual([
+      expect.objectContaining({
+        payload: expect.objectContaining({ id: 82, method: "session/prompt" }),
+      }),
+    ]);
+
+    const restoredBroker = createBroker();
+    const [restoredClientSocket, restoredRelayClientSocket] = createMemoryWebSocketPair();
+    const restoredClientMessages: unknown[] = [];
+    restoredClientSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        restoredClientMessages.push(JSON.parse(event.data));
+      }
+    });
+    await restoredBroker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      connectionProof: identity.proof,
+      hostId: "host-1",
+      nativeClientAck: true,
+      socket: restoredRelayClientSocket,
+      stateSnapshot: snapshotBeforeHostDelivery,
+    });
+    await restoredBroker.handleClientText(
+      "conn-1",
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "acp-runtime/remote/recover_in_flight",
+        params: { requests: [{ id: 82, method: "session/prompt" }] },
+      }),
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(restoredClientMessages).toEqual([]);
+  });
+
+  it("uses native recovery to avoid replaying a prompt while the host is still running it", async () => {
+    const identity = await createProofFixture();
+    const broker = createBroker();
+    const [hostSocket, relayHostSocket] = createMemoryWebSocketPair();
+    const hostFrames: unknown[] = [];
+    hostSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        hostFrames.push(JSON.parse(event.data));
+      }
+    });
+    await broker.registerHost({
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        runtimeInstanceId: "runtime-1",
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: relayHostSocket,
+    });
+
+    const [clientSocket, relayClientSocket] = createMemoryWebSocketPair();
+    const clientMessages: unknown[] = [];
+    clientSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        clientMessages.push(JSON.parse(event.data));
+      }
+    });
+    broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      connectionProof: identity.proof,
+      nativeClientAck: true,
+      socket: relayClientSocket,
+    });
+    await broker.authorizeClient({
+      connectionId: "conn-1",
+      hostId: "host-1",
+      skipHostBootstrapInitialize: true,
+    });
+    await broker.handleClientText(
+      "conn-1",
+      JSON.stringify({
+        id: 78,
+        jsonrpc: "2.0",
+        method: "session/prompt",
+        params: { prompt: [{ text: "run", type: "text" }], sessionId: "session-1" },
+      }),
+    );
+    await waitFor(() =>
+      hostFrames.some((frame) =>
+        isRecord(frame) &&
+        isRecord(frame.payload) &&
+        frame.payload.id === 78
+      )
+    );
+    const promptFrameCount = hostFrames.filter((frame) =>
+      isRecord(frame) &&
+      isRecord(frame.payload) &&
+      frame.payload.id === 78
+    ).length;
+
+    await broker.handleClientText(
+      "conn-1",
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "acp-runtime/remote/recover_in_flight",
+        params: { requests: [{ id: 78, method: "session/prompt" }] },
+      }),
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(hostFrames.filter((frame) =>
+      isRecord(frame) &&
+      isRecord(frame.payload) &&
+      frame.payload.id === 78
+    )).toHaveLength(promptFrameCount);
+    expect(clientMessages).toEqual([]);
+  });
+
+  it("replays an acked in-flight prompt to the host after relay restart so host can return the journaled result", async () => {
+    const identity = await createProofFixture();
+    const broker = createBroker();
+    const [hostSocket, relayHostSocket] = createMemoryWebSocketPair();
+    const hostFrames: unknown[] = [];
+    hostSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        hostFrames.push(JSON.parse(event.data));
+      }
+    });
+    relayHostSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        void broker.handleHostText(event.data);
+      }
+    });
+    await broker.registerHost({
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        runtimeInstanceId: "runtime-1",
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: relayHostSocket,
+    });
+
+    const request = {
+      id: 83,
+      jsonrpc: "2.0",
+      method: "session/prompt",
+      params: { prompt: [{ text: "run", type: "text" }], sessionId: "session-1" },
+    } as const;
+    const [clientSocket, relayClientSocket] = createMemoryWebSocketPair();
+    const clientMessages: unknown[] = [];
+    clientSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        clientMessages.push(JSON.parse(event.data));
+      }
+    });
+    await broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      connectionProof: identity.proof,
+      hostId: "host-1",
+      nativeClientAck: true,
+      socket: relayClientSocket,
+      stateSnapshot: {
+        bufferedClientPayloads: [],
+        clientPendingFrames: [],
+        completedClientResponses: [],
+        connectionId: "conn-1",
+        connectionProof: identity.proof,
+        connectionProofs: [identity.proof],
+        hostId: "host-1",
+        hostPendingFrames: [],
+        hostQueuedFrames: [],
+        hostRequests: [request],
+        hostRuntimeInstanceId: "runtime-1",
+        routeReady: true,
+        seq: 3,
+        sessionControlRequests: [],
+      },
+    });
+
+    await broker.handleClientText(
+      "conn-1",
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "acp-runtime/remote/recover_in_flight",
+        params: { requests: [{ id: 83, method: "session/prompt" }] },
+      }),
+    );
+
+    await waitFor(() =>
+      hostFrames.some((frame) =>
+        isRecord(frame) &&
+        isRecord(frame.payload) &&
+        frame.payload.id === 83
+      )
+    );
+    expect(clientMessages).toEqual([]);
+
+    hostSocket.send(JSON.stringify({
+      channelId: "acp",
+      channelKind: AcpRemoteChannelKind.Acp,
+      connectionId: "conn-1",
+      frameType: AcpRemoteFrameType.Data,
+      payload: {
+        id: 83,
+        jsonrpc: "2.0",
+        result: { stopReason: "end_turn" },
+      },
+      seq: 103,
+    }));
+
+    await waitFor(() => clientMessages.length > 0);
+    expect(clientMessages[0]).toEqual({
+      id: 83,
+      jsonrpc: "2.0",
+      result: { stopReason: "end_turn" },
+    });
+  });
+
+  it("returns an unknown-status error when native recovery cannot prove prompt state", async () => {
+    const identity = await createProofFixture();
+    const broker = createBroker();
+    const [clientSocket, relayClientSocket] = createMemoryWebSocketPair();
+    const clientMessages: unknown[] = [];
+    clientSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        clientMessages.push(JSON.parse(event.data));
+      }
+    });
+    broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      connectionProof: identity.proof,
+      hostId: "host-1",
+      nativeClientAck: true,
+      routeReady: true,
+      socket: relayClientSocket,
+    });
+
+    await broker.handleClientText(
+      "conn-1",
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "acp-runtime/remote/recover_in_flight",
+        params: { requests: [{ id: 79, method: "session/prompt" }] },
+      }),
+    );
+
+    await waitFor(() => clientMessages.length > 0);
+    expect(clientMessages[0]).toMatchObject({
+      error: {
+        code: -32005,
+        data: { reason: "request_status_unknown_after_reconnect" },
+      },
+      id: 79,
+      jsonrpc: "2.0",
+    });
+  });
+
+  it("fails a prompt explicitly when the host runtime restarts after receiving it", async () => {
+    const identity = await createProofFixture();
+    const broker = createBroker();
+    const [hostSocket, relayHostSocket] = createMemoryWebSocketPair();
+    const hostFrames: unknown[] = [];
+    hostSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        hostFrames.push(JSON.parse(event.data));
+      }
+    });
+    relayHostSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        void broker.handleHostText(event.data);
+      }
+    });
+    await broker.registerHost({
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        runtimeInstanceId: "runtime-1",
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: relayHostSocket,
+    });
+
+    const [clientSocket, relayClientSocket] = createMemoryWebSocketPair();
+    const clientMessages: unknown[] = [];
+    clientSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        clientMessages.push(JSON.parse(event.data));
+      }
+    });
+    broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      connectionProof: identity.proof,
+      nativeClientAck: true,
+      socket: relayClientSocket,
+    });
+    await broker.authorizeClient({
+      connectionId: "conn-1",
+      hostId: "host-1",
+      skipHostBootstrapInitialize: true,
+    });
+    await broker.handleClientText(
+      "conn-1",
+      JSON.stringify({
+        id: 80,
+        jsonrpc: "2.0",
+        method: "session/prompt",
+        params: { prompt: [{ text: "run", type: "text" }], sessionId: "session-1" },
+      }),
+    );
+    await waitFor(() =>
+      hostFrames.some((frame) =>
+        isRecord(frame) &&
+        isRecord(frame.payload) &&
+        frame.payload.id === 80
+      )
+    );
+    const requestFrame = hostFrames.find((frame) =>
+      isRecord(frame) &&
+      isRecord(frame.payload) &&
+      frame.payload.id === 80
+    ) as { seq: number };
+    hostSocket.send(JSON.stringify({
+      ack: requestFrame.seq,
+      channelId: "acp",
+      connectionId: "conn-1",
+      frameType: AcpRemoteFrameType.Ack,
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const [, restartedRelayHostSocket] = createMemoryWebSocketPair();
+    await broker.registerHost({
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        runtimeInstanceId: "runtime-2",
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: restartedRelayHostSocket,
+    });
+
+    await waitFor(() => clientMessages.length > 0);
+    expect(clientMessages[0]).toMatchObject({
+      error: {
+        code: -32003,
+        data: { reason: "host_restarted" },
+      },
+      id: 80,
+      jsonrpc: "2.0",
+    });
+  });
+
   it("keeps a custom host name while refreshing runtime metadata", async () => {
     const broker = new AcpRelayBroker({
       controlPlaneStore: new AcpRelayInMemoryControlPlaneStore({
@@ -1432,7 +2042,7 @@ function createBroker(options: AcpRelayBrokerOptions = {}): AcpRelayBroker {
           clientId: "client-1",
           hostId: "host-1",
           policyVersion: 1,
-          scopes: ["acp:connect", "acp:session:create"],
+          scopes: ["acp:connect", "acp:session:create", "acp:turn:send"],
         },
       ],
       hosts: [{ accountId: "acct-1", hostId: "host-1" }],

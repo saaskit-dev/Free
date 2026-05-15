@@ -389,6 +389,16 @@ export function createAcpRemoteHostConnection(
         request,
       );
       if (duplicate) {
+        debugLog(
+          `host request duplicate resolved id=${formatJsonRpcId(request.id)} method=${request.method}`,
+          compactHostDebugContext({
+            connectionId: frame.connectionId,
+            direction: "relay_to_host",
+            jsonRpcId: request.id,
+            method: request.method,
+            severityText: "INFO",
+          }),
+        );
         tracedInbound.span?.span.end();
         sendAcpPayloadDirect(frame.connectionId, duplicate);
         sendRelayAck(frame.connectionId, frame.seq);

@@ -9,6 +9,7 @@ import type {
 } from "../protocol/websocket-stream.js";
 import {
   createAcpRemoteAccountSession,
+  createAcpRemoteConnectionProof,
   decodeAcpRemoteConnectionProof,
   type AcpRemoteAccountSessionCredential,
   type AcpRemoteConnectionProof,
@@ -391,6 +392,59 @@ describe("createAcpRemoteStdioBridge", () => {
     }
   });
 
+  it("refreshes signed connection proofs for relay reconnects", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const sockets: TestSocket[] = [];
+    const proofs: AcpRemoteConnectionProof[] = [];
+    const credential = await createTestAccountCredential();
+    const staleProof = await createAcpRemoteConnectionProof({
+      connectionId: "connection-1",
+      credential,
+      hostId: "host-1",
+      nonce: "stale-proof",
+      now: new Date("2026-05-14T00:00:00.000Z"),
+    });
+    const bridge = createAcpRemoteStdioBridge({
+      clientId: "client-1",
+      connectionId: "connection-1",
+      connectionProof: staleProof,
+      connectionProofCredential: credential,
+      input,
+      output,
+      reconnect: {
+        maxDelayMs: 5,
+        minDelayMs: 5,
+      },
+      relayUrl: "ws://relay.test/socket",
+      socketFactory({ headers }) {
+        proofs.push(
+          decodeAcpRemoteConnectionProof(headers["x-acp-connection-proof"] ?? ""),
+        );
+        const socket = new TestSocket();
+        sockets.push(socket);
+        return socket;
+      },
+    });
+
+    try {
+      await waitFor(() => sockets.length === 1);
+      sockets[0]?.emitClose();
+      await waitFor(() => sockets.length === 2);
+
+      expect(proofs).toHaveLength(2);
+      expect(proofs[0]?.connectionId).toBe("connection-1");
+      expect(proofs[0]?.hostId).toBe("host-1");
+      expect(proofs[0]?.nonce).not.toBe("stale-proof");
+      expect(proofs[1]?.connectionId).toBe("connection-1");
+      expect(proofs[1]?.hostId).toBe("host-1");
+      expect(proofs[1]?.nonce).not.toBe("stale-proof");
+      expect(proofs[1]?.nonce).not.toBe(proofs[0]?.nonce);
+    } finally {
+      bridge.close();
+    }
+  });
+
   it("uploads multiple prompt images concurrently before forwarding resource links", async () => {
     const input = new PassThrough();
     const output = new PassThrough();
@@ -640,7 +694,7 @@ describe("createAcpRemoteStdioBridge", () => {
     }
   });
 
-  it("replays session/prompt after relay reconnect", async () => {
+  it("requests recovery for session/prompt after relay reconnect without replaying the prompt", async () => {
     const input = new PassThrough();
     const output = new PassThrough();
     const sockets: TestSocket[] = [];
@@ -679,8 +733,160 @@ describe("createAcpRemoteStdioBridge", () => {
       await waitFor(() => sockets.length === 2);
       await waitFor(() => sockets[1]!.sent.length === 1);
       expect(JSON.parse(sockets[1]!.sent[0])).toMatchObject({
-        id: 5,
-        method: "session/prompt",
+        jsonrpc: "2.0",
+        method: "acp-runtime/remote/recover_in_flight",
+        params: {
+          requests: [{
+            id: 5,
+            method: "session/prompt",
+          }],
+        },
+      });
+    } finally {
+      bridge.close();
+    }
+  });
+
+  it("auto-retries recoverable session/prompt failures and preserves the client response id", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    let outputText = "";
+    output.setEncoding("utf8");
+    output.on("data", (chunk: string) => {
+      outputText += chunk;
+    });
+    const sockets: TestSocket[] = [];
+    const bridge = createAcpRemoteStdioBridge({
+      clientId: "client-1",
+      connectionId: "connection-1",
+      input,
+      output,
+      relayUrl: "ws://relay.test",
+      socketFactory() {
+        const socket = new TestSocket();
+        sockets.push(socket);
+        return socket;
+      },
+    });
+
+    try {
+      input.write(
+        `${JSON.stringify({
+          id: 50,
+          jsonrpc: "2.0",
+          method: "session/prompt",
+          params: {
+            prompt: [{ text: "recover this", type: "text" }],
+            sessionId: "session-1",
+          },
+        })}\n`,
+      );
+      await waitFor(() => sockets[0]?.sent.length === 1);
+
+      sockets[0]?.emitMessage(
+        JSON.stringify({
+          error: {
+            code: -32005,
+            data: { reason: "request_status_unknown_after_reconnect" },
+            message: "The request status is unknown after reconnect.",
+          },
+          id: 50,
+          jsonrpc: "2.0",
+        }),
+      );
+
+      await waitFor(() => promptMessages(sockets[0]!.sent).length === 2);
+      expect(outputText).toBe("");
+      const retry = promptMessages(sockets[0]!.sent).at(-1)!;
+      expect(retry.id).not.toBe(50);
+
+      sockets[0]?.emitMessage(
+        JSON.stringify({
+          id: retry.id,
+          jsonrpc: "2.0",
+          result: { stopReason: "end_turn" },
+        }),
+      );
+
+      await waitFor(() => outputText.includes('"id":50'));
+      expect(JSON.parse(outputText.trim())).toMatchObject({
+        id: 50,
+        jsonrpc: "2.0",
+        result: { stopReason: "end_turn" },
+      });
+      expect(outputText).not.toContain("-32005");
+    } finally {
+      bridge.close();
+    }
+  });
+
+  it("stops auto-retrying recoverable session/prompt failures after a bounded limit", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    let outputText = "";
+    output.setEncoding("utf8");
+    output.on("data", (chunk: string) => {
+      outputText += chunk;
+    });
+    const sockets: TestSocket[] = [];
+    const bridge = createAcpRemoteStdioBridge({
+      clientId: "client-1",
+      connectionId: "connection-1",
+      input,
+      output,
+      relayUrl: "ws://relay.test",
+      socketFactory() {
+        const socket = new TestSocket();
+        sockets.push(socket);
+        return socket;
+      },
+    });
+
+    try {
+      input.write(
+        `${JSON.stringify({
+          id: 51,
+          jsonrpc: "2.0",
+          method: "session/prompt",
+          params: {
+            prompt: [{ text: "host may restart", type: "text" }],
+            sessionId: "session-1",
+          },
+        })}\n`,
+      );
+      await waitFor(() => promptMessages(sockets[0]!.sent).length === 1);
+
+      let currentId: string | number = 51;
+      for (let failure = 1; failure <= 3; failure += 1) {
+        sockets[0]?.emitMessage(
+          JSON.stringify({
+            error: {
+              code: -32003,
+              data: { reason: "host_restarted" },
+              message:
+                "Remote host restarted before this request completed. The request status is unknown; retry if appropriate.",
+            },
+            id: currentId,
+            jsonrpc: "2.0",
+          }),
+        );
+        if (failure < 3) {
+          await waitFor(() =>
+            promptMessages(sockets[0]!.sent).length === failure + 1,
+          );
+          currentId = promptMessages(sockets[0]!.sent).at(-1)!.id;
+        }
+      }
+
+      await waitFor(() => outputText.includes('"id":51'));
+      expect(promptMessages(sockets[0]!.sent)).toHaveLength(3);
+      expect(JSON.parse(outputText.trim())).toMatchObject({
+        error: {
+          code: -32003,
+          data: { reason: "host_restarted" },
+        },
+        id: 51,
+        jsonrpc: "2.0",
       });
     } finally {
       bridge.close();
@@ -1540,6 +1746,15 @@ async function waitFor(predicate: () => boolean, timeoutMs = 100): Promise<void>
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error("Timed out waiting for condition.");
+}
+
+function promptMessages(messages: string[]): Array<{ id: string | number }> {
+  return messages
+    .map((message) => JSON.parse(message) as { id?: unknown; method?: unknown })
+    .filter((message): message is { id: string | number; method: string } =>
+      message.method === "session/prompt" &&
+      (typeof message.id === "string" || typeof message.id === "number")
+    );
 }
 
 type Deferred<T> = {

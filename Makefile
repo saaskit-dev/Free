@@ -149,6 +149,7 @@ package-install-check: $(TARBALL)
 	test -x "$(FREE_BIN)"
 	"$(FREE_BIN)" --help >/dev/null
 	"$(FREE_BIN)" auth --help >/dev/null
+	"$(FREE_BIN)" host --help >/dev/null
 	"$(FREE_BIN)" bridge config --relay-url ws://127.0.0.1:8791 --command "$(FREE_BIN)" --format generic >/dev/null
 
 $(TARBALL):

@@ -42,6 +42,7 @@ export type AcpRelayBrokerOptions = {
   controlPlaneStore?: AcpRelayWritableControlPlaneStore;
   hostReconnectGraceMs?: number;
   heartbeatTimeoutMs?: number;
+  onClientStateChanged?: (connectionId: string) => Promise<void> | void;
   sessionOpenTimeoutMs?: number;
   maxBufferedFramesPerConnection?: number;
   maxQueuedFramesPerConnection?: number;
@@ -156,6 +157,7 @@ const DEFAULT_MAX_QUEUED_FRAMES_PER_CONNECTION = Number.MAX_SAFE_INTEGER;
 const DEFAULT_COMPLETED_RESPONSE_CACHE_LIMIT = 256;
 const DEFAULT_MAX_CONNECTIONS_PER_ACCOUNT = 64;
 const NATIVE_CLIENT_ACK_METHOD = "acp-runtime/remote/client_ack";
+const NATIVE_CLIENT_RECOVER_METHOD = "acp-runtime/remote/recover_in_flight";
 const NATIVE_CLIENT_ACK_SEQ_META = "acp-runtime/remote/clientAckSeq";
 const DEFAULT_AGENT_ID = "codex-acp";
 
@@ -208,6 +210,11 @@ type RelaySessionFailure = {
   hostId?: string;
   requestId: string | number;
   workspaceRoots?: readonly string[];
+};
+
+type NativeClientRecoverRequest = {
+  id: string | number;
+  method?: string;
 };
 
 type ConnectedRelayClient = RelayClient & {
@@ -532,6 +539,9 @@ export class AcpRelayBroker {
   private readonly pendingAttachmentForwards =
     new Map<string, PendingAttachmentForward>();
   private readonly heartbeatTimeoutMs: number;
+  private readonly onClientStateChanged?:
+    | ((connectionId: string) => Promise<void> | void)
+    | undefined;
   private readonly sessionOpenTimeoutMs: number;
   private readonly maxBufferedFramesPerConnection: number;
   private readonly maxQueuedFramesPerConnection: number;
@@ -557,6 +567,7 @@ export class AcpRelayBroker {
       options.hostReconnectGraceMs ?? DEFAULT_HOST_RECONNECT_GRACE_MS;
     this.heartbeatTimeoutMs =
       options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS;
+    this.onClientStateChanged = options.onClientStateChanged;
     this.sessionOpenTimeoutMs =
       options.sessionOpenTimeoutMs ?? DEFAULT_SESSION_OPEN_TIMEOUT_MS;
     this.maxBufferedFramesPerConnection =
@@ -611,18 +622,19 @@ export class AcpRelayBroker {
       replaced: previousSocket !== undefined,
     });
     if (metadata?.runtimeInstanceId) {
-      this.resolveAckedHostRequestsAfterRuntimeRestart(
+      await this.resolveAckedHostRequestsAfterRuntimeRestart(
         hostId,
         socket,
         metadata.runtimeInstanceId,
       );
     }
+    await this.recoverAckedHostRequestsAfterHostReconnect(hostId, socket);
     void this.reopenClientRoutesForHost(hostId, socket).catch((error) => {
       console.error("Failed to reopen ACP relay client routes", error);
     });
   }
 
-  registerClient(input: AcpRelayClientRegistration): void {
+  async registerClient(input: AcpRelayClientRegistration): Promise<void> {
     const clientId = input.clientId ?? DEFAULT_CLIENT_ID;
     const transport = input.transport ?? "native-acp";
     const existing = this.clients.get(input.connectionId);
@@ -754,7 +766,7 @@ export class AcpRelayBroker {
         }
         this.flushBufferedClientPayloads(registered, input.connectionId);
       }
-      this.flushQueuedHostFrames(registered);
+      await this.flushQueuedHostFrames(registered);
     }
 
     if (
@@ -1705,7 +1717,7 @@ export class AcpRelayBroker {
       if (input.skipHostBootstrapInitialize) {
         client.routeReady = true;
       } else {
-        this.sendHostBootstrapInitialize(input.connectionId, client, host);
+        await this.sendHostBootstrapInitialize(input.connectionId, client, host);
       }
     } else if (host && !client.routeReady) {
       this.sendHostClientHello(input.connectionId, client, host);
@@ -1755,6 +1767,10 @@ export class AcpRelayBroker {
     const message = parseJsonRpcMessage(text);
     if (message && isNativeClientAck(message)) {
       this.handleNativeClientAck(client, message);
+      return;
+    }
+    if (message && isNativeClientRecover(message)) {
+      await this.handleNativeClientRecover(connectionId, client, message);
       return;
     }
     if (
@@ -1828,6 +1844,38 @@ export class AcpRelayBroker {
         reason: input.error instanceof Error ? input.error.message : String(input.error),
       }),
     );
+  }
+
+  private async persistClientStateBeforeDelivery(connectionId: string): Promise<void> {
+    if (!this.onClientStateChanged) {
+      return;
+    }
+    try {
+      await this.onClientStateChanged(connectionId);
+    } catch (error) {
+      this.recordSuppressedError({
+        connectionId,
+        error,
+        eventName: "acp.relay.client_state_persist_failed_before_delivery",
+      });
+    }
+  }
+
+  private async persistClientStateBeforeHostDelivery(
+    connectionId: string,
+  ): Promise<void> {
+    if (!this.onClientStateChanged) {
+      return;
+    }
+    try {
+      await this.onClientStateChanged(connectionId);
+    } catch (error) {
+      this.recordSuppressedError({
+        connectionId,
+        error,
+        eventName: "acp.relay.client_state_persist_failed_before_host_delivery",
+      });
+    }
   }
 
   private logRelayTransportFrame(input: {
@@ -1947,13 +1995,13 @@ export class AcpRelayBroker {
     writeRelayLifecycleEvent(input);
   }
 
-  handleHostText(text: string): string | undefined {
+  async handleHostText(text: string): Promise<string | undefined> {
     if (this.handleHostAttachmentAck(text)) {
       return undefined;
     }
     const frame = parseFrame(text);
     if (frame?.frameType === AcpRemoteFrameType.Ack) {
-      this.handleHostAck(frame);
+      await this.handleHostAck(frame);
       return frame.connectionId;
     }
     if (frame?.frameType === AcpRemoteFrameType.Pong) {
@@ -2061,6 +2109,7 @@ export class AcpRelayBroker {
         });
       }
       if (client.socket) {
+        await this.persistClientStateBeforeDelivery(frame.connectionId);
         client.socket.send(payloadText);
         return frame.connectionId;
       }
@@ -2084,6 +2133,7 @@ export class AcpRelayBroker {
           traceContext: details.traceContext,
           transport: client.transport,
         });
+        await this.persistClientStateBeforeDelivery(frame.connectionId);
         return frame.connectionId;
       }
       this.queueClientPayload(
@@ -2411,7 +2461,7 @@ export class AcpRelayBroker {
           );
           return;
         }
-        this.queueHostDataFrame(connectionId, client, payloadToForward, {
+        await this.queueHostDataFrame(connectionId, client, payloadToForward, {
           pendingReconnect: true,
         });
         return;
@@ -2441,7 +2491,7 @@ export class AcpRelayBroker {
       );
       return;
     }
-    this.sendHostDataFrame(connectionId, client, host, payloadToForward);
+    await this.sendHostDataFrame(connectionId, client, host, payloadToForward);
   }
 
   private async ensureSessionBoundRoute(
@@ -2965,11 +3015,11 @@ export class AcpRelayBroker {
     }
   }
 
-  private resolveAckedHostRequestsAfterRuntimeRestart(
+  private async resolveAckedHostRequestsAfterRuntimeRestart(
     hostId: string,
     host: RelaySocket,
     runtimeInstanceId: string,
-  ): void {
+  ): Promise<void> {
     for (const [connectionId, client] of this.clients.entries()) {
       if (client.hostId !== hostId) {
         continue;
@@ -2986,7 +3036,7 @@ export class AcpRelayBroker {
         if (this.shouldKeepHostRequestAfterRuntimeRestart(client, requestId)) {
           continue;
         }
-        if (this.replayHostRequestAfterRuntimeRestart(connectionId, client, host, request)) {
+        if (await this.replayHostRequestAfterRuntimeRestart(connectionId, client, host, request)) {
           continue;
         }
         client.hostRequests.delete(requestId);
@@ -2995,6 +3045,26 @@ export class AcpRelayBroker {
           connectionId,
           client,
           request,
+        );
+      }
+    }
+  }
+
+  private async recoverAckedHostRequestsAfterHostReconnect(
+    hostId: string,
+    host: RelaySocket,
+  ): Promise<void> {
+    for (const [connectionId, client] of this.clients.entries()) {
+      if (client.hostId !== hostId) {
+        continue;
+      }
+      for (const request of client.hostRequests.values()) {
+        await this.replayAckedHostRequestForRecovery(
+          connectionId,
+          client,
+          host,
+          request,
+          "acp.relay.host_request.replay_after_host_reconnect",
         );
       }
     }
@@ -3034,12 +3104,53 @@ export class AcpRelayBroker {
     return false;
   }
 
-  private replayHostRequestAfterRuntimeRestart(
+  private hasHostDeliveryForRequestId(
+    client: RelayClient,
+    requestId: string | number,
+  ): boolean {
+    return (
+      this.hasHostFrameForRequestId(client.hostPendingFrames.values(), requestId) ||
+      this.hasHostFrameForRequestId(client.hostQueuedFrames, requestId)
+    );
+  }
+
+  private async replayAckedHostRequestForRecovery(
     connectionId: string,
     client: RelayClient,
     host: RelaySocket,
     request: RelayJsonRpcRequest,
-  ): boolean {
+    eventName: string,
+  ): Promise<boolean> {
+    if (!isStoredJsonRpcId(request.id)) {
+      return false;
+    }
+    if (this.hasHostDeliveryForRequestId(client, request.id)) {
+      return false;
+    }
+    const details = readRelayTransportPayloadDetails(request, client);
+    this.logRelayLifecycle({
+      accountId: client.accountId,
+      clientId: client.clientId,
+      connectionId,
+      hostId: client.hostId,
+      eventName,
+      jsonRpcId: request.id,
+      method: details.method,
+      pendingHostFrames: client.hostPendingFrames.size,
+      sessionId: details.sessionId,
+      traceContext: details.traceContext,
+      transport: client.transport,
+    });
+    await this.sendHostDataFrame(connectionId, client, host, request);
+    return true;
+  }
+
+  private async replayHostRequestAfterRuntimeRestart(
+    connectionId: string,
+    client: RelayClient,
+    host: RelaySocket,
+    request: RelayJsonRpcRequest,
+  ): Promise<boolean> {
     if (!isReplayableHostRequestAfterRuntimeRestart(request)) {
       return false;
     }
@@ -3056,7 +3167,7 @@ export class AcpRelayBroker {
       traceContext: details.traceContext,
       transport: client.transport,
     });
-    this.sendHostDataFrame(connectionId, client, host, request);
+    await this.sendHostDataFrame(connectionId, client, host, request);
     return true;
   }
 
@@ -3137,9 +3248,9 @@ export class AcpRelayBroker {
       ].sort((left, right) => left.seq - right.seq);
       client.lastHostSeq = undefined;
       this.sendHostClientHello(connectionId, client, socket);
-      this.sendHostBootstrapInitialize(connectionId, client, socket);
-      this.replaySessionControlRequests(connectionId, client, socket);
-      this.replayPendingHostFrames(client, socket, pendingBeforeBootstrap);
+      await this.sendHostBootstrapInitialize(connectionId, client, socket);
+      await this.replaySessionControlRequests(connectionId, client, socket);
+      await this.replayPendingHostFrames(client, socket, pendingBeforeBootstrap);
     }
   }
 
@@ -3191,14 +3302,14 @@ export class AcpRelayBroker {
     host.send(JSON.stringify(frame));
   }
 
-  private sendHostBootstrapInitialize(
+  private async sendHostBootstrapInitialize(
     connectionId: string,
     client: RelayClient,
     host: RelaySocket,
-  ): void {
+  ): Promise<void> {
     const requestId = `relay:${connectionId}:initialize`;
     client.hostBootstrapRequestIds.add(requestId);
-    this.sendHostDataFrame(connectionId, client, host, {
+    await this.sendHostDataFrame(connectionId, client, host, {
       id: requestId,
       jsonrpc: "2.0",
       method: "initialize",
@@ -3209,11 +3320,11 @@ export class AcpRelayBroker {
     });
   }
 
-  private replaySessionControlRequests(
+  private async replaySessionControlRequests(
     connectionId: string,
     client: RelayClient,
     host: RelaySocket,
-  ): void {
+  ): Promise<void> {
     const requests = [...client.sessionControlRequests.values()];
     requests.sort((left, right) =>
       sessionControlReplayOrder(left) - sessionControlReplayOrder(right),
@@ -3239,11 +3350,11 @@ export class AcpRelayBroker {
         traceContext: details.traceContext,
         transport: client.transport,
       });
-      this.sendHostDataFrame(connectionId, client, host, payload);
+      await this.sendHostDataFrame(connectionId, client, host, payload);
     }
   }
 
-  private sendHostDataFrame(
+  private async sendHostDataFrame(
     connectionId: string,
     client: RelayClient,
     host: RelaySocket,
@@ -3252,7 +3363,7 @@ export class AcpRelayBroker {
       channelId?: string;
       channelKind?: AcpRemoteChannelKind;
     } = {},
-  ): void {
+  ): Promise<void> {
     const traced = options.channelKind === undefined ||
         options.channelKind === AcpRemoteChannelKind.Acp
       ? this.startRelayTransportSpan({
@@ -3271,12 +3382,13 @@ export class AcpRelayBroker {
       this.queueHostFrame(connectionId, client, frame, {
         eventName: "acp.relay.host_frame.queued",
       });
+      await this.persistClientStateBeforeHostDelivery(connectionId);
       return;
     }
-    this.sendHostFrameNow(connectionId, client, host, frame, traced.payload);
+    await this.sendHostFrameNow(connectionId, client, host, frame, traced.payload);
   }
 
-  private queueHostDataFrame(
+  private async queueHostDataFrame(
     connectionId: string,
     client: RelayClient,
     payload: unknown,
@@ -3285,7 +3397,7 @@ export class AcpRelayBroker {
       channelKind?: AcpRemoteChannelKind;
       pendingReconnect?: boolean;
     } = {},
-  ): void {
+  ): Promise<void> {
     const traced = options.channelKind === undefined ||
         options.channelKind === AcpRemoteChannelKind.Acp
       ? this.startRelayTransportSpan({
@@ -3304,6 +3416,7 @@ export class AcpRelayBroker {
       eventName: "acp.relay.host_frame.queued_for_reconnect",
       pendingReconnect: options.pendingReconnect,
     });
+    await this.persistClientStateBeforeHostDelivery(connectionId);
   }
 
   private createHostDataFrame(
@@ -3390,13 +3503,13 @@ export class AcpRelayBroker {
     this.clientBootstrapQueues.delete(connectionId);
   }
 
-  private sendHostFrameNow(
+  private async sendHostFrameNow(
     connectionId: string,
     client: RelayClient,
     host: RelaySocket,
     frame: AcpRemoteDataFrame,
     payload: unknown,
-  ): void {
+  ): Promise<void> {
     client.hostPendingFrames.set(frame.seq, frame);
     this.logRelayTransportFrame({
       channelKind: frame.channelKind,
@@ -3405,6 +3518,7 @@ export class AcpRelayBroker {
       direction: "client_to_host",
       payload,
     });
+    await this.persistClientStateBeforeHostDelivery(connectionId);
     host.send(JSON.stringify(frame));
   }
 
@@ -3422,7 +3536,7 @@ export class AcpRelayBroker {
     }
   }
 
-  private handleHostAck(frame: AcpRemoteAckFrame): void {
+  private async handleHostAck(frame: AcpRemoteAckFrame): Promise<void> {
     const client = this.clients.get(frame.connectionId);
     if (!client) {
       return;
@@ -3435,7 +3549,8 @@ export class AcpRelayBroker {
       }
       client.hostPendingFrames.delete(seq);
     }
-    this.flushQueuedHostFrames(client);
+    await this.persistClientStateBeforeHostDelivery(frame.connectionId);
+    await this.flushQueuedHostFrames(client);
   }
 
   private async persistSessionBindingFromHostResponse(
@@ -3703,6 +3818,135 @@ export class AcpRelayBroker {
     }
   }
 
+  private async handleNativeClientRecover(
+    connectionId: string,
+    client: ConnectedRelayClient,
+    message: RelayJsonRpcNotification,
+  ): Promise<void> {
+    for (const request of readNativeClientRecoverRequests(message)) {
+      if (await this.recoverNativeClientRequest(connectionId, client, request)) {
+        continue;
+      }
+      const error = {
+        code: -32005,
+        data: {
+          connectionId,
+          hostId: client.hostId,
+          method: request.method,
+          reason: "request_status_unknown_after_reconnect",
+          requestId: request.id,
+        },
+        message:
+          "Remote request status is unknown after reconnect. The request was not replayed to avoid duplicate execution.",
+      };
+      this.rememberCompletedClientResponse(client, {
+        error,
+        id: request.id,
+        jsonrpc: "2.0",
+      });
+      this.logRelayLifecycle({
+        accountId: client.accountId,
+        clientId: client.clientId,
+        connectionId,
+        hostId: client.hostId,
+        eventName: "acp.relay.client_request.recovery_unknown",
+        jsonRpcId: request.id,
+        method: request.method,
+        severityText: "ERROR",
+        transport: client.transport,
+      });
+      client.socket.send(JSON.stringify({
+        error,
+        id: request.id,
+        jsonrpc: "2.0",
+      }));
+    }
+  }
+
+  private async recoverNativeClientRequest(
+    connectionId: string,
+    client: ConnectedRelayClient,
+    request: NativeClientRecoverRequest,
+  ): Promise<boolean> {
+    const pendingResponse = this.findPendingClientResponseForRequestId(
+      client,
+      request.id,
+    );
+    if (pendingResponse) {
+      const details = readRelayTransportPayloadDetails(
+        pendingResponse.payload,
+        client,
+      );
+      this.logRelayLifecycle({
+        accountId: client.accountId,
+        clientId: client.clientId,
+        connectionId,
+        hostId: client.hostId,
+        eventName: "acp.relay.client_request.recovery_pending_replayed",
+        jsonRpcId: request.id,
+        method: details.method ?? request.method,
+        nativeClientAck: client.nativeClientAck,
+        pendingClientFrames: client.clientPendingFrames.size,
+        seq: pendingResponse.seq,
+        sessionId: details.sessionId,
+        traceContext: details.traceContext,
+        transport: client.transport,
+      });
+      client.socket.send(
+        JSON.stringify(nativeAcpPayloadForClient(client, pendingResponse)),
+      );
+      return true;
+    }
+
+    const completedResponse = client.completedClientResponses.get(request.id);
+    if (completedResponse) {
+      const details = readRelayTransportPayloadDetails(completedResponse, client);
+      this.logRelayLifecycle({
+        accountId: client.accountId,
+        clientId: client.clientId,
+        connectionId,
+        hostId: client.hostId,
+        eventName: "acp.relay.client_request.recovery_completed_replayed",
+        jsonRpcId: request.id,
+        method: details.method ?? request.method,
+        nativeClientAck: client.nativeClientAck,
+        sessionId: details.sessionId,
+        traceContext: details.traceContext,
+        transport: client.transport,
+      });
+      client.socket.send(JSON.stringify(completedResponse));
+      return true;
+    }
+
+    const hostRequest = client.hostRequests.get(request.id);
+    if (hostRequest) {
+      const host = client.hostId ? this.hostRouteState(client.hostId).host : undefined;
+      if (host) {
+        await this.replayAckedHostRequestForRecovery(
+          connectionId,
+          client,
+          host,
+          hostRequest,
+          "acp.relay.client_request.recovery_replayed_to_host",
+        );
+      }
+      this.logRelayLifecycle({
+        accountId: client.accountId,
+        clientId: client.clientId,
+        connectionId,
+        hostId: client.hostId,
+        eventName: "acp.relay.client_request.recovery_waiting_for_host",
+        jsonRpcId: request.id,
+        method: request.method,
+        pendingHostFrames: client.hostPendingFrames.size,
+        transport: client.transport,
+      });
+      return true;
+    }
+
+    return false;
+  }
+
   private sendHostAck(client: RelayClient, frame: AcpRemoteDataFrame): void {
     const hostId = client.hostId;
     if (!hostId) {
@@ -3786,13 +4030,13 @@ export class AcpRelayBroker {
     }
   }
 
-  private replayPendingHostFrames(
+  private async replayPendingHostFrames(
     client: RelayClient,
     host: RelaySocket,
     frames = [...client.hostPendingFrames.values()].sort(
       (left, right) => left.seq - right.seq,
     ),
-  ): void {
+  ): Promise<void> {
     for (const frame of frames) {
       this.logRelayLifecycle({
         accountId: client.accountId,
@@ -3806,13 +4050,13 @@ export class AcpRelayBroker {
       });
       host.send(JSON.stringify(frame));
     }
-    this.flushQueuedHostFrames(client, host);
+    await this.flushQueuedHostFrames(client, host);
   }
 
-  private flushQueuedHostFrames(
+  private async flushQueuedHostFrames(
     client: RelayClient,
     host = client.hostId ? this.activeHostRoutes.get(client.hostId) : undefined,
-  ): void {
+  ): Promise<void> {
     if (!host) {
       return;
     }
@@ -3824,7 +4068,7 @@ export class AcpRelayBroker {
       if (!frame) {
         return;
       }
-      this.sendHostFrameNow(
+      await this.sendHostFrameNow(
         frame.connectionId,
         client,
         host,
@@ -5476,6 +5720,16 @@ function isNativeClientAck(
   );
 }
 
+function isNativeClientRecover(
+  message: RelayJsonRpcMessage,
+): message is RelayJsonRpcNotification {
+  return (
+    "method" in message &&
+    !isJsonRpcRequest(message) &&
+    message.method === NATIVE_CLIENT_RECOVER_METHOD
+  );
+}
+
 function shouldDeferNativeClientAck(
   client: RelayClient,
   frame: AcpRemoteDataFrame,
@@ -5539,6 +5793,22 @@ function readNativeClientAckSeq(
   return typeof seq === "number" && Number.isSafeInteger(seq) && seq > 0
     ? seq
     : undefined;
+}
+
+function readNativeClientRecoverRequests(
+  message: RelayJsonRpcNotification,
+): NativeClientRecoverRequest[] {
+  const params = isRecord(message.params) ? message.params : undefined;
+  const requests = Array.isArray(params?.requests) ? params.requests : [];
+  return requests.flatMap((request): NativeClientRecoverRequest[] => {
+    if (!isRecord(request) || !isStoredJsonRpcId(request.id)) {
+      return [];
+    }
+    return [{
+      id: request.id,
+      ...(typeof request.method === "string" ? { method: request.method } : {}),
+    }];
+  });
 }
 
 function isSessionNewRequest(

@@ -52,7 +52,7 @@ export function parseFreeAuthCommand(
   }
 }
 
-async function main(argv: readonly string[]): Promise<void> {
+export async function runFreeAuthCommand(argv: readonly string[]): Promise<void> {
   const command = parseFreeAuthCommand(argv, process.env);
   switch (command.name) {
     case "help":
@@ -440,7 +440,7 @@ function loginCommandForRelay(relayUrl: string): string {
 }
 
 if (fileURLToPath(import.meta.url) === process.argv[1]) {
-  main(process.argv.slice(2)).catch((error) => {
+  runFreeAuthCommand(process.argv.slice(2)).catch((error) => {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
     process.exit(1);
   });

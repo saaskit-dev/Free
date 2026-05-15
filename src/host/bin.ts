@@ -51,6 +51,7 @@ import { execFileSync, execSync } from "node:child_process";
 import { appendFileSync, mkdirSync, statSync } from "node:fs";
 import { homedir, hostname, userInfo } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   type AcpRemoteHostServiceScope,
   getAcpRemoteHostUserServiceStatus,
@@ -64,6 +65,7 @@ const ACP_REMOTE_HOST_ACCOUNT_SESSION_ENV_VAR =
   "ACP_REMOTE_HOST_ACCOUNT_SESSION";
 const HOST_BINARY_CHANGE_CHECK_INTERVAL_MS = 60_000;
 const HOST_PENDING_RESTART_CHECK_INTERVAL_MS = 60_000;
+const HOST_SHUTDOWN_FORCE_EXIT_MS = 5_000;
 const HOST_LOG_DIR = join(homedir(), ".free", "logs");
 const HOST_TEXT_LOG_PATH = join(HOST_LOG_DIR, "host.log.text.jsonl");
 const HOST_ERROR_LOG_PATH = join(HOST_LOG_DIR, "host.log.errors.jsonl");
@@ -245,14 +247,7 @@ async function resolveSession(
   return session;
 }
 
-try {
-  await main(process.argv.slice(2));
-} catch (error) {
-  process.stderr.write(`${error instanceof Error ? error.message : error}\n`);
-  process.exit(1);
-}
-
-async function main(rawArgv: readonly string[]): Promise<void> {
+export async function runFreeHostCommand(rawArgv: readonly string[]): Promise<void> {
   const command = readCommand(rawArgv);
   const argv = command.argv;
 
@@ -448,6 +443,23 @@ async function runHost(argv: readonly string[]): Promise<void> {
   const runtime = new AcpRuntime(createStdioAcpConnectionFactory());
   const hostConnectionState = createAcpRemoteHostConnectionState();
   const requestJournal = createFileAcpRemoteHostRequestJournal({
+    onCorruptJournal({ corruptPath, error, path }) {
+      debugLog(
+        `Host request journal was corrupt and has been quarantined: ${error.message}`,
+        {
+          freePhase: "request_journal",
+          severityText: "ERROR",
+        },
+      );
+      writeHostLog(
+        `Host request journal quarantined: ${path}${corruptPath ? ` -> ${corruptPath}` : ""}`,
+        {
+          "acp.remote.host_request_journal.corrupt_path": corruptPath,
+          "acp.remote.host_request_journal.path": path,
+        },
+        "ERROR",
+      );
+    },
     path: HOST_REQUEST_JOURNAL_PATH,
   });
   const agentList =
@@ -460,11 +472,23 @@ async function runHost(argv: readonly string[]): Promise<void> {
   const workspaceRootList = workspaceRoots.join(", ");
   let stopping = false;
   let active: { close(): void } | undefined;
+  let shutdownTimer: ReturnType<typeof setTimeout> | undefined;
   let pendingHostRestart:
     | { currentMtimeMs: number; initialMtimeMs: number }
     | undefined;
-  const stop = () => {
+  const stop = (signal: NodeJS.Signals) => {
     stopping = true;
+    if (!shutdownTimer) {
+      shutdownTimer = setTimeout(() => {
+        writeHostLog(
+          `Host did not stop within ${HOST_SHUTDOWN_FORCE_EXIT_MS}ms after ${signal}; forcing exit.`,
+          { "acp.remote.signal": signal },
+          "ERROR",
+        );
+        process.exit(0);
+      }, HOST_SHUTDOWN_FORCE_EXIT_MS);
+      shutdownTimer.unref?.();
+    }
     active?.close();
   };
   writeHostLog(
@@ -528,8 +552,8 @@ async function runHost(argv: readonly string[]): Promise<void> {
   }, HOST_PENDING_RESTART_CHECK_INTERVAL_MS);
   pendingRestartTimer.unref?.();
   const stopPendingRestartTimer = () => clearInterval(pendingRestartTimer);
-  process.once("SIGINT", stop);
-  process.once("SIGTERM", stop);
+  process.once("SIGINT", () => stop("SIGINT"));
+  process.once("SIGTERM", () => stop("SIGTERM"));
 
   await runAcpRemoteReconnectLoop({
     connect: async () => {
@@ -572,6 +596,9 @@ async function runHost(argv: readonly string[]): Promise<void> {
     },
     waitForDisconnect: waitForHostDisconnect,
   });
+  if (shutdownTimer) {
+    clearTimeout(shutdownTimer);
+  }
   stopWatchingHostBinary?.();
   stopPendingRestartTimer();
   await relayTelemetry?.close();
@@ -995,4 +1022,11 @@ function printServiceStatus(status: {
       `plist: ${status.plistPath}`,
     ].join("\n") + "\n",
   );
+}
+
+if (fileURLToPath(import.meta.url) === process.argv[1]) {
+  runFreeHostCommand(process.argv.slice(2)).catch((error) => {
+    process.stderr.write(`${error instanceof Error ? error.message : error}\n`);
+    process.exit(1);
+  });
 }

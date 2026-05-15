@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import type {
@@ -9,6 +9,11 @@ import type { AnyMessage } from "@agentclientprotocol/sdk";
 
 export type FileAcpRemoteHostRequestJournalOptions = {
   maxEntries?: number;
+  onCorruptJournal?: (input: {
+    corruptPath?: string;
+    error: SyntaxError;
+    path: string;
+  }) => void;
   path: string;
 };
 
@@ -29,16 +34,18 @@ export function createFileAcpRemoteHostRequestJournal(
       entries: AcpRemoteHostRequestJournalEntry[],
     ) => AcpRemoteHostRequestJournalEntry[],
   ) => {
-    writeChain = writeChain.then(async () => {
-      const entries = await readEntries(options.path);
+    const operation = writeChain.catch(() => undefined).then(async () => {
+      const entries = await readEntries(options.path, options.onCorruptJournal);
       await writeEntries(options.path, update(entries).slice(-maxEntries));
     });
-    await writeChain;
+    writeChain = operation.catch(() => undefined);
+    await operation;
   };
 
   return {
     async lookup(connectionId, id) {
-      const entries = await readEntries(options.path);
+      await writeChain.catch(() => undefined);
+      const entries = await readEntries(options.path, options.onCorruptJournal);
       for (let index = entries.length - 1; index >= 0; index -= 1) {
         const entry = entries[index];
         if (entry.connectionId === connectionId && entry.id === id) {
@@ -73,12 +80,18 @@ export function createFileAcpRemoteHostRequestJournal(
 
 async function readEntries(
   path: string,
+  onCorruptJournal?: FileAcpRemoteHostRequestJournalOptions["onCorruptJournal"],
 ): Promise<AcpRemoteHostRequestJournalEntry[]> {
   try {
     const parsed = JSON.parse(await readFile(path, "utf-8")) as JournalFile;
     return Array.isArray(parsed.entries) ? parsed.entries.filter(isEntry) : [];
   } catch (error) {
     if ((error as { code?: unknown }).code === "ENOENT") {
+      return [];
+    }
+    if (error instanceof SyntaxError) {
+      const corruptPath = await quarantineCorruptJournal(path);
+      onCorruptJournal?.({ corruptPath, error, path });
       return [];
     }
     throw error;
@@ -90,7 +103,30 @@ async function writeEntries(
   entries: readonly AcpRemoteHostRequestJournalEntry[],
 ): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify({ entries }, null, 2)}\n`, "utf-8");
+  const temporaryPath = `${path}.tmp-${process.pid}-${Date.now()}-${Math.random()
+    .toString(16)
+    .slice(2)}`;
+  await writeFile(
+    temporaryPath,
+    `${JSON.stringify({ entries }, null, 2)}\n`,
+    "utf-8",
+  );
+  await rename(temporaryPath, path);
+}
+
+async function quarantineCorruptJournal(path: string): Promise<string | undefined> {
+  const corruptPath = `${path}.corrupt-${new Date()
+    .toISOString()
+    .replace(/[:.]/g, "-")}`;
+  try {
+    await rename(path, corruptPath);
+    return corruptPath;
+  } catch (error) {
+    if ((error as { code?: unknown }).code !== "ENOENT") {
+      throw error;
+    }
+    return undefined;
+  }
 }
 
 function upsertEntry(

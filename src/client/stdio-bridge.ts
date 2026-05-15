@@ -66,7 +66,11 @@ export type AcpRemoteBridgeDebugContext = {
   freeMessageId?: string;
   freePhase?: string;
   jsonRpcId?: string | number;
+  maxRetries?: number;
   method?: string;
+  reconnectDelayMs?: number;
+  retryAttempt?: number;
+  retryReason?: string;
   sessionId?: string;
   spanId?: string;
   severityText?: "ERROR" | "INFO";
@@ -81,6 +85,11 @@ export type AcpRemoteStdioBridgeHandle = {
 
 const MAX_BRIDGE_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const DEFAULT_BRIDGE_AUTH_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+const MAX_RECOVERABLE_PROMPT_RETRIES = 2;
+const RECOVERABLE_PROMPT_RETRY_REASONS = new Set([
+  "host_restarted",
+  "request_status_unknown_after_reconnect",
+]);
 
 export function createAcpRemoteStdioBridge(
   options: AcpRemoteStdioBridgeOptions,
@@ -125,11 +134,50 @@ export function createAcpRemoteStdioBridge(
   let lastConfigOptions: unknown[] = [];
 
   const connect = () => {
+    if (!options.connectionProofCredential) {
+      connectWithProofOptions({
+        connectionProof: options.connectionProof,
+        connectionProofs: options.connectionProofs,
+      });
+      return;
+    }
+    void connectWithFreshProof();
+  };
+
+  const connectWithFreshProof = async () => {
+    if (closed) {
+      return;
+    }
+    let refreshedProofOptions: RefreshedConnectionProofOptions;
+    try {
+      refreshedProofOptions = await refreshConnectionProofOptions({
+        connectionId,
+        connectionProof: options.connectionProof,
+        connectionProofCredential: options.connectionProofCredential,
+        connectionProofs: options.connectionProofs,
+        hostId: options.hostId,
+      });
+    } catch (error) {
+      debugLog(`failed to refresh connection proof: ${formatError(error)}`, {
+        connectionId,
+        eventName: "acp.remote.bridge.connection_proof_refresh_failed",
+        severityText: "ERROR",
+      });
+      scheduleReconnect();
+      return;
+    }
+    connectWithProofOptions(refreshedProofOptions);
+  };
+
+  const connectWithProofOptions = (
+    refreshedProofOptions: RefreshedConnectionProofOptions,
+  ) => {
     if (closed) {
       return;
     }
     connection = connectAcpRemoteClientRelay({
       ...options,
+      ...refreshedProofOptions,
       connectionId,
       nativeClientAck: true,
       onClose(event) {
@@ -156,10 +204,19 @@ export function createAcpRemoteStdioBridge(
       },
       onMessage(message) {
         const responseId = readJsonRpcResponseId(message);
+        const responseEntry =
+          responseId !== undefined ? inFlightOutbound.get(responseId) : undefined;
         if (isDuplicateDeliveredResponse(responseId)) {
           if (responseId !== undefined) {
             sendNativeClientAck({ id: responseId });
           }
+          return;
+        }
+        if (
+          responseId !== undefined &&
+          responseEntry &&
+          retryRecoverablePromptFailure(responseId, responseEntry, message)
+        ) {
           return;
         }
         if (responseId !== undefined) {
@@ -203,6 +260,19 @@ export function createAcpRemoteStdioBridge(
           nativeClientAckSeq !== undefined
             ? stripNativeClientAckSeq(clientMessage)
             : clientMessage;
+        const clientResponseId = responseEntry?.clientResponseId;
+        if (
+          responseId !== undefined &&
+          clientResponseId !== undefined &&
+          clientResponseId !== responseId
+        ) {
+          outputMessage =
+            rewriteJsonRpcMessageId(outputMessage, clientResponseId) ??
+            outputMessage;
+          requestMethods.delete(responseId);
+          requestSessionIds.delete(responseId);
+          requestTraceContexts.delete(responseId);
+        }
         const relayAuthUrl = readRelayAuthUrl(outputMessage);
         authUrl = relayAuthUrl ?? authUrl;
         outputMessage = rewriteRelayAuthUrlForWorkbench(outputMessage);
@@ -274,6 +344,9 @@ export function createAcpRemoteStdioBridge(
           }
           if (responseId !== undefined) {
             deliveredResponseIds.add(responseId);
+            if (clientResponseId !== undefined) {
+              deliveredResponseIds.add(clientResponseId);
+            }
             sendNativeClientAck({ id: responseId });
           }
         });
@@ -297,6 +370,7 @@ export function createAcpRemoteStdioBridge(
       {
         connectionId,
         eventName: "acp.remote.bridge.reconnect_scheduled",
+        reconnectDelayMs: delayMs,
         severityText: "INFO",
       },
     );
@@ -310,12 +384,17 @@ export function createAcpRemoteStdioBridge(
     if (!connection) {
       return;
     }
+    recoverInFlightOutbound();
     replayInFlightOutbound();
     const flushed = pendingOutbound.length;
     while (pendingOutbound.length > 0) {
       const next = pendingOutbound.shift();
       if (next !== undefined) {
-        trackInFlightOutbound(next.message);
+        if (next.id !== undefined && next.method) {
+          inFlightOutbound.set(next.id, next);
+        } else {
+          trackInFlightOutbound(next.message);
+        }
         connection.send(next.message);
       }
     }
@@ -339,11 +418,104 @@ export function createAcpRemoteStdioBridge(
     connection.send(message);
   };
 
-  const queueOutbound = (message: string) => {
-    const id = readJsonRpcRequestId(message);
+  const retryRecoverablePromptFailure = (
+    responseId: string | number,
+    entry: PendingOutboundMessage,
+    responseMessage: string,
+  ): boolean => {
+    const reason = readRecoverablePromptRetryReason(responseMessage);
+    if (!reason || entry.method !== "session/prompt") {
+      return false;
+    }
+    const clientResponseId = entry.clientResponseId ?? entry.id;
+    if (clientResponseId === undefined) {
+      return false;
+    }
+    const nextAttempt = (entry.retryAttempt ?? 0) + 1;
+    if (nextAttempt > MAX_RECOVERABLE_PROMPT_RETRIES) {
+      debugLog(
+        `recoverable prompt retry exhausted id=${formatJsonRpcId(
+          clientResponseId,
+        )} attempt=${nextAttempt - 1} maxRetries=${MAX_RECOVERABLE_PROMPT_RETRIES} reason=${reason}`,
+        compactBridgeDebugContext({
+          connectionId,
+          direction: "relay_to_client",
+          eventName: "acp.remote.bridge.prompt_auto_retry_exhausted",
+          jsonRpcId: clientResponseId,
+          maxRetries: MAX_RECOVERABLE_PROMPT_RETRIES,
+          method: entry.method,
+          retryAttempt: nextAttempt - 1,
+          retryReason: reason,
+          severityText: "ERROR",
+        }),
+      );
+      return false;
+    }
+    const retryId = createPromptRetryRequestId(clientResponseId, nextAttempt);
+    const retryMessage = rewriteJsonRpcMessageId(entry.message, retryId);
+    if (!retryMessage) {
+      return false;
+    }
+    clearAuthRequestTimer(responseId);
+    inFlightOutbound.delete(responseId);
+    deliveredResponseIds.add(responseId);
+    if (responseId !== clientResponseId) {
+      requestMethods.delete(responseId);
+      requestSessionIds.delete(responseId);
+      requestTraceContexts.delete(responseId);
+    }
+    const retryEntry: PendingOutboundMessage = {
+      ...entry,
+      clientResponseId,
+      id: retryId,
+      message: retryMessage,
+      retryAttempt: nextAttempt,
+    };
+    logClientMessage(
+      retryMessage,
+      requestMethods,
+      requestSessionIds,
+      requestTraceContexts,
+      connectionId,
+      debugLog,
+    );
+    debugLog(
+      `retrying recoverable prompt id=${formatJsonRpcId(
+        clientResponseId,
+      )} retryId=${formatJsonRpcId(retryId)} attempt=${nextAttempt} reason=${reason}`,
+      compactBridgeDebugContext({
+        connectionId,
+        direction: "client_to_relay",
+        eventName: "acp.remote.bridge.prompt_auto_retry",
+        jsonRpcId: retryId,
+        maxRetries: MAX_RECOVERABLE_PROMPT_RETRIES,
+        method: entry.method,
+        retryAttempt: nextAttempt,
+        retryReason: reason,
+        severityText: "INFO",
+      }),
+    );
+    sendNativeClientAck({ id: responseId });
+    if (connection) {
+      inFlightOutbound.set(retryId, retryEntry);
+      connection.send(retryMessage);
+    } else {
+      queueOutbound(retryMessage, retryEntry);
+    }
+    return true;
+  };
+
+  const queueOutbound = (
+    message: string,
+    pendingEntry?: PendingOutboundMessage,
+  ) => {
+    const request = readJsonRpcRequest(message);
+    const id = pendingEntry?.id ?? request?.id;
     const queued: PendingOutboundMessage = {
+      ...pendingEntry,
       id,
       message,
+      method: pendingEntry?.method ?? request?.method,
     };
     if (pendingOutbound.length >= reconnectQueueHardLimit) {
       debugLog(
@@ -579,9 +751,39 @@ export function createAcpRemoteStdioBridge(
     }
   };
 
+  const recoverInFlightOutbound = () => {
+    if (!connection || inFlightOutbound.size === 0) {
+      return;
+    }
+    const recoverable = [...inFlightOutbound.values()].filter((entry) =>
+      isRecoverableRelayClientRequest(entry.method)
+    );
+    if (recoverable.length === 0) {
+      return;
+    }
+    connection.send(JSON.stringify({
+      jsonrpc: "2.0",
+      method: NATIVE_CLIENT_RECOVER_METHOD,
+      params: {
+        requests: recoverable.map((entry) => ({
+          id: entry.id,
+          method: entry.method,
+        })),
+      },
+    }));
+    debugLog(`requested recovery for ${recoverable.length} in-flight relay request(s)`, {
+      connectionId,
+      eventName: "acp.remote.bridge.inflight_recovery_requested",
+      severityText: "INFO",
+    });
+  };
+
   const settleInFlightRequestsAfterRelayClose = () => {
     for (const entry of [...inFlightOutbound.values()]) {
-      if (isReplayableRelayClientRequest(entry.method)) {
+      if (
+        isReplayableRelayClientRequest(entry.method) ||
+        isRecoverableRelayClientRequest(entry.method)
+      ) {
         continue;
       }
       clearAuthRequestTimer(entry.id);
@@ -866,9 +1068,11 @@ export function createAcpRemoteStdioBridge(
 }
 
 type PendingOutboundMessage = {
+  clientResponseId?: string | number;
   id?: string | number;
   message: string;
   method?: string;
+  retryAttempt?: number;
 };
 
 const REMOTE_HOST_ID_META = "acp-runtime/remote/hostId";
@@ -879,6 +1083,7 @@ const REMOTE_SESSION_SELECTION_ID_META =
 const REMOTE_SESSION_WORKSPACE_ROOTS_META =
   "acp-runtime/remote/sessionWorkspaceRoots";
 const NATIVE_CLIENT_ACK_METHOD = "acp-runtime/remote/client_ack";
+const NATIVE_CLIENT_RECOVER_METHOD = "acp-runtime/remote/recover_in_flight";
 const NATIVE_CLIENT_ACK_SEQ_META = "acp-runtime/remote/clientAckSeq";
 const REMOTE_CONFIG_OPTION_PREFIX = "acp-runtime.remote.";
 
@@ -1258,6 +1463,69 @@ function selectConnectionProofForHost(input: {
     ...(input.connectionProofs ?? []),
   ];
   return candidates.find((proof) => proof.hostId === input.hostId);
+}
+
+type RefreshedConnectionProofOptions = {
+  connectionProof?: AcpRemoteConnectionProof;
+  connectionProofs?: readonly AcpRemoteConnectionProof[];
+};
+
+async function refreshConnectionProofOptions(input: {
+  connectionId: string;
+  connectionProof?: AcpRemoteConnectionProof;
+  connectionProofCredential?: AcpRemoteAccountSessionCredential;
+  connectionProofs?: readonly AcpRemoteConnectionProof[];
+  hostId?: string;
+}): Promise<RefreshedConnectionProofOptions> {
+  if (!input.connectionProofCredential) {
+    return {
+      connectionProof: input.connectionProof,
+      connectionProofs: input.connectionProofs,
+    };
+  }
+  const credential = input.connectionProofCredential;
+  const hostIds = uniqueStrings([
+    input.hostId,
+    input.connectionProof?.hostId,
+    ...(input.connectionProofs ?? []).map((proof) => proof.hostId),
+  ]);
+  if (hostIds.length === 0) {
+    return {
+      connectionProof: input.connectionProof,
+      connectionProofs: input.connectionProofs,
+    };
+  }
+  const connectionProofs = await Promise.all(
+    hostIds.map((hostId) =>
+      createAcpRemoteConnectionProof({
+        connectionId: input.connectionId,
+        credential,
+        hostId,
+      }),
+    ),
+  );
+  const selectedHostId = input.hostId ?? input.connectionProof?.hostId;
+  return {
+    connectionProof:
+      selectedHostId
+        ? connectionProofs.find((proof) => proof.hostId === selectedHostId) ??
+          connectionProofs[0]
+        : connectionProofs[0],
+    connectionProofs,
+  };
+}
+
+function uniqueStrings(values: readonly (string | undefined)[]): string[] {
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (!value || seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    result.push(value);
+  }
+  return result;
 }
 
 async function uploadPromptImageAttachment(input: {
@@ -1807,12 +2075,6 @@ function createRemoteDisplayConfigOption(
   };
 }
 
-function readJsonRpcRequestId(message: string): string | number | undefined {
-  const parsed = parseJson(message);
-  const id = parsed?.id;
-  return isJsonRpcId(id) ? id : undefined;
-}
-
 function readJsonRpcRequest(
   message: string,
 ): { id: string | number; method: string } | undefined {
@@ -1839,6 +2101,37 @@ function readJsonRpcResponseId(message: string): string | number | undefined {
   return isJsonRpcId(id) ? id : undefined;
 }
 
+function rewriteJsonRpcMessageId(
+  message: string,
+  id: string | number,
+): string | undefined {
+  const parsed = parseJson(message);
+  if (!parsed) {
+    return undefined;
+  }
+  return JSON.stringify({
+    ...parsed,
+    id,
+  });
+}
+
+function createPromptRetryRequestId(
+  clientResponseId: string | number,
+  attempt: number,
+): string {
+  return `${String(clientResponseId)}:retry:${attempt}:${crypto.randomUUID()}`;
+}
+
+function readRecoverablePromptRetryReason(message: string): string | undefined {
+  const parsed = parseJson(message);
+  const error = isRecord(parsed?.error) ? parsed.error : undefined;
+  const data = isRecord(error?.data) ? error.data : undefined;
+  const reason = readString(data?.reason);
+  return reason && RECOVERABLE_PROMPT_RETRY_REASONS.has(reason)
+    ? reason
+    : undefined;
+}
+
 function isReplayableRelayClientRequest(method: string | undefined): boolean {
   return (
     method === "authenticate" ||
@@ -1846,9 +2139,12 @@ function isReplayableRelayClientRequest(method: string | undefined): boolean {
     method === "session/list" ||
     method === "session/load" ||
     method === "session/new" ||
-    method === "session/prompt" ||
     method === "session/resume"
   );
+}
+
+function isRecoverableRelayClientRequest(method: string | undefined): boolean {
+  return method === "session/prompt";
 }
 
 function isAuthGatedRequest(method: string | undefined): boolean {

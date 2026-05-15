@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   createAcpRemoteWebSocketFactory,
@@ -45,6 +46,9 @@ const LOG_PATH = join(LOG_DIR, "bridge.log");
 const TEXT_LOG_PATH = join(LOG_DIR, "bridge.log.text.jsonl");
 const ERROR_LOG_PATH = join(LOG_DIR, "bridge.log.errors.jsonl");
 const BRIDGE_BINARY_CHANGE_CHECK_INTERVAL_MS = 60_000;
+const HOST_DISCOVERY_MIN_RETRY_DELAY_MS = 1_000;
+const HOST_DISCOVERY_MAX_RETRY_DELAY_MS = 30_000;
+const HOST_DISCOVERY_MAX_ATTEMPTS = 12;
 
 let relayLogUploader: FreeLogUploader | undefined;
 let relayTelemetry: FreeTelemetry | undefined;
@@ -208,6 +212,71 @@ async function resolveBridgeHostId(input: {
   };
 }
 
+type BridgeHostResolver = (input: {
+  accountCredential: AcpRemoteAccountSessionCredential;
+  relayUrl: string;
+}) => Promise<{
+  hosts: HostDiscoveryEntry[];
+  primaryHostId: string;
+}>;
+
+export async function waitForBridgeHostSelection(input: {
+  accountCredential: AcpRemoteAccountSessionCredential;
+  log?: (message: string, severityText?: "ERROR" | "INFO") => void;
+  maxAttempts?: number;
+  relayUrl: string;
+  resolveHostId?: BridgeHostResolver;
+  retryDelay?: (attempt: number) => number;
+  sleep?: (delayMs: number) => Promise<void>;
+}): Promise<{
+  hosts: HostDiscoveryEntry[];
+  primaryHostId: string;
+}> {
+  const resolveHostId = input.resolveHostId ?? resolveBridgeHostId;
+  const retryDelay =
+    input.retryDelay ??
+    ((attempt) =>
+      Math.min(
+        HOST_DISCOVERY_MIN_RETRY_DELAY_MS * 2 ** Math.max(0, attempt - 1),
+        HOST_DISCOVERY_MAX_RETRY_DELAY_MS,
+      ));
+  const sleep =
+    input.sleep ??
+    ((delayMs) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
+  const maxAttempts = input.maxAttempts ?? HOST_DISCOVERY_MAX_ATTEMPTS;
+  let attempt = 0;
+  let lastError: unknown;
+  while (attempt < maxAttempts) {
+    attempt += 1;
+    try {
+      return await resolveHostId({
+        accountCredential: input.accountCredential,
+        relayUrl: input.relayUrl,
+      });
+    } catch (error) {
+      lastError = error;
+      if (isFatalHostDiscoveryError(error) || attempt >= maxAttempts) {
+        throw error;
+      }
+      const delayMs = retryDelay(attempt);
+      input.log?.(
+        `host discovery unavailable (${formatError(error)}); retrying in ${delayMs}ms (${attempt}/${maxAttempts}).`,
+        "INFO",
+      );
+      await sleep(delayMs);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+function isFatalHostDiscoveryError(error: unknown): boolean {
+  const message = formatError(error);
+  return (
+    message.includes("Free host discovery failed: 401") ||
+    message.includes("Free host discovery failed: 403")
+  );
+}
+
 function createNoOnlineHostMessage(relayUrl: string): string {
   return [
     `No online Free host found for ${describeRelayTarget(relayUrl)}.`,
@@ -235,7 +304,7 @@ function authLoginCommandForRelay(relayUrl: string): string {
   return `free auth login --relay-url ${relayUrl}`;
 }
 
-type HostDiscoveryEntry = {
+export type HostDiscoveryEntry = {
   hostId: string;
   metadata?: {
     displayName?: string;
@@ -279,8 +348,7 @@ function readHostMetadataString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-async function main(): Promise<void> {
-  const argv = process.argv.slice(2);
+export async function runFreeBridgeCommand(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
   if (argv.includes("--help")) {
     printHelp();
     return;
@@ -338,8 +406,9 @@ async function main(): Promise<void> {
     );
   }
   const clientId = accountCredential.accountSession.principalId;
-  const hostSelection = await resolveBridgeHostId({
+  const hostSelection = await waitForBridgeHostSelection({
     accountCredential,
+    log,
     relayUrl,
   });
   const hostId = hostSelection.primaryHostId;
@@ -457,22 +526,27 @@ function printHelp(): void {
   );
 }
 
-main().catch((error) => {
-  log(error instanceof Error ? error.message : String(error), "ERROR");
-  exitAfterLogUpload(1);
-});
+if (isDirectEntry()) {
+  runFreeBridgeCommand().catch((error) => {
+    log(error instanceof Error ? error.message : String(error), "ERROR");
+    exitAfterLogUpload(1);
+  });
+  process.on("uncaughtException", (error) => {
+    if (isBrokenPipeError(error)) {
+      exitAfterLogUpload(0);
+      return;
+    }
+    log(
+      `Uncaught: ${error instanceof Error ? error.message : String(error)}`,
+      "ERROR",
+    );
+    exitAfterLogUpload(1);
+  });
+}
 
-process.on("uncaughtException", (error) => {
-  if (isBrokenPipeError(error)) {
-    exitAfterLogUpload(0);
-    return;
-  }
-  log(
-    `Uncaught: ${error instanceof Error ? error.message : String(error)}`,
-    "ERROR",
-  );
-  exitAfterLogUpload(1);
-});
+function isDirectEntry(): boolean {
+  return process.argv[1] === fileURLToPath(import.meta.url);
+}
 
 function isBrokenPipeError(error: unknown): boolean {
   return (

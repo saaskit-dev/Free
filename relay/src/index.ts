@@ -411,6 +411,8 @@ export class AcpRelayShard {
       heartbeatTimeoutMs: readOptionalPositiveInteger(
         this.env.ACP_RELAY_HEARTBEAT_TIMEOUT_MS,
       ),
+      onClientStateChanged: (connectionId) =>
+        this.writeOrDeleteClientStateSnapshot(connectionId),
       maxBufferedFramesPerConnection: readOptionalPositiveInteger(
         this.env.ACP_RELAY_MAX_BUFFERED_FRAMES_PER_CONNECTION,
       ),
@@ -576,7 +578,7 @@ export class AcpRelayShard {
         nativeClientAck,
         transport: clientTransport,
       });
-      this.broker.registerClient({
+      await this.broker.registerClient({
         accountId,
         authUrl,
         clientId,
@@ -626,15 +628,28 @@ export class AcpRelayShard {
     if (!text) {
       return;
     }
-    if (attachment.endpoint === AcpRemoteEndpointKind.Host) {
-      const connectionId = this.broker.handleHostText(text);
-      if (connectionId) {
-        await this.writeOrDeleteClientStateSnapshot(connectionId);
+    try {
+      if (attachment.endpoint === AcpRemoteEndpointKind.Host) {
+        const connectionId = await this.broker.handleHostText(text);
+        if (connectionId) {
+          await this.writeOrDeleteClientStateSnapshot(connectionId);
+        }
+        return;
       }
-      return;
+      await this.broker.handleClientText(attachment.connectionId, text);
+      await this.writeOrDeleteClientStateSnapshot(attachment.connectionId);
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          endpoint: attachment.endpoint,
+          connectionId: attachment.connectionId,
+          hostId: attachment.hostId,
+          eventName: "acp.relay.websocket_message.failed",
+          reason: error instanceof Error ? error.message : String(error),
+        }),
+      );
+      socket.close(1011, "Relay failed to process this WebSocket message.");
     }
-    await this.broker.handleClientText(attachment.connectionId, text);
-    await this.writeOrDeleteClientStateSnapshot(attachment.connectionId);
   }
 
   async webSocketClose(
@@ -737,7 +752,7 @@ export class AcpRelayShard {
       const stateSnapshot = await this.readClientStateSnapshot(
         attachment.connectionId,
       );
-      this.broker.registerClient({
+      await this.broker.registerClient({
         accountId: attachment.accountId,
         authUrl: attachment.authUrl,
         routeReady:
