@@ -181,6 +181,7 @@ type RelayClient = {
   lastHostSeq?: number;
   nativeClientAck: boolean;
   seq: number;
+  sessionTitles: Map<string, string>;
   sessionControlRequests: Map<string, RelayJsonRpcRequest>;
   socket?: RelaySocket;
   connectionProof?: AcpRemoteConnectionProof;
@@ -749,6 +750,7 @@ export class AcpRelayBroker {
       lastHostSeq: snapshot?.lastHostSeq,
       nativeClientAck: input.nativeClientAck ?? false,
       seq: snapshot?.seq ?? 0,
+      sessionTitles: new Map(),
       sessionControlRequests: sessionControlRequestsToKeyMap(
         snapshot?.sessionControlRequests,
       ),
@@ -1173,6 +1175,9 @@ export class AcpRelayBroker {
       accountId: input.accountId,
       limit: input.limit,
     });
+    const storedBindingsByKey = new Map(
+      storedBindings.map((binding) => [sessionBindingKey(binding), binding]),
+    );
     const bindings = this.activeSessionBindings(input.accountId);
     const activeBindingKeys = new Set(bindings.map((binding) => sessionBindingKey(binding)));
     const visibleHosts = await this.discoverableHostRecords({
@@ -1196,7 +1201,9 @@ export class AcpRelayBroker {
         lifecycle: "live",
         sessionId: binding.sessionId,
         status: "active",
-        title: createSessionTitle({
+        title: storedBindingsByKey.get(sessionBindingKey(binding))?.title ??
+          binding.title ??
+          createSessionTitle({
           agent: binding.agent,
           host,
           workspaceRoots: binding.workspaceRoots ?? [],
@@ -1239,7 +1246,7 @@ export class AcpRelayBroker {
           : "Host is offline. Session history is retained for inspection.",
         sessionId: binding.sessionId,
         status: "offline",
-        title: createSessionTitle({
+        title: binding.title ?? createSessionTitle({
           agent: binding.agent,
           host,
           workspaceRoots: binding.workspaceRoots ?? [],
@@ -1481,6 +1488,7 @@ export class AcpRelayBroker {
     requestId?: string | number;
     sessionId: string;
     status: NonNullable<AcpRelaySessionSummary["status"]>;
+    title?: string;
     updatedAt?: string;
     workspaceRoots: readonly string[];
   }): AcpRelaySessionSummary {
@@ -1490,7 +1498,7 @@ export class AcpRelayBroker {
       lifecycle: input.lifecycle ?? "live",
       sessionId: input.sessionId,
       status: input.status,
-      title: createSessionTitle({
+      title: input.title ?? createSessionTitle({
         agent: input.agent,
         host: input.host,
         workspaceRoots: input.workspaceRoots,
@@ -1522,7 +1530,7 @@ export class AcpRelayBroker {
       }
       const sessions = new Map<
         string,
-        Pick<AcpRelaySessionBindingRecord, "agent" | "workspaceRoots">
+        Pick<AcpRelaySessionBindingRecord, "agent" | "title" | "workspaceRoots">
       >();
       for (const request of client.hostRequests.values()) {
         const sessionId = readRequestSessionId(request);
@@ -1530,6 +1538,7 @@ export class AcpRelayBroker {
           const selection = readSessionRestoreSelection(request);
           sessions.set(sessionId, {
             agent: selection?.agent ?? client.lastAuthorization?.agent,
+            title: client.sessionTitles.get(sessionId),
             workspaceRoots:
               selection?.workspaceRoots ?? client.lastAuthorization?.workspaceRoots,
           });
@@ -1540,6 +1549,7 @@ export class AcpRelayBroker {
         if (sessionId && !sessions.has(sessionId)) {
           sessions.set(sessionId, {
             agent: client.lastAuthorization?.agent,
+            title: client.sessionTitles.get(sessionId),
             workspaceRoots: client.lastAuthorization?.workspaceRoots,
           });
         }
@@ -1552,6 +1562,7 @@ export class AcpRelayBroker {
         const binding = readSessionBindingMetadata(response.result);
         sessions.set(sessionId, {
           agent: binding?.agent ?? client.lastAuthorization?.agent,
+          title: client.sessionTitles.get(sessionId),
           workspaceRoots:
             binding?.workspaceRoots ?? client.lastAuthorization?.workspaceRoots,
         });
@@ -1563,6 +1574,7 @@ export class AcpRelayBroker {
           clientId: client.clientId,
           hostId,
           sessionId,
+          title: session.title,
           workspaceRoots: session.workspaceRoots,
         });
       }
@@ -1990,6 +2002,7 @@ export class AcpRelayBroker {
       return;
     }
 
+    void this.persistSessionTitleFromPrompt(client, message);
     await this.forwardBoundClientMessage(connectionId, client, message);
   }
 
@@ -2231,6 +2244,7 @@ export class AcpRelayBroker {
           payload: clientFrame.payload,
         });
         void this.persistSessionBindingFromHostResponse(client, clientFrame.payload);
+        void this.persistSessionTitleFromHostNotification(client, clientFrame.payload);
       }
 
       if (
@@ -2870,7 +2884,7 @@ export class AcpRelayBroker {
     if (!sessionId) {
       return undefined;
     }
-    const binding = await this.controlPlaneStore.getSessionBinding({
+    const binding = await this.readSessionBindingWithShortRetry({
       accountId: client.accountId,
       clientId: client.clientId,
       sessionId,
@@ -3696,6 +3710,9 @@ export class AcpRelayBroker {
     ) {
       this.trackHostJsonRpcRequest(connectionId, client, payload);
     }
+    if (client.transport === "native-acp") {
+      void this.persistSessionTitleFromPrompt(client, payload);
+    }
   }
 
   private async handleHostAck(frame: AcpRemoteAckFrame): Promise<void> {
@@ -3747,6 +3764,10 @@ export class AcpRelayBroker {
     }
     const resultBinding = readSessionBindingMetadata(response.result);
     const requestSelection = readSessionRestoreSelection(request);
+    const resultTitle = readSessionTitleFromNewSessionResponse(response.result);
+    if (resultTitle) {
+      client.sessionTitles.set(sessionId, resultTitle);
+    }
     try {
       await this.controlPlaneStore.upsertSessionBinding({
         accountId: client.accountId,
@@ -3757,6 +3778,7 @@ export class AcpRelayBroker {
         clientId: client.clientId,
         hostId: resultBinding?.hostId ?? hostId,
         sessionId,
+        title: resultTitle,
         workspaceRoots:
           resultBinding?.workspaceRoots ??
           requestSelection?.workspaceRoots ??
@@ -3764,6 +3786,84 @@ export class AcpRelayBroker {
       });
     } catch (error) {
       console.error("Failed to persist ACP remote session binding", error);
+    }
+  }
+
+  private async persistSessionTitleFromPrompt(
+    client: RelayClient,
+    payload: unknown,
+  ): Promise<void> {
+    const request = isJsonRpcRequestPayload(payload) ? payload : undefined;
+    if (!request || request.method !== "session/prompt") {
+      return;
+    }
+    const sessionId = readRequestSessionId(request);
+    const title = readPromptTitle(request);
+    if (!sessionId || !title) {
+      return;
+    }
+    client.sessionTitles.set(sessionId, title);
+    const binding = await this.controlPlaneStore.getSessionBinding({
+      accountId: client.accountId,
+      clientId: client.clientId,
+      sessionId,
+    });
+    if (!binding || binding.title) {
+      return;
+    }
+    try {
+      await this.controlPlaneStore.upsertSessionBinding({
+        ...binding,
+        title,
+      });
+    } catch (error) {
+      console.error("Failed to persist ACP remote session prompt title", error);
+    }
+  }
+
+  private async readSessionBindingWithShortRetry(input: {
+    accountId: string;
+    clientId: string;
+    sessionId: string;
+  }): Promise<AcpRelaySessionBindingRecord | undefined> {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const binding = await this.controlPlaneStore.getSessionBinding(input);
+      if (binding) {
+        return binding;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    return undefined;
+  }
+
+  private async persistSessionTitleFromHostNotification(
+    client: RelayClient,
+    payload: unknown,
+  ): Promise<void> {
+    const notification = isJsonRpcNotificationPayload(payload) ? payload : undefined;
+    if (!notification || notification.method !== "session/update") {
+      return;
+    }
+    const titleUpdate = readSessionTitleFromUpdateNotification(notification);
+    if (!titleUpdate) {
+      return;
+    }
+    client.sessionTitles.set(titleUpdate.sessionId, titleUpdate.title);
+    const binding = await this.controlPlaneStore.getSessionBinding({
+      accountId: client.accountId,
+      clientId: client.clientId,
+      sessionId: titleUpdate.sessionId,
+    });
+    if (!binding) {
+      return;
+    }
+    try {
+      await this.controlPlaneStore.upsertSessionBinding({
+        ...binding,
+        title: titleUpdate.title,
+      });
+    } catch (error) {
+      console.error("Failed to persist ACP remote session update title", error);
     }
   }
 
@@ -5849,8 +5949,76 @@ function shortReadableId(value: string): string {
   return value.length > 12 ? `${value.slice(0, 8)}...${value.slice(-4)}` : value;
 }
 
+function readSessionTitleFromNewSessionResponse(result: unknown): string | undefined {
+  if (!isRecord(result)) {
+    return undefined;
+  }
+  return readSessionTitle(result.title);
+}
+
+function readSessionTitleFromUpdateNotification(
+  notification: RelayJsonRpcNotification,
+): { sessionId: string; title: string } | undefined {
+  const params = isRecord(notification.params) ? notification.params : undefined;
+  const update = isRecord(params?.update) ? params.update : undefined;
+  if (update?.sessionUpdate !== "session_info_update") {
+    return undefined;
+  }
+  const sessionId = readString(params?.sessionId);
+  const title = readSessionTitle(update.title);
+  return sessionId && title ? { sessionId, title } : undefined;
+}
+
+function readPromptTitle(request: RelayJsonRpcRequest): string | undefined {
+  const params = isRecord(request.params) ? request.params : undefined;
+  const text = collectPromptText(params?.prompt).replace(/\s+/g, " ").trim();
+  if (!text) {
+    return undefined;
+  }
+  return readSessionTitle(text.split(/(?<=[.!?。！？])\s*/u)[0] ?? text);
+}
+
+function readSessionTitle(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const title = value.replace(/\s+/g, " ").trim();
+  if (!title) {
+    return undefined;
+  }
+  return title.length > 80 ? `${title.slice(0, 77)}...` : title;
+}
+
+function collectPromptText(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(collectPromptText).filter(Boolean).join(" ");
+  }
+  if (!isRecord(value)) {
+    return "";
+  }
+  if (typeof value.text === "string") {
+    return value.text;
+  }
+  if (isRecord(value.resource) && typeof value.resource.text === "string") {
+    return value.resource.text;
+  }
+  return "";
+}
+
 function isJsonRpcRequestPayload(value: unknown): value is RelayJsonRpcRequest {
   return isRelayJsonRpcMessage(value) && isJsonRpcRequest(value);
+}
+
+function isJsonRpcNotificationPayload(value: unknown): value is RelayJsonRpcNotification {
+  return (
+    isRelayJsonRpcMessage(value) &&
+    "method" in value &&
+    typeof value.method === "string" &&
+    !("id" in value)
+  );
 }
 
 function isJsonRpcResponsePayload(value: unknown): value is RelayJsonRpcResponse {

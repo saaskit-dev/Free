@@ -53,6 +53,7 @@ export type AcpRelaySessionBindingRecord = {
   createdAt?: string;
   hostId: AcpRemoteId;
   sessionId: AcpRemoteId;
+  title?: string;
   updatedAt?: string;
   workspaceRoots?: readonly string[];
 };
@@ -186,6 +187,7 @@ type SessionBindingRow = {
   created_at?: string | null;
   host_id: string;
   session_id: string;
+  title?: string | null;
   updated_at?: string | null;
   workspace_roots_json: string | null;
 };
@@ -523,13 +525,14 @@ export class AcpRelayD1ControlPlaneStore
       .prepare(
         `insert into acp_remote_session_bindings(
            account_id, client_device_id, session_id, host_id, agent_json,
-           workspace_roots_json, updated_at
+           workspace_roots_json, title, updated_at
          )
-         values (?1, ?2, ?3, ?4, ?5, ?6, current_timestamp)
+         values (?1, ?2, ?3, ?4, ?5, ?6, ?7, current_timestamp)
          on conflict(account_id, client_device_id, session_id) do update set
            host_id = excluded.host_id,
            agent_json = excluded.agent_json,
            workspace_roots_json = excluded.workspace_roots_json,
+           title = coalesce(excluded.title, acp_remote_session_bindings.title),
            updated_at = current_timestamp`,
       )
       .bind(
@@ -539,6 +542,7 @@ export class AcpRelayD1ControlPlaneStore
         record.hostId,
         record.agent ? JSON.stringify(record.agent) : null,
         record.workspaceRoots ? JSON.stringify(record.workspaceRoots) : null,
+        record.title ?? null,
       )
       .run();
   }
@@ -628,7 +632,7 @@ export class AcpRelayD1ControlPlaneStore
     const row = await this.database
       .prepare(
         `select account_id, client_device_id, session_id, host_id, agent_json,
-                workspace_roots_json, created_at, updated_at
+                workspace_roots_json, title, created_at, updated_at
          from acp_remote_session_bindings
          where account_id = ?1 and client_device_id = ?2 and session_id = ?3
          limit 1`,
@@ -648,7 +652,7 @@ export class AcpRelayD1ControlPlaneStore
       const rows = await this.database
         .prepare(
           `select account_id, client_device_id, session_id, host_id, agent_json,
-                  workspace_roots_json, created_at, updated_at
+                  workspace_roots_json, title, created_at, updated_at
            from acp_remote_session_bindings
            where account_id = ?1 and client_device_id = ?2
            order by updated_at desc, created_at desc, session_id asc
@@ -661,7 +665,7 @@ export class AcpRelayD1ControlPlaneStore
     const rows = await this.database
       .prepare(
         `select account_id, client_device_id, session_id, host_id, agent_json,
-                workspace_roots_json, created_at, updated_at
+                workspace_roots_json, title, created_at, updated_at
          from acp_remote_session_bindings
          where account_id = ?1
          order by updated_at desc, created_at desc, session_id asc
@@ -851,6 +855,7 @@ function mapSessionBindingRow(
     createdAt: row.created_at ?? undefined,
     hostId: row.host_id,
     sessionId: row.session_id,
+    title: row.title ?? undefined,
     updatedAt: row.updated_at ?? undefined,
     workspaceRoots: row.workspace_roots_json
       ? parseStringArray(row.workspace_roots_json, "session binding workspace roots")

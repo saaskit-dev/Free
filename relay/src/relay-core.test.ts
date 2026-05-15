@@ -624,6 +624,113 @@ describe("AcpRelayBroker", () => {
     });
   });
 
+  it("uses runtime session titles and falls back to the first user prompt", async () => {
+    const identity = await createProofFixture();
+    const broker = createBroker();
+    const [hostSocket, relayHostSocket] = createMemoryWebSocketPair();
+    hostSocket.addEventListener("message", (event) => {
+      if (typeof event.data !== "string") {
+        return;
+      }
+      const frame = JSON.parse(event.data);
+      if (
+        !isRecord(frame) ||
+        frame.frameType !== AcpRemoteFrameType.Data ||
+        !isRecord(frame.payload) ||
+        frame.payload.method !== "session/new"
+      ) {
+        return;
+      }
+      hostSocket.send(JSON.stringify({
+        channelId: "acp",
+        channelKind: AcpRemoteChannelKind.Acp,
+        connectionId: "conn-1",
+        frameType: AcpRemoteFrameType.Data,
+        payload: {
+          id: frame.payload.id,
+          jsonrpc: "2.0",
+          result: { sessionId: "session-1" },
+        },
+        seq: 1,
+      }));
+    });
+    await broker.registerHost({
+      accountId: "acct-1",
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        displayName: "Studio Mac",
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: relayHostSocket,
+    });
+
+    const [, relayClientSocket] = createMemoryWebSocketPair();
+    broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      connectionProof: identity.proof,
+      socket: relayClientSocket,
+    });
+    await broker.authorizeClient({
+      clientAgent: { id: "fake-agent" },
+      connectionId: "conn-1",
+      hostId: "host-1",
+      skipHostBootstrapInitialize: true,
+      workspaceRoots: ["/workspace"],
+    });
+
+    await broker.handleClientText(
+      "conn-1",
+      JSON.stringify({
+        id: 1,
+        jsonrpc: "2.0",
+        method: "session/new",
+        params: { cwd: "/workspace/project", mcpServers: [] },
+      }),
+    );
+    await waitForSessionTitle(broker, "/workspace · fake-agent · Studio Mac");
+
+    await broker.handleClientText(
+      "conn-1",
+      JSON.stringify({
+        id: 2,
+        jsonrpc: "2.0",
+        method: "session/prompt",
+        params: {
+          prompt: [{
+            text: "请分析登录失败原因。第二句不要进入标题。",
+            type: "text",
+          }],
+          sessionId: "session-1",
+        },
+      }),
+    );
+    await waitForSessionTitle(broker, "请分析登录失败原因。");
+
+    await broker.handleHostText(JSON.stringify({
+      channelId: "acp",
+      channelKind: AcpRemoteChannelKind.Acp,
+      connectionId: "conn-1",
+      frameType: AcpRemoteFrameType.Data,
+      payload: {
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: "session-1",
+          update: {
+            sessionUpdate: "session_info_update",
+            title: "Runtime Session Title",
+          },
+        },
+      },
+      seq: 2,
+    }));
+    await waitForSessionTitle(broker, "Runtime Session Title");
+  });
+
   it("lists active account sessions before the binding is persisted", async () => {
     const broker = new AcpRelayBroker({
       controlPlaneStore: new AcpRelayInMemoryControlPlaneStore({
@@ -2406,6 +2513,27 @@ function createBroker(options: AcpRelayBrokerOptions = {}): AcpRelayBroker {
       hosts: [{ accountId: "acct-1", hostId: "host-1" }],
     }),
   });
+}
+
+async function waitForSessionTitle(
+  broker: AcpRelayBroker,
+  expectedTitle: string,
+): Promise<void> {
+  let lastTitle: string | undefined;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const result = await broker.listSessions({
+      accountId: "acct-1",
+      clientId: "client-1",
+    });
+    lastTitle = result.sessions[0]?.title;
+    if (result.sessions[0]?.title === expectedTitle) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(
+    `Timed out waiting for session title ${expectedTitle}; last title was ${lastTitle}.`,
+  );
 }
 
 async function createProofFixture() {
