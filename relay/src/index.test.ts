@@ -202,7 +202,7 @@ describe("relay worker", () => {
     });
   });
 
-  it("allows Workbench host revoke preflight requests", async () => {
+  it("allows Workbench mutating API preflight requests", async () => {
     const response = await worker.fetch(
       new Request("https://relay.test/api/hosts/host-1", {
         headers: {
@@ -216,6 +216,9 @@ describe("relay worker", () => {
     expect(response.status).toBe(204);
     expect(response.headers.get("access-control-allow-origin")).toBe("https://free.saaskit.app");
     expect(response.headers.get("access-control-allow-methods")).toContain("DELETE");
+    expect(response.headers.get("access-control-allow-methods")).toContain("PATCH");
+    expect(response.headers.get("access-control-allow-methods")).toContain("POST");
+    expect(response.headers.get("access-control-allow-methods")).toContain("PUT");
   });
 
   it("returns CORS JSON for unauthenticated Workbench host API requests", async () => {
