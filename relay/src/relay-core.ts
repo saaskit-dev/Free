@@ -1825,7 +1825,7 @@ export class AcpRelayBroker {
         connectionId,
         hostId: client.hostId,
         eventName: "acp.relay.client_request.received",
-        jsonRpcId: message.id,
+        jsonRpcId: message.id ?? undefined,
         method: message.method,
         routeReady: client.routeReady,
         sessionId: details.sessionId,
