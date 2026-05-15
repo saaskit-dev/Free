@@ -307,6 +307,7 @@ export type AcpRelaySessionSummary = {
   connectionId?: string;
   createdAt?: string;
   error?: string;
+  lifecycle?: "live" | "offline";
   hostId: string;
   hostName?: string;
   hostOnline?: boolean;
@@ -314,9 +315,24 @@ export type AcpRelaySessionSummary = {
   latestEvent?: string;
   requestId?: string | number;
   sessionId: string;
-  status?: "waiting_authorization" | "starting" | "active" | "failed";
+  status?: "waiting_authorization" | "starting" | "active" | "failed" | "offline";
+  title?: string;
   updatedAt?: string;
   workspaceRoots: readonly string[];
+};
+
+export type AcpRelaySessionHealth = {
+  checkedAt: string;
+  checks: {
+    id: "account_session" | "relay" | "host" | "session";
+    label: string;
+    message: string;
+    status: "ok" | "warning" | "error";
+  }[];
+  liveSessionCount: number;
+  offlineSessionCount: number;
+  onlineHostCount: number;
+  status: "healthy" | "degraded" | "unhealthy";
 };
 
 type HostWorkspaceListRequestPayload = {
@@ -1153,11 +1169,19 @@ export class AcpRelayBroker {
     clientId: string;
     limit?: number;
   }): Promise<{ ok: true; sessions: AcpRelaySessionSummary[] }> {
+    const storedBindings = await this.controlPlaneStore.listSessionBindings({
+      accountId: input.accountId,
+      limit: input.limit,
+    });
     const bindings = this.activeSessionBindings(input.accountId);
+    const activeBindingKeys = new Set(bindings.map((binding) => sessionBindingKey(binding)));
     const visibleHosts = await this.discoverableHostRecords({
       accountId: input.accountId,
       clientId: input.clientId,
-      hostIds: [...new Set(bindings.map((binding) => binding.hostId))],
+      hostIds: [...new Set([
+        ...bindings.map((binding) => binding.hostId),
+        ...storedBindings.map((binding) => binding.hostId),
+      ])],
     });
     const hostsById = new Map(visibleHosts.map((host) => [host.hostId, host]));
     const sessions: AcpRelaySessionSummary[] = [];
@@ -1169,8 +1193,14 @@ export class AcpRelayBroker {
       sessions.push({
         hostId: binding.hostId,
         hostOnline: host.online,
+        lifecycle: "live",
         sessionId: binding.sessionId,
         status: "active",
+        title: createSessionTitle({
+          agent: binding.agent,
+          host,
+          workspaceRoots: binding.workspaceRoots ?? [],
+        }),
         workspaceRoots: binding.workspaceRoots ?? [],
         ...(binding.agent ? { agent: binding.agent } : {}),
         ...(binding.createdAt ? { createdAt: binding.createdAt } : {}),
@@ -1178,7 +1208,7 @@ export class AcpRelayBroker {
         ...(host.metadata ? { hostMetadata: host.metadata } : {}),
         ...(host.metadata?.displayName || host.metadata?.machine
           ? { hostName: host.metadata.displayName ?? host.metadata.machine }
-          : {}),
+        : {}),
       });
     }
     const seenSessionIds = new Set(sessions.map((session) => session.sessionId));
@@ -1192,9 +1222,122 @@ export class AcpRelayBroker {
       sessions.push(session);
       seenSessionIds.add(session.sessionId);
     }
+    for (const binding of storedBindings) {
+      if (seenSessionIds.has(binding.sessionId) || activeBindingKeys.has(sessionBindingKey(binding))) {
+        continue;
+      }
+      const host = hostsById.get(binding.hostId);
+      if (!host) {
+        continue;
+      }
+      sessions.push({
+        hostId: binding.hostId,
+        hostOnline: host.online,
+        lifecycle: "offline",
+        latestEvent: host.online
+          ? "Session is not attached to a live ACP client."
+          : "Host is offline. Session history is retained for inspection.",
+        sessionId: binding.sessionId,
+        status: "offline",
+        title: createSessionTitle({
+          agent: binding.agent,
+          host,
+          workspaceRoots: binding.workspaceRoots ?? [],
+        }),
+        workspaceRoots: binding.workspaceRoots ?? [],
+        ...(binding.agent ? { agent: binding.agent } : {}),
+        ...(binding.createdAt ? { createdAt: binding.createdAt } : {}),
+        ...(binding.updatedAt ? { updatedAt: binding.updatedAt } : {}),
+        ...(host.metadata ? { hostMetadata: host.metadata } : {}),
+        ...(host.metadata?.displayName || host.metadata?.machine
+          ? { hostName: host.metadata.displayName ?? host.metadata.machine }
+          : {}),
+      });
+      seenSessionIds.add(binding.sessionId);
+    }
     return {
       ok: true,
       sessions: sessions.slice(0, input.limit),
+    };
+  }
+
+  async checkSessionHealth(input: {
+    accountId: string;
+    clientId: string;
+  }): Promise<{ health: AcpRelaySessionHealth; ok: true }> {
+    const [hostsResult, sessionsResult] = await Promise.all([
+      this.discoverableHostsForAccount({
+        accountId: input.accountId,
+        clientId: input.clientId,
+      }),
+      this.listSessions({
+        accountId: input.accountId,
+        clientId: input.clientId,
+      }),
+    ]);
+    const hosts = hostsResult.ok ? hostsResult.hosts : [];
+    const onlineHostCount = hosts.filter((host) => host.online).length;
+    const liveSessions = sessionsResult.sessions.filter((session) => session.lifecycle !== "offline");
+    const offlineSessions = sessionsResult.sessions.filter((session) => session.lifecycle === "offline");
+    const failedLiveSessions = liveSessions.filter((session) => session.status === "failed");
+    const checks: AcpRelaySessionHealth["checks"] = [
+      {
+        id: "account_session",
+        label: "Account session",
+        message: "Workbench account session is valid.",
+        status: "ok",
+      },
+      {
+        id: "relay",
+        label: "Relay",
+        message: "Relay API and account shard responded.",
+        status: "ok",
+      },
+      onlineHostCount > 0
+        ? {
+            id: "host",
+            label: "Host",
+            message: `${onlineHostCount} host${onlineHostCount === 1 ? "" : "s"} online.`,
+            status: "ok",
+          }
+        : {
+            id: "host",
+            label: "Host",
+            message: hosts.length > 0
+              ? "No host is online. Start or reconnect a Free host."
+              : "No authorized host is registered for this account.",
+            status: "error",
+          },
+      liveSessions.length > 0
+        ? {
+            id: "session",
+            label: "Session",
+            message: failedLiveSessions.length > 0
+              ? `${failedLiveSessions.length} live session${failedLiveSessions.length === 1 ? "" : "s"} failed recently.`
+              : `${liveSessions.length} live session${liveSessions.length === 1 ? "" : "s"} visible.`,
+            status: failedLiveSessions.length > 0 ? "warning" : "ok",
+          }
+        : {
+            id: "session",
+            label: "Session",
+            message: offlineSessions.length > 0
+              ? "No live session. Offline session history is available."
+              : "No live session. Start a session from an ACP client.",
+            status: "warning",
+          },
+    ];
+    const hasError = checks.some((check) => check.status === "error");
+    const hasWarning = checks.some((check) => check.status === "warning");
+    return {
+      health: {
+        checkedAt: new Date().toISOString(),
+        checks,
+        liveSessionCount: liveSessions.length,
+        offlineSessionCount: offlineSessions.length,
+        onlineHostCount,
+        status: hasError ? "unhealthy" : hasWarning ? "degraded" : "healthy",
+      },
+      ok: true,
     };
   }
 
@@ -1246,6 +1389,7 @@ export class AcpRelayBroker {
           createdAt: state?.startedAt,
           host,
           latestEvent: "Waiting for host runtime response.",
+          lifecycle: "live",
           requestId: request.id,
           sessionId: `starting:${connectionId}:${String(request.id)}`,
           status: "starting",
@@ -1263,6 +1407,7 @@ export class AcpRelayBroker {
           connectionId,
           host,
           latestEvent: "Waiting for ACP client to consume authorization.",
+          lifecycle: "live",
           requestId: sessionSelectionId,
           sessionId: `authorization:${connectionId}:${sessionSelectionId}`,
           status: "waiting_authorization",
@@ -1284,6 +1429,7 @@ export class AcpRelayBroker {
           error: failure.error,
           host,
           latestEvent: "Session start failed.",
+          lifecycle: "live",
           requestId: failure.requestId,
           sessionId: `failed:${failure.connectionId}:${String(failure.requestId)}`,
           status: "failed",
@@ -1331,6 +1477,7 @@ export class AcpRelayBroker {
     error?: string;
     host: { hostId: string; metadata?: HostMetadata; online?: boolean };
     latestEvent?: string;
+    lifecycle?: AcpRelaySessionSummary["lifecycle"];
     requestId?: string | number;
     sessionId: string;
     status: NonNullable<AcpRelaySessionSummary["status"]>;
@@ -1340,8 +1487,14 @@ export class AcpRelayBroker {
     return {
       hostId: input.host.hostId,
       hostOnline: input.host.online,
+      lifecycle: input.lifecycle ?? "live",
       sessionId: input.sessionId,
       status: input.status,
+      title: createSessionTitle({
+        agent: input.agent,
+        host: input.host,
+        workspaceRoots: input.workspaceRoots,
+      }),
       workspaceRoots: input.workspaceRoots,
       ...(input.agent ? { agent: input.agent } : {}),
       ...(input.connectionId ? { connectionId: input.connectionId } : {}),
@@ -5660,6 +5813,40 @@ function readPayloadSessionId(payload: Record<string, unknown>): string | undefi
   const params = isRecord(payload.params) ? payload.params : undefined;
   const result = isRecord(payload.result) ? payload.result : undefined;
   return readString(params?.sessionId) ?? readString(result?.sessionId);
+}
+
+function sessionBindingKey(binding: Pick<
+  AcpRelaySessionBindingRecord,
+  "accountId" | "clientId" | "hostId" | "sessionId"
+>): string {
+  return `${binding.accountId}:${binding.clientId}:${binding.hostId}:${binding.sessionId}`;
+}
+
+function createSessionTitle(input: {
+  agent?: AcpRemoteAgentGrant;
+  host: { hostId: string; metadata?: HostMetadata };
+  workspaceRoots: readonly string[];
+}): string {
+  const workspace = input.workspaceRoots[0]
+    ? readablePathSegment(input.workspaceRoots[0])
+    : undefined;
+  const agent = input.agent
+    ? "id" in input.agent
+      ? input.agent.id
+      : input.agent.command || input.agent.type
+    : undefined;
+  const host = input.host.metadata?.displayName ?? input.host.metadata?.machine;
+  return [workspace, agent, host].filter(Boolean).join(" · ") || shortReadableId(input.host.hostId);
+}
+
+function readablePathSegment(path: string): string {
+  const normalized = path.replace(/\/+$/, "");
+  const segment = normalized.split("/").filter(Boolean).pop();
+  return segment ? `/${segment}` : normalized || "/";
+}
+
+function shortReadableId(value: string): string {
+  return value.length > 12 ? `${value.slice(0, 8)}...${value.slice(-4)}` : value;
 }
 
 function isJsonRpcRequestPayload(value: unknown): value is RelayJsonRpcRequest {

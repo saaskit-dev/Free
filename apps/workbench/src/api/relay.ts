@@ -3,6 +3,7 @@ import type {
   AuthorizationSession,
   HostRecord,
   LoginApproval,
+  SessionHealth,
   SessionRecord,
 } from "../types";
 
@@ -255,6 +256,10 @@ export async function loadHosts() {
 
 export async function loadSessions() {
   return readJsonResult<{ sessions: SessionRecord[] }>("/api/sessions");
+}
+
+export async function checkSessionHealth() {
+  return readJsonResult<SessionHealth>("/api/sessions/health");
 }
 
 export async function updateHostName(hostId: string, name: string) {

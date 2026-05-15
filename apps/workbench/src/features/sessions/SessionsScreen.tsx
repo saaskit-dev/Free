@@ -8,7 +8,8 @@ import {
   View,
 } from "react-native";
 
-import type { HostRecord, LanguageMode, LoadState, SessionRecord } from "../../types";
+import { checkSessionHealth } from "../../api/relay";
+import type { HostRecord, LanguageMode, LoadState, SessionHealth, SessionRecord } from "../../types";
 import { colors, common, typography } from "../../ui/theme";
 import { t } from "../../workbench/preferences";
 
@@ -21,6 +22,11 @@ type SessionsScreenProps = {
 type AvailabilityFilter = "all" | "online" | "offline";
 type StatusFilter = "all" | NonNullable<SessionRecord["status"]>;
 type FilterId = "agent" | "availability" | "host" | "status" | "workspace";
+type HealthState =
+  | { status: "idle" }
+  | { status: "checking" }
+  | { status: "ready"; value: SessionHealth }
+  | { status: "error"; message: string };
 
 export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProps) {
   const { width } = useWindowDimensions();
@@ -33,6 +39,8 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
   const [status, setStatus] = useState<StatusFilter>("all");
   const [openFilter, setOpenFilter] = useState<FilterId | undefined>();
   const [copiedKey, setCopiedKey] = useState<string | undefined>();
+  const [health, setHealth] = useState<HealthState>({ status: "idle" });
+  const [showOffline, setShowOffline] = useState(false);
 
   const hostLabels = useMemo(() => {
     const labels = new Map<string, string>();
@@ -75,6 +83,7 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
     if (sessions.status !== "ready") return [];
     const needle = query.trim().toLowerCase();
     return sessions.data.filter((session) => {
+      if (!showOffline && session.lifecycle === "offline") return false;
       if (hostId !== "all" && session.hostId !== hostId) return false;
       if (agentKey !== "all" && readAgentKey(session) !== agentKey) return false;
       if (workspaceRoot !== "all" && !session.workspaceRoots.includes(workspaceRoot)) return false;
@@ -87,6 +96,7 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
         String(session.requestId ?? ""),
         session.connectionId ?? "",
         session.hostId,
+        session.title ?? "",
         readSessionHostLabel(session, hostLabels),
         readAgentLabel(session),
         readStatusLabel(session.status, language),
@@ -96,7 +106,25 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
       ];
       return values.some((value) => value.toLowerCase().includes(needle));
     });
-  }, [agentKey, availability, hostId, hostLabels, language, query, sessions, status, workspaceRoot]);
+  }, [agentKey, availability, hostId, hostLabels, language, query, sessions, showOffline, status, workspaceRoot]);
+
+  const sessionCounts = useMemo(() => {
+    if (sessions.status !== "ready") {
+      return { live: 0, offline: 0, total: 0 };
+    }
+    return sessions.data.reduce(
+      (counts, session) => {
+        counts.total += 1;
+        if (session.lifecycle === "offline") {
+          counts.offline += 1;
+        } else {
+          counts.live += 1;
+        }
+        return counts;
+      },
+      { live: 0, offline: 0, total: 0 },
+    );
+  }, [sessions]);
 
   const copyValue = (value: string, key: string) => {
     void copyText(value).then((ok) => {
@@ -105,6 +133,22 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
       setTimeout(() => {
         setCopiedKey((current) => current === key ? undefined : current);
       }, 1400);
+    });
+  };
+
+  const runHealthCheck = () => {
+    setHealth({ status: "checking" });
+    void checkSessionHealth().then((result) => {
+      if (!result.ok) {
+        setHealth({ message: result.message, status: "error" });
+        return;
+      }
+      setHealth({ status: "ready", value: result.value });
+    }).catch((error: unknown) => {
+      setHealth({
+        message: error instanceof Error ? error.message : String(error),
+        status: "error",
+      });
     });
   };
 
@@ -148,9 +192,33 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
           value={query}
         />
         <Text style={common.eyebrow}>
-          {visibleSessions.length} / {sessions.data.length}
+          {visibleSessions.length} / {showOffline ? sessionCounts.total : sessionCounts.live}
         </Text>
+        <Pressable
+          accessibilityLabel={t(language, "检查链路健康", "Check chain health")}
+          accessibilityRole="button"
+          onPress={runHealthCheck}
+          style={actionButtonStyle}
+        >
+          <Text style={actionButtonTextStyle}>
+            {health.status === "checking" ? t(language, "检查中", "Checking") : t(language, "健康检查", "Health")}
+          </Text>
+        </Pressable>
+        <Pressable
+          accessibilityLabel={t(language, "显示离线 Session", "Show offline sessions")}
+          accessibilityRole="button"
+          onPress={() => setShowOffline((value) => !value)}
+          style={[actionButtonStyle, showOffline ? selectButtonActiveStyle : null]}
+        >
+          <Text style={actionButtonTextStyle}>
+            {showOffline
+              ? t(language, "隐藏离线", "Hide offline")
+              : t(language, `显示离线 ${sessionCounts.offline}`, `Show offline ${sessionCounts.offline}`)}
+          </Text>
+        </Pressable>
       </View>
+
+      <HealthPanel health={health} language={language} />
 
       <View style={filterRailStyle}>
         <SelectFilter
@@ -163,6 +231,7 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
             ["starting", t(language, "启动中", "Starting")],
             ["waiting_authorization", t(language, "等待授权", "Waiting")],
             ["failed", t(language, "失败", "Failed")],
+            ["offline", t(language, "离线历史", "Offline history")],
           ]}
           value={status}
           onChange={(value) => {
@@ -228,7 +297,7 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
         />
       </View>
 
-      {sessions.data.length === 0 ? (
+      {sessionCounts.total === 0 ? (
         <Panel
           title={t(language, "暂无 Session", "No sessions")}
           body={t(
@@ -240,7 +309,15 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
       ) : visibleSessions.length === 0 ? (
         <Panel
           title={t(language, "没有匹配的 Session", "No matching sessions")}
-          body={t(language, "调整筛选条件或搜索词后再查看。", "Adjust the filters or search text.")}
+          body={
+            !showOffline && sessionCounts.offline > 0
+              ? t(
+                  language,
+                  "当前没有激活 Session。离线历史已默认隐藏，可点击显示离线查看。",
+                  "No live sessions. Offline history is hidden by default.",
+                )
+              : t(language, "调整筛选条件或搜索词后再查看。", "Adjust the filters or search text.")
+          }
         />
       ) : (
         <View style={[common.panel, { overflow: "hidden" }]}>
@@ -258,6 +335,60 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
           ))}
         </View>
       )}
+    </View>
+  );
+}
+
+function HealthPanel({
+  health,
+  language,
+}: {
+  health: HealthState;
+  language: LanguageMode;
+}) {
+  if (health.status === "idle") return null;
+  if (health.status === "checking") {
+    return (
+      <View style={[common.panel, healthPanelStyle]}>
+        <Text style={healthTitleStyle}>{t(language, "链路健康检查中", "Checking chain health")}</Text>
+      </View>
+    );
+  }
+  if (health.status === "error") {
+    return (
+      <View style={[common.panel, healthPanelStyle]}>
+        <Text style={[healthTitleStyle, { color: colors.coral }]}>
+          {t(language, "链路健康检查失败", "Health check failed")}
+        </Text>
+        <Text style={secondaryTextStyle}>{health.message}</Text>
+      </View>
+    );
+  }
+  const title = health.value.status === "healthy"
+    ? t(language, "链路健康", "Chain healthy")
+    : health.value.status === "degraded"
+      ? t(language, "链路部分可用", "Chain degraded")
+      : t(language, "链路异常", "Chain unhealthy");
+  const tone = health.value.status === "healthy"
+    ? colors.green
+    : health.value.status === "degraded"
+      ? colors.cyan
+      : colors.coral;
+  return (
+    <View style={[common.panel, healthPanelStyle]}>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, justifyContent: "space-between" }}>
+        <Text style={[healthTitleStyle, { color: tone }]}>{title}</Text>
+        <Text style={common.eyebrow}>
+          {t(language, "激活", "Live")} {health.value.liveSessionCount} · {t(language, "离线", "Offline")} {health.value.offlineSessionCount} · Host {health.value.onlineHostCount}
+        </Text>
+      </View>
+      <View style={{ gap: 5 }}>
+        {health.value.checks.map((check) => (
+          <Text key={check.id} style={secondaryTextStyle}>
+            {readHealthCheckLabel(check.status, language)} {readHealthCheckName(check.id, language)}: {readHealthCheckMessage(check, health.value, language)}
+          </Text>
+        ))}
+      </View>
     </View>
   );
 }
@@ -342,14 +473,15 @@ function SessionRow({
     ? session.workspaceRoots.map(readWorkspaceLabel).join(" · ")
     : t(language, "未限定目录", "No workspace limit");
   const updated = formatTime(session.updatedAt ?? session.createdAt, language);
+  const title = session.title?.trim() || `${readAgentLabel(session)} · ${hostLabel}`;
   return (
     <View style={[rowStyle, compact ? compactRowStyle : null]}>
       <View style={{ flex: compact ? undefined : 1.05, minWidth: 0 }}>
         <Text numberOfLines={1} style={primaryTextStyle}>
-          {hostLabel}
+          {title}
         </Text>
         <Text numberOfLines={1} style={secondaryMonoStyle}>
-          {shortId(session.hostId)}
+          {hostLabel} · {shortId(session.sessionId)}
         </Text>
       </View>
       <View style={{ flex: compact ? undefined : 0.9, minWidth: 0 }}>
@@ -544,13 +676,50 @@ function readStatusLabel(status: SessionRecord["status"], language: LanguageMode
   if (status === "waiting_authorization") return t(language, "等待授权", "Waiting");
   if (status === "starting") return t(language, "启动中", "Starting");
   if (status === "failed") return t(language, "失败", "Failed");
+  if (status === "offline") return t(language, "离线历史", "Offline");
   return t(language, "运行中", "Active");
 }
 
 function readStatusTone(status: SessionRecord["status"]): string {
   if (status === "failed") return colors.coral;
   if (status === "starting" || status === "waiting_authorization") return colors.cyan;
+  if (status === "offline") return colors.muted;
   return colors.green;
+}
+
+function readHealthCheckLabel(status: SessionHealth["checks"][number]["status"], language: LanguageMode): string {
+  if (status === "ok") return t(language, "正常", "OK");
+  if (status === "warning") return t(language, "注意", "Warning");
+  return t(language, "异常", "Error");
+}
+
+function readHealthCheckName(id: SessionHealth["checks"][number]["id"], language: LanguageMode): string {
+  if (id === "account_session") return t(language, "账号会话", "Account session");
+  if (id === "relay") return t(language, "Relay", "Relay");
+  if (id === "host") return t(language, "主机", "Host");
+  return t(language, "Session", "Session");
+}
+
+function readHealthCheckMessage(
+  check: SessionHealth["checks"][number],
+  health: SessionHealth,
+  language: LanguageMode,
+): string {
+  if (check.id === "account_session") return t(language, "Workbench 登录会话有效。", "Workbench account session is valid.");
+  if (check.id === "relay") return t(language, "Relay API 与账号分片可响应。", "Relay API and account shard responded.");
+  if (check.id === "host") {
+    if (health.onlineHostCount > 0) {
+      return t(language, `${health.onlineHostCount} 台主机在线。`, `${health.onlineHostCount} host${health.onlineHostCount === 1 ? "" : "s"} online.`);
+    }
+    return t(language, "没有在线主机，需启动或重连 Free host。", "No host is online. Start or reconnect a Free host.");
+  }
+  if (health.liveSessionCount > 0) {
+    return t(language, `${health.liveSessionCount} 个激活 Session 可见。`, `${health.liveSessionCount} live session${health.liveSessionCount === 1 ? "" : "s"} visible.`);
+  }
+  if (health.offlineSessionCount > 0) {
+    return t(language, "没有激活 Session，存在离线历史。", "No live session. Offline session history is available.");
+  }
+  return t(language, "没有激活 Session，请从 ACP 客户端启动。", "No live session. Start a session from an ACP client.");
 }
 
 function readWorkspaceLabel(path: string): string {
@@ -597,6 +766,17 @@ const filterRailStyle = {
   flexWrap: "wrap" as const,
   gap: 8,
   paddingBottom: 2,
+};
+
+const healthPanelStyle = {
+  gap: 8,
+  padding: 12,
+};
+
+const healthTitleStyle = {
+  color: colors.ink,
+  fontFamily: typography.sansSemi,
+  fontSize: 14,
 };
 
 const selectButtonStyle = {

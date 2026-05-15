@@ -559,7 +559,7 @@ describe("AcpRelayBroker", () => {
     });
   });
 
-  it("does not list stored session bindings as current sessions", async () => {
+  it("lists stored session bindings as offline history", async () => {
     const broker = new AcpRelayBroker({
       controlPlaneStore: new AcpRelayInMemoryControlPlaneStore({
         accounts: [{ accountId: "acct-1" }],
@@ -606,7 +606,21 @@ describe("AcpRelayBroker", () => {
       broker.listSessions({ accountId: "acct-1", clientId: "browser-client" }),
     ).resolves.toEqual({
       ok: true,
-      sessions: [],
+      sessions: [
+        expect.objectContaining({
+          agent: { id: "codex-acp" },
+          hostId: "host-1",
+          hostName: "Studio Mac",
+          hostOnline: false,
+          latestEvent: "Host is offline. Session history is retained for inspection.",
+          lifecycle: "offline",
+          sessionId: "session-1",
+          status: "offline",
+          title: "/dev · codex-acp · Studio Mac",
+          updatedAt: "2026-05-14T01:00:00.000Z",
+          workspaceRoots: ["/Users/dev"],
+        }),
+      ],
     });
   });
 
@@ -702,7 +716,10 @@ describe("AcpRelayBroker", () => {
           agent: { id: "codex-acp" },
           hostId: "host-1",
           hostName: "Studio Mac",
+          lifecycle: "live",
           sessionId: "live-session",
+          status: "active",
+          title: "/dev · codex-acp · Studio Mac",
           workspaceRoots: ["/Users/dev"],
         }),
       ],
@@ -785,6 +802,60 @@ describe("AcpRelayBroker", () => {
     ).resolves.toEqual({
       ok: true,
       sessions: [],
+    });
+  });
+
+  it("reports session chain health with host and session status", async () => {
+    const broker = new AcpRelayBroker({
+      controlPlaneStore: new AcpRelayInMemoryControlPlaneStore({
+        accounts: [{ accountId: "acct-1" }],
+        clientDevices: [
+          { accountId: "acct-1", clientId: "browser-client" },
+          { accountId: "acct-1", clientId: "zed-client" },
+        ],
+        grants: [
+          {
+            accountId: "acct-1",
+            clientId: "browser-client",
+            hostId: "host-1",
+            policyVersion: 1,
+            scopes: ["acp:connect"],
+          },
+        ],
+        hosts: [
+          {
+            accountId: "acct-1",
+            hostId: "host-1",
+            metadata: {
+              agentTypes: [],
+              displayName: "Studio Mac",
+              workspaceRoots: [{ path: "/Users/dev" }],
+            },
+          },
+        ],
+        sessionBindings: [
+          {
+            accountId: "acct-1",
+            agent: { id: "codex-acp" },
+            clientId: "zed-client",
+            hostId: "host-1",
+            sessionId: "session-1",
+            workspaceRoots: ["/Users/dev"],
+          },
+        ],
+      }),
+    });
+
+    await expect(
+      broker.checkSessionHealth({ accountId: "acct-1", clientId: "browser-client" }),
+    ).resolves.toMatchObject({
+      health: {
+        liveSessionCount: 0,
+        offlineSessionCount: 1,
+        onlineHostCount: 0,
+        status: "unhealthy",
+      },
+      ok: true,
     });
   });
 

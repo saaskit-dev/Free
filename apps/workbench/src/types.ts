@@ -34,6 +34,7 @@ export type SessionRecord = {
   connectionId?: string;
   createdAt?: string;
   error?: string;
+  lifecycle?: "live" | "offline";
   hostId: string;
   hostMetadata?: HostRecord["metadata"];
   hostName?: string;
@@ -41,9 +42,24 @@ export type SessionRecord = {
   latestEvent?: string;
   requestId?: string | number;
   sessionId: string;
-  status?: "waiting_authorization" | "starting" | "active" | "failed";
+  status?: "waiting_authorization" | "starting" | "active" | "failed" | "offline";
+  title?: string;
   updatedAt?: string;
   workspaceRoots: string[];
+};
+
+export type SessionHealth = {
+  checkedAt: string;
+  checks: {
+    id: "account_session" | "relay" | "host" | "session";
+    label: string;
+    message: string;
+    status: "ok" | "warning" | "error";
+  }[];
+  liveSessionCount: number;
+  offlineSessionCount: number;
+  onlineHostCount: number;
+  status: "healthy" | "degraded" | "unhealthy";
 };
 
 export type AuthorizationAgent = {

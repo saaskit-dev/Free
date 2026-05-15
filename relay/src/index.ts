@@ -121,6 +121,7 @@ export default {
       url.pathname !== "/api/otel/traces" &&
       url.pathname !== "/api/session" &&
       url.pathname !== "/api/sessions" &&
+      url.pathname !== "/api/sessions/health" &&
       url.pathname !== "/api/login/start" &&
       url.pathname !== "/api/login/callback" &&
       url.pathname !== "/api/login/confirm" &&
@@ -230,7 +231,8 @@ export default {
     if (
       url.pathname === "/api/hosts" ||
       url.pathname.startsWith("/api/hosts/") ||
-      url.pathname === "/api/sessions"
+      url.pathname === "/api/sessions" ||
+      url.pathname === "/api/sessions/health"
     ) {
       const accountSession = await verifyAccountSessionRequest({
         env,
@@ -477,6 +479,10 @@ export class AcpRelayShard {
 
     if (url.pathname === "/api/sessions") {
       return this.handleSessionsApi(request, url);
+    }
+
+    if (url.pathname === "/api/sessions/health") {
+      return this.handleSessionHealthApi(request);
     }
 
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
@@ -1094,6 +1100,32 @@ export class AcpRelayShard {
     });
   }
 
+  private async handleSessionHealthApi(request: Request): Promise<Response> {
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      return json({ error: "Method not allowed." }, {
+        headers: { allow: "GET, HEAD" },
+        status: 405,
+      });
+    }
+    const accountId = resolveVerifiedAccountId(request);
+    if (!accountId) {
+      return json({ error: "ACP relay account session is required." }, { status: 401 });
+    }
+    const clientId =
+      request.headers.get("x-acp-verified-client-id") ??
+      request.headers.get("x-acp-verified-principal-id") ??
+      "";
+    const result = await this.broker.checkSessionHealth({
+      accountId,
+      clientId,
+    });
+    return json(result.health, {
+      headers: {
+        "Cache-Control": "no-store",
+      },
+    });
+  }
+
   private async handleAttachmentUpload(
     request: Request,
     url: URL,
@@ -1311,6 +1343,7 @@ function isWorkbenchApiCorsPath(pathname: string): boolean {
     pathname === "/health" ||
     pathname === "/api/session" ||
     pathname === "/api/sessions" ||
+    pathname === "/api/sessions/health" ||
     pathname === "/api/login/start" ||
     pathname === "/api/login/callback" ||
     pathname === "/api/login/confirm" ||
