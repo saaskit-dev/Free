@@ -115,7 +115,9 @@ describe("install maintenance", () => {
     }
   });
 
-  it("migrates an installed launchd service to the free binary launcher", async () => {
+  const macIt = process.platform === "darwin" ? it : it.skip;
+
+  macIt("migrates an installed launchd service to the free binary launcher", async () => {
     const root = join(tmpdir(), `free-install-maintenance-${randomUUID()}`);
     const prefix = join(root, "prefix");
     const home = join(root, "home");
