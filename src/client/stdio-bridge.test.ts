@@ -157,6 +157,107 @@ describe("createAcpRemoteStdioBridge", () => {
     }
   });
 
+  it("auto-authorizes the matching session selection before forwarding session/new", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const fetchBodies: unknown[] = [];
+    const fetchUrls: string[] = [];
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      fetchUrls.push(String(url));
+      fetchBodies.push(JSON.parse(String(init?.body ?? "{}")) as unknown);
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { "content-type": "application/json" },
+        status: 200,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const sockets: TestSocket[] = [];
+    const bridge = createAcpRemoteStdioBridge({
+      autoAuthorize: {
+        accountSession: "account-session-1",
+        hostId: "host-1",
+      },
+      clientId: "client-1",
+      connectionId: "connection-1",
+      input,
+      output,
+      relayUrl: "ws://127.0.0.1:8791",
+      socketFactory() {
+        const socket = new TestSocket();
+        sockets.push(socket);
+        return socket;
+      },
+    });
+
+    try {
+      sockets[0]?.emitMessage(
+        JSON.stringify({
+          id: 1,
+          jsonrpc: "2.0",
+          result: {
+            authMethods: [{
+              _meta: {
+                "acp-runtime/remote/authUrl":
+                  "http://127.0.0.1:8791/authorize?connectionId=connection-1",
+              },
+              id: "acp-runtime-browser",
+              name: "Sign in with Free",
+            }],
+          },
+        }),
+      );
+      await waitFor(() => fetchMock.mock.calls.length === 1);
+
+      input.write(
+        `${JSON.stringify({
+          id: 2,
+          jsonrpc: "2.0",
+          method: "session/new",
+          params: { cwd: "/tmp/project", mcpServers: [] },
+        })}\n`,
+      );
+
+      await waitFor(() => fetchMock.mock.calls.length === 2);
+      await waitFor(() =>
+        sockets[0]?.sent.some((message) => {
+          try {
+            return JSON.parse(message).method === "session/new";
+          } catch {
+            return false;
+          }
+        }) ?? false,
+      );
+      const sessionAuthorizeUrl = new URL(fetchUrls[1]!);
+      const sessionAuthorizeBody = fetchBodies[1] as {
+        hostId?: string;
+        sessionSelectionId?: string;
+      };
+      const outboundMessage = sockets[0]!.sent.find((message) => {
+        try {
+          return JSON.parse(message).method === "session/new";
+        } catch {
+          return false;
+        }
+      })!;
+      const outbound = JSON.parse(outboundMessage) as {
+        params?: { _meta?: Record<string, string> };
+      };
+      const outboundSelectionId =
+        outbound.params?._meta?.["acp-runtime/remote/sessionSelectionId"];
+
+      expect(sessionAuthorizeUrl.searchParams.get("sessionSelectionId")).toBe(
+        outboundSelectionId,
+      );
+      expect(sessionAuthorizeBody).toMatchObject({
+        hostId: "host-1",
+        sessionSelectionId: outboundSelectionId,
+      });
+    } finally {
+      bridge.close();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("injects trace metadata and reuses it for response debug context", async () => {
     const input = new PassThrough();
     const output = new PassThrough();

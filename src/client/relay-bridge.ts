@@ -344,6 +344,21 @@ function createHostDisplayNameMap(
   return labels;
 }
 
+export function createBridgeAutoAuthorizeOptions(input: {
+  accountCredential: AcpRemoteAccountSessionCredential;
+  hostId: string;
+}): {
+  accountSession: string;
+  hostId: string;
+} {
+  return {
+    accountSession: encodeAcpRemoteAccountSession(
+      input.accountCredential.accountSession,
+    ),
+    hostId: input.hostId,
+  };
+}
+
 function readHostMetadataString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
@@ -453,6 +468,10 @@ export async function runFreeBridgeCommand(argv: readonly string[] = process.arg
   };
 
   const bridge = createAcpRemoteStdioBridge({
+    autoAuthorize: createBridgeAutoAuthorizeOptions({
+      accountCredential,
+      hostId,
+    }),
     connectionId,
     connectionProof,
     connectionProofCredential: accountCredential,

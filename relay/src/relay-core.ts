@@ -1729,6 +1729,9 @@ export class AcpRelayBroker {
     const sessionSelectionId = normalizeSessionSelectionId(
       input.sessionSelectionId,
     );
+    const shouldRecordSessionSelection =
+      sessionSelectionId !== DEFAULT_SESSION_SELECTION_ID ||
+      hasSessionSelection(input);
     if (wasRouteReady) {
       const waiter = client.sessionSelectionWaiters.get(sessionSelectionId);
       if (waiter) {
@@ -1739,13 +1742,13 @@ export class AcpRelayBroker {
           }
         }
         waiter(client.lastAuthorization);
-      } else if (hasSessionSelection(input)) {
+      } else if (shouldRecordSessionSelection) {
         client.pendingSessionSelections.set(
           sessionSelectionId,
           client.lastAuthorization,
         );
       }
-    } else if (hasSessionSelection(input)) {
+    } else if (shouldRecordSessionSelection) {
       client.pendingSessionSelections.set(
         sessionSelectionId,
         client.lastAuthorization,
@@ -1813,6 +1816,22 @@ export class AcpRelayBroker {
     if (!message) {
       client.socket.close(1003, "Invalid ACP JSON-RPC payload.");
       return;
+    }
+    if (isJsonRpcRequest(message)) {
+      const details = readRelayTransportPayloadDetails(message, client);
+      this.logRelayLifecycle({
+        accountId: client.accountId,
+        clientId: client.clientId,
+        connectionId,
+        hostId: client.hostId,
+        eventName: "acp.relay.client_request.received",
+        jsonRpcId: message.id,
+        method: message.method,
+        routeReady: client.routeReady,
+        sessionId: details.sessionId,
+        traceContext: details.traceContext,
+        transport: client.transport,
+      });
     }
 
     if (!client.routeReady) {
@@ -1986,6 +2005,7 @@ export class AcpRelayBroker {
     pendingReconnect?: boolean;
     reason?: string;
     replaced?: boolean;
+    routeReady?: boolean;
     seq?: number;
     sessionId?: string;
     severityText?: "ERROR" | "INFO";
@@ -2026,7 +2046,7 @@ export class AcpRelayBroker {
       if (
         client &&
         frame.channelKind === AcpRemoteChannelKind.Acp &&
-        isSuppressedHostBootstrapResponse(client, frame.payload)
+        isSuppressedHostBootstrapResponse(client, frame.connectionId, frame.payload)
       ) {
         return frame.connectionId;
       }
@@ -5448,6 +5468,7 @@ function sessionControlRequestsToKeyMap(
 
 function isSuppressedHostBootstrapResponse(
   client: RelayClient,
+  connectionId: string,
   payload: unknown,
 ): boolean {
   if (!isRecord(payload) || payload.jsonrpc !== "2.0" || !("id" in payload)) {
@@ -5455,11 +5476,21 @@ function isSuppressedHostBootstrapResponse(
   }
 
   const id = payload.id;
-  if (typeof id !== "string" || !client.hostBootstrapRequestIds.has(id)) {
+  if (typeof id !== "string") {
     return false;
   }
 
-  client.hostBootstrapRequestIds.delete(id);
+  const isKnownBootstrapResponse = client.hostBootstrapRequestIds.has(id);
+  const isRelayInternalBootstrapResponse =
+    id === `relay:${connectionId}:initialize` ||
+    id.startsWith(`relay:${connectionId}:session-control:`);
+  if (!isKnownBootstrapResponse && !isRelayInternalBootstrapResponse) {
+    return false;
+  }
+
+  if (isKnownBootstrapResponse) {
+    client.hostBootstrapRequestIds.delete(id);
+  }
   client.hostRequests.delete(id);
   client.hostRequestStates.delete(id);
   return true;

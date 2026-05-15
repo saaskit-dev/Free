@@ -17,6 +17,7 @@ export type RelayLifecycleEvent = {
   pendingReconnect?: boolean;
   reason?: string;
   replaced?: boolean;
+  routeReady?: boolean;
   seq?: number;
   sessionId?: string;
   severityText?: "ERROR" | "INFO";
@@ -42,6 +43,7 @@ export function logRelayLifecycle(input: RelayLifecycleEvent): void {
       pendingReconnect: input.pendingReconnect,
       reason: input.reason,
       replaced: input.replaced,
+      routeReady: input.routeReady,
       seq: input.seq,
       sessionId: input.sessionId,
       severityText: input.severityText ?? "INFO",

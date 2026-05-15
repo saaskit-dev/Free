@@ -409,6 +409,7 @@ export function createAcpRemoteStdioBridge(
   };
 
   const sendToRelay = (message: string) => {
+    const request = readJsonRpcRequest(message);
     if (!connection) {
       queueOutbound(message);
       return;
@@ -416,6 +417,19 @@ export function createAcpRemoteStdioBridge(
     reconnectBackoff.reset();
     trackInFlightOutbound(message);
     connection.send(message);
+    if (request) {
+      debugLog(
+        `relay message dispatched id=${formatJsonRpcId(request.id)} method=${request.method}`,
+        compactBridgeDebugContext({
+          connectionId,
+          direction: "client_to_relay",
+          eventName: "acp.remote.bridge.relay_dispatch",
+          jsonRpcId: request.id,
+          method: request.method,
+          severityText: "INFO",
+        }),
+      );
+    }
   };
 
   const retryRecoverablePromptFailure = (
@@ -934,7 +948,31 @@ export function createAcpRemoteStdioBridge(
         const isAuthenticate = isRelayAuthenticateRequest(outbound);
         const isSessionNew = isRelaySessionNewRequest(outbound);
         if (isAuthenticate || isSessionNew) {
-          if (authorizePromise) {
+          if (authUrl && options.autoAuthorize) {
+            const selectionId = sessionSelection?.selectionId;
+            if (selectionId) {
+              const urlWithSelection = addSessionSelectionIdToAuthUrl(
+                authUrl,
+                selectionId,
+              );
+              debugLog("auto-authorize relay session selection");
+              await authorizeRelay({
+                authUrl: urlWithSelection,
+                sessionSelectionId: selectionId,
+                ...options.autoAuthorize,
+              });
+              debugLog("auto-authorize relay session selection completed");
+            } else {
+              if (!authorizePromise) {
+                debugLog("auto-authorize relay browser authentication");
+                authorizePromise = authorizeRelay({
+                  authUrl,
+                  ...options.autoAuthorize,
+                });
+              }
+              await authorizePromise;
+            }
+          } else if (authorizePromise) {
             await authorizePromise;
           } else if (authUrl) {
             debugLog(
@@ -1707,10 +1745,16 @@ async function authorizeRelay(input: {
   accountSession: string;
   authUrl: string;
   hostId?: string;
+  sessionSelectionId?: string;
 }): Promise<void> {
   const hostId = input.hostId ?? await resolveSingleHostId(input);
   const response = await fetch(input.authUrl, {
-    body: JSON.stringify({ hostId }),
+    body: JSON.stringify({
+      hostId,
+      ...(input.sessionSelectionId
+        ? { sessionSelectionId: input.sessionSelectionId }
+        : {}),
+    }),
     headers: {
       Authorization: `Bearer ${input.accountSession}`,
       "Content-Type": "application/json",

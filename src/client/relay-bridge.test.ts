@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import type { AcpRemoteAccountSessionCredential } from "../protocol/account-session.js";
-import { waitForBridgeHostSelection } from "./relay-bridge.js";
+import { decodeAcpRemoteAccountSession } from "../protocol/account-session.js";
+import {
+  createBridgeAutoAuthorizeOptions,
+  waitForBridgeHostSelection,
+} from "./relay-bridge.js";
 
 const credential: AcpRemoteAccountSessionCredential = {
   accountSession: {
@@ -20,6 +24,21 @@ const credential: AcpRemoteAccountSessionCredential = {
 };
 
 describe("Free relay bridge host discovery recovery", () => {
+  it("passes the cached account session and selected host into bridge auto authorization", () => {
+    const autoAuthorize = createBridgeAutoAuthorizeOptions({
+      accountCredential: credential,
+      hostId: "host-1",
+    });
+
+    expect(autoAuthorize.hostId).toBe("host-1");
+    expect(decodeAcpRemoteAccountSession(autoAuthorize.accountSession))
+      .toMatchObject({
+        accountId: "account-1",
+        principalId: "client-1",
+        sessionId: "session-1",
+      });
+  });
+
   it("waits for a host to appear instead of exiting during a transient host restart", async () => {
     const delays: number[] = [];
     const logs: string[] = [];

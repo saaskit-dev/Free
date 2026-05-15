@@ -1914,6 +1914,211 @@ describe("AcpRelayBroker", () => {
     ]);
   });
 
+  it("treats a matching session selection id as an explicit default session choice", async () => {
+    const identity = await createProofFixture();
+    const broker = createBroker();
+    const [hostSocket, relayHostSocket] = createMemoryWebSocketPair();
+    const hostFrames: unknown[] = [];
+    hostSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        hostFrames.push(JSON.parse(event.data));
+      }
+    });
+    await broker.registerHost({
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: relayHostSocket,
+    });
+
+    const [, relayClientSocket] = createMemoryWebSocketPair();
+    broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      connectionProof: identity.proof,
+      socket: relayClientSocket,
+    });
+
+    await expect(
+      broker.authorizeClient({
+        connectionId: "conn-1",
+        hostId: "host-1",
+        sessionSelectionId: "conn-1:1:selection-1",
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    await broker.handleClientText(
+      "conn-1",
+      JSON.stringify({
+        id: 1,
+        jsonrpc: "2.0",
+        method: "session/new",
+        params: {
+          _meta: {
+            "acp-runtime/remote/sessionSelectionId": "conn-1:1:selection-1",
+          },
+          cwd: "/workspace/project",
+          mcpServers: [],
+        },
+      }),
+    );
+
+    await waitFor(() =>
+      hostFrames.some(
+        (frame) =>
+          isRecord(frame) &&
+          isRecord(frame.payload) &&
+          frame.payload.id === 1 &&
+          frame.payload.method === "session/new",
+      ),
+    );
+  });
+
+  it("suppresses duplicate relay bootstrap responses and still opens the selected session", async () => {
+    const identity = await createProofFixture();
+    const broker = createBroker();
+    const [hostSocket, relayHostSocket] = createMemoryWebSocketPair();
+    const hostFrames: unknown[] = [];
+    relayHostSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        void broker.handleHostText(event.data);
+      }
+    });
+    hostSocket.addEventListener("message", (event) => {
+      if (typeof event.data !== "string") {
+        return;
+      }
+      const frame = JSON.parse(event.data);
+      hostFrames.push(frame);
+      if (
+        !isRecord(frame) ||
+        frame.frameType !== AcpRemoteFrameType.Data ||
+        !isRecord(frame.payload)
+      ) {
+        return;
+      }
+      if (frame.payload.method === "initialize") {
+        const response = {
+          channelId: "acp",
+          channelKind: AcpRemoteChannelKind.Acp,
+          connectionId: "conn-1",
+          frameType: AcpRemoteFrameType.Data,
+          payload: {
+            id: frame.payload.id,
+            jsonrpc: "2.0",
+            result: {
+              agentCapabilities: {},
+              agentInfo: { name: "fake-agent", title: "Fake Agent" },
+              protocolVersion: 1,
+            },
+          },
+          seq: 100,
+        };
+        hostSocket.send(JSON.stringify(response));
+        hostSocket.send(JSON.stringify({ ...response, seq: 101 }));
+      }
+      if (frame.payload.method === "session/new") {
+        hostSocket.send(JSON.stringify({
+          channelId: "acp",
+          channelKind: AcpRemoteChannelKind.Acp,
+          connectionId: "conn-1",
+          frameType: AcpRemoteFrameType.Data,
+          payload: {
+            id: frame.payload.id,
+            jsonrpc: "2.0",
+            result: { sessionId: "session-1" },
+          },
+          seq: 102,
+        }));
+      }
+    });
+    await broker.registerHost({
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: relayHostSocket,
+    });
+
+    const [clientSocket, relayClientSocket] = createMemoryWebSocketPair();
+    const clientMessages: unknown[] = [];
+    clientSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        clientMessages.push(JSON.parse(event.data));
+      }
+    });
+    broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      connectionProof: identity.proof,
+      socket: relayClientSocket,
+    });
+
+    await expect(
+      broker.authorizeClient({
+        connectionId: "conn-1",
+        hostId: "host-1",
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    await expect(
+      broker.authorizeClient({
+        clientAgent: { id: "fake-agent" },
+        connectionId: "conn-1",
+        hostId: "host-1",
+        sessionSelectionId: "conn-1:1:selection-1",
+        workspaceRoots: ["/workspace"],
+      }),
+    ).resolves.toMatchObject({ ok: true });
+
+    await broker.handleClientText(
+      "conn-1",
+      JSON.stringify({
+        id: 1,
+        jsonrpc: "2.0",
+        method: "session/new",
+        params: {
+          _meta: {
+            "acp-runtime/remote/sessionSelectionId": "conn-1:1:selection-1",
+          },
+          cwd: "/workspace/project",
+          mcpServers: [],
+        },
+      }),
+    );
+
+    await waitFor(() =>
+      clientMessages.some(
+        (message) =>
+          isRecord(message) &&
+          message.id === 1 &&
+          isRecord(message.result) &&
+          message.result.sessionId === "session-1",
+      ),
+    );
+    expect(
+      clientMessages.some(
+        (message) =>
+          isRecord(message) &&
+          message.id === "relay:conn-1:initialize",
+      ),
+    ).toBe(false);
+    expect(
+      hostFrames.some(
+        (frame) =>
+          isRecord(frame) &&
+          isRecord(frame.payload) &&
+          frame.payload.method === "session/new" &&
+          frame.payload.id === 1,
+      ),
+    ).toBe(true);
+  });
+
   it("renders offline hosts as disabled authorization choices", () => {
     const page = createRelayAuthorizationPage({
       accountId: "acct-1",
