@@ -559,7 +559,7 @@ describe("AcpRelayBroker", () => {
     });
   });
 
-  it("lists account sessions with readable host metadata", async () => {
+  it("does not list stored session bindings as current sessions", async () => {
     const broker = new AcpRelayBroker({
       controlPlaneStore: new AcpRelayInMemoryControlPlaneStore({
         accounts: [{ accountId: "acct-1" }],
@@ -606,16 +606,7 @@ describe("AcpRelayBroker", () => {
       broker.listSessions({ accountId: "acct-1", clientId: "browser-client" }),
     ).resolves.toEqual({
       ok: true,
-      sessions: [
-        expect.objectContaining({
-          agent: { id: "codex-acp" },
-          hostId: "host-1",
-          hostName: "Studio Mac",
-          sessionId: "session-1",
-          updatedAt: "2026-05-14T01:00:00.000Z",
-          workspaceRoots: ["/Users/dev"],
-        }),
-      ],
+      sessions: [],
     });
   });
 
@@ -649,6 +640,18 @@ describe("AcpRelayBroker", () => {
           },
         ],
       }),
+    });
+    const [, relayHostSocket] = createMemoryWebSocketPair();
+    await broker.registerHost({
+      accountId: "acct-1",
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "codex-acp", label: "Codex" }],
+        displayName: "Studio Mac",
+        machine: "studio.local",
+        workspaceRoots: [{ path: "/Users/dev" }],
+      },
+      socket: relayHostSocket,
     });
     const [, relayClientSocket] = createMemoryWebSocketPair();
     broker.registerClient({
@@ -703,6 +706,85 @@ describe("AcpRelayBroker", () => {
           workspaceRoots: ["/Users/dev"],
         }),
       ],
+    });
+  });
+
+  it("does not list remembered client sessions when the host is offline", async () => {
+    const broker = new AcpRelayBroker({
+      controlPlaneStore: new AcpRelayInMemoryControlPlaneStore({
+        accounts: [{ accountId: "acct-1" }],
+        clientDevices: [
+          { accountId: "acct-1", clientId: "browser-client" },
+          { accountId: "acct-1", clientId: "zed-client" },
+        ],
+        grants: [
+          {
+            accountId: "acct-1",
+            clientId: "browser-client",
+            hostId: "host-1",
+            policyVersion: 1,
+            scopes: ["acp:connect"],
+          },
+        ],
+        hosts: [
+          {
+            accountId: "acct-1",
+            hostId: "host-1",
+            metadata: {
+              agentTypes: [{ id: "codex-acp", label: "Codex" }],
+              displayName: "Studio Mac",
+              machine: "studio.local",
+              workspaceRoots: [{ path: "/Users/dev" }],
+            },
+          },
+        ],
+      }),
+    });
+    const [, relayClientSocket] = createMemoryWebSocketPair();
+    broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "zed-client",
+      connectionId: "conn-1",
+      socket: relayClientSocket,
+      stateSnapshot: {
+        bufferedClientPayloads: [],
+        clientPendingFrames: [],
+        completedClientResponses: [
+          {
+            id: 1,
+            jsonrpc: "2.0",
+            result: {
+              _meta: {
+                "acp-runtime/remote/hostId": "host-1",
+                "acp-runtime/remote/sessionAgent": { id: "codex-acp" },
+                "acp-runtime/remote/sessionWorkspaceRoots": ["/Users/dev"],
+              },
+              sessionId: "remembered-session",
+            },
+          },
+        ],
+        connectionId: "conn-1",
+        hostId: "host-1",
+        hostPendingFrames: [],
+        hostQueuedFrames: [],
+        hostRequests: [],
+        lastAuthorization: {
+          agent: { id: "codex-acp" },
+          hostId: "host-1",
+          workspaceRoots: ["/Users/dev"],
+        },
+        routeReady: true,
+        seq: 0,
+        sessionControlRequests: [],
+      },
+    });
+
+    await expect(
+      broker.listSessions({ accountId: "acct-1", clientId: "browser-client" }),
+    ).resolves.toEqual({
+      ok: true,
+      sessions: [],
     });
   });
 

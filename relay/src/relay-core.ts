@@ -1153,18 +1153,7 @@ export class AcpRelayBroker {
     clientId: string;
     limit?: number;
   }): Promise<{ ok: true; sessions: AcpRelaySessionSummary[] }> {
-    const storedBindings = await this.controlPlaneStore.listSessionBindings({
-      accountId: input.accountId,
-      limit: input.limit,
-    });
-    const bindingsByKey = new Map<string, AcpRelaySessionBindingRecord>();
-    for (const binding of storedBindings) {
-      bindingsByKey.set(sessionBindingKey(binding), binding);
-    }
-    for (const binding of this.activeSessionBindings(input.accountId)) {
-      bindingsByKey.set(sessionBindingKey(binding), binding);
-    }
-    const bindings = [...bindingsByKey.values()];
+    const bindings = this.activeSessionBindings(input.accountId);
     const visibleHosts = await this.discoverableHostRecords({
       accountId: input.accountId,
       clientId: input.clientId,
@@ -1174,7 +1163,7 @@ export class AcpRelayBroker {
     const sessions: AcpRelaySessionSummary[] = [];
     for (const binding of bindings) {
       const host = hostsById.get(binding.hostId);
-      if (!host) {
+      if (!host?.online) {
         continue;
       }
       sessions.push({
@@ -5671,10 +5660,6 @@ function readPayloadSessionId(payload: Record<string, unknown>): string | undefi
   const params = isRecord(payload.params) ? payload.params : undefined;
   const result = isRecord(payload.result) ? payload.result : undefined;
   return readString(params?.sessionId) ?? readString(result?.sessionId);
-}
-
-function sessionBindingKey(binding: AcpRelaySessionBindingRecord): string {
-  return `${binding.accountId}:${binding.clientId}:${binding.hostId}:${binding.sessionId}`;
 }
 
 function isJsonRpcRequestPayload(value: unknown): value is RelayJsonRpcRequest {
