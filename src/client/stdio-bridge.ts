@@ -947,26 +947,30 @@ export function createAcpRemoteStdioBridge(
         );
         const isAuthenticate = isRelayAuthenticateRequest(outbound);
         const isSessionNew = isRelaySessionNewRequest(outbound);
+        const authorizationUrl =
+          authUrl ??
+          (isSessionNew && options.autoAuthorize
+            ? createConnectionAuthorizationUrl({
+                connectionId,
+                relayUrl: String(options.relayUrl),
+              })
+            : undefined);
         if (isAuthenticate || isSessionNew) {
-          if (authUrl && options.autoAuthorize) {
+          if (authorizationUrl && options.autoAuthorize) {
             const selectionId = sessionSelection?.selectionId;
             if (selectionId) {
               const urlWithSelection = addSessionSelectionIdToAuthUrl(
-                authUrl,
+                authorizationUrl,
                 selectionId,
               );
-              debugLog("auto-authorize relay session selection");
-              await authorizeRelay({
-                authUrl: urlWithSelection,
-                sessionSelectionId: selectionId,
-                ...options.autoAuthorize,
-              });
-              debugLog("auto-authorize relay session selection completed");
+              debugLog("open authorization url trigger=session/new");
+              openAuthUrl(toWorkbenchAuthorizationUrl(urlWithSelection));
+              armAuthRequestTimeout(outbound, urlWithSelection);
             } else {
               if (!authorizePromise) {
                 debugLog("auto-authorize relay browser authentication");
                 authorizePromise = authorizeRelay({
-                  authUrl,
+                  authUrl: authorizationUrl,
                   ...options.autoAuthorize,
                 });
               }
@@ -974,7 +978,7 @@ export function createAcpRemoteStdioBridge(
             }
           } else if (authorizePromise) {
             await authorizePromise;
-          } else if (authUrl) {
+          } else if (authorizationUrl) {
             debugLog(
               `open authorization url trigger=${
                 isSessionNew ? "session/new" : "authenticate"
@@ -982,10 +986,10 @@ export function createAcpRemoteStdioBridge(
             );
             const urlWithSelection = sessionSelection?.selectionId
               ? addSessionSelectionIdToAuthUrl(
-                  authUrl,
+                  authorizationUrl,
                   sessionSelection.selectionId,
                 )
-              : authUrl;
+              : authorizationUrl;
             openAuthUrl(toWorkbenchAuthorizationUrl(urlWithSelection));
             armAuthRequestTimeout(outbound, urlWithSelection);
           }
@@ -1341,6 +1345,35 @@ function addSessionSelectionIdToAuthUrl(
     return url.toString();
   } catch {
     return authUrl;
+  }
+}
+
+function createConnectionAuthorizationUrl(input: {
+  connectionId: string;
+  relayUrl: string;
+}): string | undefined {
+  const workbenchOrigin = resolveFreeWorkbenchOriginForRelayUrl({
+    relayUrl: input.relayUrl,
+  });
+  const origin = workbenchOrigin ?? relayUrlToHttpOrigin(input.relayUrl);
+  if (!origin) {
+    return undefined;
+  }
+  try {
+    const url = new URL("/authorize", origin);
+    url.searchParams.set("connectionId", input.connectionId);
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function relayUrlToHttpOrigin(relayUrl: string): string | undefined {
+  try {
+    const url = new URL(relayUrl.replace(/^ws(s?):\/\//, "http$1://"));
+    return url.origin;
+  } catch {
+    return undefined;
   }
 }
 

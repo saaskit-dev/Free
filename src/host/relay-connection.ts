@@ -136,6 +136,10 @@ export type AcpRemoteHostRequestJournal = {
   }): Promise<void>;
 };
 
+type HostRequestDuplicateResolution =
+  | { kind: "in_flight" }
+  | { kind: "response"; payload: AnyMessage };
+
 type ActiveRelayAcpConnection = {
   agent: AcpRemoteRuntimeAgent;
   channel: RelayAcpChannel;
@@ -183,6 +187,7 @@ type AcpHostRequestDebugContext = {
 
 const DEFAULT_MAX_BUFFERED_FRAMES_PER_CONNECTION = Number.MAX_SAFE_INTEGER;
 const DEFAULT_MAX_QUEUED_FRAMES_PER_CONNECTION = Number.MAX_SAFE_INTEGER;
+const REMOTE_RUNTIME_REQUEST_KEY_META = "acp-runtime/remote/requestKey";
 
 export function createAcpRemoteHostConnectionState(): AcpRemoteHostConnectionState {
   return {
@@ -377,7 +382,10 @@ export function createAcpRemoteHostConnection(
         seq: frame.seq,
       },
     );
-    const payloadForRuntime = tracedInbound.payload as AnyMessage;
+    const payloadForRuntime = withRuntimeRequestMetadata(
+      tracedInbound.payload as AnyMessage,
+      frame.connectionId,
+    );
     logRelayAcpPayload(frame.connectionId, payloadForRuntime, {
       ack: frame.ack,
       seq: frame.seq,
@@ -400,7 +408,9 @@ export function createAcpRemoteHostConnection(
           }),
         );
         tracedInbound.span?.span.end();
-        sendAcpPayloadDirect(frame.connectionId, duplicate);
+        if (duplicate.kind === "response") {
+          sendAcpPayloadDirect(frame.connectionId, duplicate.payload);
+        }
         sendRelayAck(frame.connectionId, frame.seq);
         return;
       }
@@ -889,32 +899,41 @@ export function createAcpRemoteHostConnection(
   const resolveHostRequestDuplicate = async (
     connectionId: string,
     request: { id: string | number; method: string },
-  ): Promise<AnyMessage | undefined> => {
+  ): Promise<HostRequestDuplicateResolution | undefined> => {
     if (!options.requestJournal) {
       return undefined;
+    }
+    if (inFlightRuntimeRequests.get(connectionId)?.has(request.id)) {
+      return { kind: "in_flight" };
     }
     const entry = await options.requestJournal.lookup(connectionId, request.id);
     if (!entry) {
       return undefined;
     }
     if (entry.status === "completed" && entry.payload) {
-      return entry.payload;
+      return { kind: "response", payload: entry.payload };
+    }
+    if (request.method === "session/prompt") {
+      return undefined;
     }
     if (isReplayableRuntimeRequestAfterRestart(request.method)) {
       return undefined;
     }
     return {
-      error: {
-        code: -32003,
-        data: {
-          method: entry.method ?? request.method,
-          status: entry.status,
+      kind: "response",
+      payload: {
+        error: {
+          code: -32003,
+          data: {
+            method: entry.method ?? request.method,
+            status: entry.status,
+          },
+          message:
+            "Remote host already delivered this request to the runtime before restart; the result is unknown and the request was not replayed.",
         },
-        message:
-          "Remote host already delivered this request to the runtime before restart; the result is unknown and the request was not replayed.",
+        id: request.id,
+        jsonrpc: "2.0",
       },
-      id: request.id,
-      jsonrpc: "2.0",
     };
   };
 
@@ -1230,6 +1249,27 @@ function messageIdFromPayloadSummary(
 
 function formatJsonRpcId(id: unknown): string {
   return isJsonRpcId(id) ? String(id) : "-";
+}
+
+function withRuntimeRequestMetadata(
+  payload: AnyMessage,
+  connectionId: string,
+): AnyMessage {
+  if (!isJsonRpcRequest(payload)) {
+    return payload;
+  }
+  const params = isRecord(payload.params) ? payload.params : {};
+  const meta = isRecord(params._meta) ? params._meta : {};
+  return {
+    ...payload,
+    params: {
+      ...params,
+      _meta: {
+        ...meta,
+        [REMOTE_RUNTIME_REQUEST_KEY_META]: `${connectionId}:${String(payload.id)}`,
+      },
+    },
+  } as AnyMessage;
 }
 
 function isJsonRpcId(id: unknown): id is string | number {

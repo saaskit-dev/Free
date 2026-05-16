@@ -18,8 +18,6 @@ import {
   runAcpRemoteReconnectLoop,
 } from "../shared/index.js";
 import type { AcpRemoteWebSocketConstructor } from "../shared/index.js";
-import { createStdioAcpConnectionFactory } from "@saaskit-dev/acp-runtime";
-import { AcpRuntime } from "@saaskit-dev/acp-runtime";
 import {
   CLAUDE_CODE_ACP_REGISTRY_ID,
   CODEX_ACP_REGISTRY_ID,
@@ -61,6 +59,10 @@ import {
   stopAcpRemoteHostUserService,
   uninstallAcpRemoteHostUserService,
 } from "./service.js";
+import {
+  createRestartingAcpRuntimeServiceClient,
+  runAcpRuntimeService,
+} from "./runtime-service.js";
 
 const ACP_REMOTE_HOST_ACCOUNT_SESSION_ENV_VAR =
   "ACP_REMOTE_HOST_ACCOUNT_SESSION";
@@ -319,6 +321,9 @@ export async function runFreeHostCommand(rawArgv: readonly string[]): Promise<vo
     case "run":
       await runHost(argv);
       return;
+    case "runtime-service":
+      await runAcpRuntimeService();
+      return;
   }
 }
 
@@ -353,7 +358,9 @@ async function installService(argv: readonly string[]): Promise<void> {
 async function runHost(argv: readonly string[]): Promise<void> {
   const config = parseAcpRemoteHostCliConfig({ argv });
   const workspaceRoots = readWorkspaceRoots(argv);
-  const runtimeInstanceId = crypto.randomUUID();
+  const runtime = createRestartingAcpRuntimeServiceClient();
+  await runtime.management.status();
+  const runtimeInstanceId = runtime.instanceId();
   const discoveredAgents = discoverAgentsInPath();
   config.hostMetadata = buildHostMetadata(
     discoveredAgents,
@@ -440,7 +447,6 @@ async function runHost(argv: readonly string[]): Promise<void> {
     writeHostLog(message, undefined, context?.severityText ?? "INFO", context);
   };
 
-  const runtime = new AcpRuntime(createStdioAcpConnectionFactory());
   const hostConnectionState = createAcpRemoteHostConnectionState();
   const requestJournal = createFileAcpRemoteHostRequestJournal({
     onCorruptJournal({ corruptPath, error, path }) {
@@ -745,6 +751,7 @@ type HostServiceCommand =
   | "install"
   | "restart"
   | "run"
+  | "runtime-service"
   | "status"
   | "stop"
   | "uninstall";
@@ -757,6 +764,7 @@ function readCommand(argv: readonly string[]): {
   if (
     first === "install" ||
     first === "run" ||
+    first === "runtime-service" ||
     first === "restart" ||
     first === "status" ||
     first === "stop" ||

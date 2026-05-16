@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import {
   ACP_REMOTE_PROTOCOL_VERSION,
   AcpRemoteAttachmentFrameType,
+  AcpRemoteChannelKind,
   AcpRemoteEndpointKind,
   AcpRemoteFrameType,
   createAcpRemoteAccountSession,
@@ -143,6 +144,112 @@ describe("createAcpRemoteHostConnection", () => {
       await rm(rootDir, { force: true, recursive: true });
     }
   });
+
+  it("suppresses duplicate in-flight prompt frames and returns the original result", async () => {
+    const identity = await createProofFixture();
+    const [hostSocket, relaySocket] = createMemoryWebSocketPair();
+    const outbound: unknown[] = [];
+    relaySocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        outbound.push(JSON.parse(event.data));
+      }
+    });
+    let resolveTurn: (() => void) | undefined;
+    let promptStarts = 0;
+    const journalEntries = new Map<string, {
+      connectionId: string;
+      id: string | number;
+      method?: string;
+      payload?: unknown;
+      status: "completed" | "received";
+    }>();
+
+    const handle = createAcpRemoteHostConnection({
+      accountId: "acct-1",
+      accountSessionVerificationKeys: [
+        { kid: "authority-1", publicKey: identity.authorityPublicKey },
+      ],
+      hostId: "host-1",
+      now: () => new Date("2026-05-10T00:00:02.000Z"),
+      requestJournal: {
+        async lookup(connectionId, id) {
+          return journalEntries.get(`${connectionId}:${id}`) as never;
+        },
+        async markCompleted(entry) {
+          journalEntries.set(`${entry.connectionId}:${entry.id}`, {
+            ...entry,
+            status: "completed",
+          });
+        },
+        async markReceived(entry) {
+          journalEntries.set(`${entry.connectionId}:${entry.id}`, {
+            ...entry,
+            status: "received",
+          });
+        },
+      },
+      runtime: {
+        sessions: {
+          async load() {
+            return createRuntimeSession({
+              onPromptStart() {
+                promptStarts += 1;
+              },
+              waitForCompletion() {
+                return new Promise<void>((resolve) => {
+                  resolveTurn = resolve;
+                });
+              },
+            });
+          },
+          async list() {
+            return { sessions: [] };
+          },
+          async resume() {
+            throw new Error("load should restore the test session");
+          },
+          async start() {
+            throw new Error("prompt restore should load the test session");
+          },
+        },
+      } as never,
+      socket: hostSocket,
+    });
+
+    try {
+      relaySocket.send(createHello("conn-1", identity.proof));
+      relaySocket.send(createPromptFrame({ seq: 1 }));
+      await waitFor(() => promptStarts === 1);
+
+      relaySocket.send(createPromptFrame({ seq: 2 }));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      const errorResponsesBeforeCompletion = outbound.filter(
+        (message) =>
+          isRecord(message) &&
+          message.frameType === AcpRemoteFrameType.Data &&
+          isRecord(message.payload) &&
+          isRecord(message.payload.error),
+      );
+      expect(errorResponsesBeforeCompletion).toHaveLength(0);
+      expect(promptStarts).toBe(1);
+
+      resolveTurn?.();
+      await waitFor(() =>
+        outbound.some(
+          (message) =>
+            isRecord(message) &&
+            message.frameType === AcpRemoteFrameType.Data &&
+            isRecord(message.payload) &&
+            message.payload.id === "prompt-1" &&
+            isRecord(message.payload.result),
+        ),
+      );
+      expect(promptStarts).toBe(1);
+    } finally {
+      handle.close();
+    }
+  });
 });
 
 function createHello(connectionId: string, proof: AcpRemoteConnectionProof): string {
@@ -154,6 +261,98 @@ function createHello(connectionId: string, proof: AcpRemoteConnectionProof): str
     proof,
     protocolVersion: ACP_REMOTE_PROTOCOL_VERSION,
   });
+}
+
+function createPromptFrame(input: { seq: number }): string {
+  return JSON.stringify({
+    channelId: "acp",
+    channelKind: AcpRemoteChannelKind.Acp,
+    connectionId: "conn-1",
+    frameType: AcpRemoteFrameType.Data,
+    payload: {
+      id: "prompt-1",
+      jsonrpc: "2.0",
+      method: "session/prompt",
+      params: {
+        _meta: {
+          "acp-runtime/remote/sessionAgent": {
+            command: "fake-agent",
+            type: "fake",
+          },
+          "acp-runtime/remote/sessionWorkspaceRoots": ["/workspace"],
+        },
+        prompt: [{ text: "long running command", type: "text" }],
+        sessionId: "runtime-session-1",
+      },
+    },
+    seq: input.seq,
+  });
+}
+
+function createRuntimeSession(input: {
+  onPromptStart(): void;
+  waitForCompletion(): Promise<void>;
+}) {
+  return {
+    agent: {
+      listConfigOptions: () => [],
+      listModes: () => [],
+      setConfigOption: async () => {},
+      setMode: async () => {},
+    },
+    capabilities: { agent: { prompt: true }, client: {} },
+    close: async () => {},
+    diagnostics: {},
+    initialConfigReport: undefined,
+    metadata: { id: "runtime-session-1", title: "Runtime Session" },
+    queue: {
+      policy: () => ({ delivery: "sequential" }),
+      setPolicy: () => ({ delivery: "sequential" }),
+    },
+    snapshot: () => ({
+      agent: { command: "fake-agent", type: "fake" },
+      cwd: "/workspace",
+      session: { id: "runtime-session-1" },
+      version: 1,
+    }),
+    state: {
+      history: { drain: () => [] },
+      thread: { entries: () => [] },
+    },
+    status: "ready",
+    turn: {
+      cancel: async () => true,
+      queue: {
+        clear: () => 0,
+        get: () => undefined,
+        list: () => [],
+        remove: () => false,
+        sendNow: async () => false,
+      },
+      start: () => {
+        input.onPromptStart();
+        return {
+          events: createDelayedTurnEvents(input.waitForCompletion),
+          turnId: "turn-1",
+        };
+      },
+    },
+  };
+}
+
+async function* createDelayedTurnEvents(waitForCompletion: () => Promise<void>) {
+  yield { turnId: "turn-1", type: "started" };
+  await waitForCompletion();
+  yield {
+    output: [{ text: "done", type: "text" }],
+    outputText: "done",
+    turnId: "turn-1",
+    type: "completed",
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 async function createProofFixture(options: { forgeBridgeSignature?: boolean } = {}) {

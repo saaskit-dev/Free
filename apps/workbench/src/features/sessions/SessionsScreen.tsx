@@ -19,9 +19,8 @@ type SessionsScreenProps = {
   sessions: LoadState<SessionRecord[]>;
 };
 
-type AvailabilityFilter = "all" | "online" | "offline";
-type StatusFilter = "all" | NonNullable<SessionRecord["status"]>;
-type FilterId = "agent" | "availability" | "host" | "status" | "workspace";
+type StatusFilter = "all" | "online" | "offline" | Exclude<NonNullable<SessionRecord["status"]>, "offline">;
+type FilterId = "agent" | "host" | "status" | "workspace";
 type HealthState =
   | { status: "idle" }
   | { status: "checking" }
@@ -35,12 +34,10 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
   const [hostId, setHostId] = useState("all");
   const [agentKey, setAgentKey] = useState("all");
   const [workspaceRoot, setWorkspaceRoot] = useState("all");
-  const [availability, setAvailability] = useState<AvailabilityFilter>("all");
-  const [status, setStatus] = useState<StatusFilter>("all");
+  const [status, setStatus] = useState<StatusFilter>("online");
   const [openFilter, setOpenFilter] = useState<FilterId | undefined>();
   const [copiedKey, setCopiedKey] = useState<string | undefined>();
   const [health, setHealth] = useState<HealthState>({ status: "idle" });
-  const [showOffline, setShowOffline] = useState(false);
 
   const hostLabels = useMemo(() => {
     const labels = new Map<string, string>();
@@ -83,13 +80,10 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
     if (sessions.status !== "ready") return [];
     const needle = query.trim().toLowerCase();
     return sessions.data.filter((session) => {
-      if (!showOffline && session.lifecycle === "offline") return false;
       if (hostId !== "all" && session.hostId !== hostId) return false;
       if (agentKey !== "all" && readAgentKey(session) !== agentKey) return false;
       if (workspaceRoot !== "all" && !session.workspaceRoots.includes(workspaceRoot)) return false;
-      if (availability === "online" && !session.hostOnline) return false;
-      if (availability === "offline" && session.hostOnline) return false;
-      if (status !== "all" && session.status !== status) return false;
+      if (!matchesStatusFilter(session, status)) return false;
       if (!needle) return true;
       const values = [
         session.sessionId,
@@ -106,7 +100,7 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
       ];
       return values.some((value) => value.toLowerCase().includes(needle));
     });
-  }, [agentKey, availability, hostId, hostLabels, language, query, sessions, showOffline, status, workspaceRoot]);
+  }, [agentKey, hostId, hostLabels, language, query, sessions, status, workspaceRoot]);
 
   const sessionCounts = useMemo(() => {
     if (sessions.status !== "ready") {
@@ -192,7 +186,7 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
           value={query}
         />
         <Text style={common.eyebrow}>
-          {visibleSessions.length} / {showOffline ? sessionCounts.total : sessionCounts.live}
+          {visibleSessions.length} / {sessionCounts.total}
         </Text>
         <Pressable
           accessibilityLabel={t(language, "检查链路健康", "Check chain health")}
@@ -202,18 +196,6 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
         >
           <Text style={actionButtonTextStyle}>
             {health.status === "checking" ? t(language, "检查中", "Checking") : t(language, "健康检查", "Health")}
-          </Text>
-        </Pressable>
-        <Pressable
-          accessibilityLabel={t(language, "显示离线 Session", "Show offline sessions")}
-          accessibilityRole="button"
-          onPress={() => setShowOffline((value) => !value)}
-          style={[actionButtonStyle, showOffline ? selectButtonActiveStyle : null]}
-        >
-          <Text style={actionButtonTextStyle}>
-            {showOffline
-              ? t(language, "隐藏离线", "Hide offline")
-              : t(language, `显示离线 ${sessionCounts.offline}`, `Show offline ${sessionCounts.offline}`)}
           </Text>
         </Pressable>
       </View>
@@ -227,31 +209,16 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
           label={t(language, "状态", "State")}
           openFilter={openFilter}
           options={[
+            ["online", t(language, "在线", "Online")],
+            ["offline", t(language, "离线", "Offline")],
             ["active", t(language, "运行中", "Active")],
             ["starting", t(language, "启动中", "Starting")],
             ["waiting_authorization", t(language, "等待授权", "Waiting")],
             ["failed", t(language, "失败", "Failed")],
-            ["offline", t(language, "离线历史", "Offline history")],
           ]}
           value={status}
           onChange={(value) => {
             setStatus(value as StatusFilter);
-            setOpenFilter(undefined);
-          }}
-          onToggle={setOpenFilter}
-        />
-        <SelectFilter
-          allLabel={t(language, "全部在线状态", "All availability")}
-          filterId="availability"
-          label={t(language, "在线状态", "Availability")}
-          openFilter={openFilter}
-          options={[
-            ["online", t(language, "在线", "Online")],
-            ["offline", t(language, "离线", "Offline")],
-          ]}
-          value={availability}
-          onChange={(value) => {
-            setAvailability(value as AvailabilityFilter);
             setOpenFilter(undefined);
           }}
           onToggle={setOpenFilter}
@@ -309,15 +276,7 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
       ) : visibleSessions.length === 0 ? (
         <Panel
           title={t(language, "没有匹配的 Session", "No matching sessions")}
-          body={
-            !showOffline && sessionCounts.offline > 0
-              ? t(
-                  language,
-                  "当前没有激活 Session。离线历史已默认隐藏，可点击显示离线查看。",
-                  "No live sessions. Offline history is hidden by default.",
-                )
-              : t(language, "调整筛选条件或搜索词后再查看。", "Adjust the filters or search text.")
-          }
+          body={readEmptyFilterMessage(status, sessionCounts, language)}
         />
       ) : (
         <View style={[common.panel, { overflow: "hidden" }]}>
@@ -469,37 +428,38 @@ function SessionRow({
   onCopy: (value: string, key: string) => void;
   session: SessionRecord;
 }) {
-  const workspaces = session.workspaceRoots.length > 0
-    ? session.workspaceRoots.map(readWorkspaceLabel).join(" · ")
-    : t(language, "未限定目录", "No workspace limit");
+  const workspaces = readWorkspaceSummary(session, language);
   const updated = formatTime(session.updatedAt ?? session.createdAt, language);
-  const title = session.title?.trim() || `${readAgentLabel(session)} · ${hostLabel}`;
+  const agentLabel = readAgentLabel(session);
+  const title = readSessionTitle(session, language);
   return (
     <View style={[rowStyle, compact ? compactRowStyle : null]}>
-      <View style={{ flex: compact ? undefined : 1.05, minWidth: 0 }}>
+      <View style={{ flex: compact ? undefined : 1.35, minWidth: 0 }}>
         <Text numberOfLines={1} style={primaryTextStyle}>
           {title}
         </Text>
         <Text numberOfLines={1} style={secondaryMonoStyle}>
-          {hostLabel} · {shortId(session.sessionId)}
+          {hostLabel} · {agentLabel}
         </Text>
       </View>
-      <View style={{ flex: compact ? undefined : 0.9, minWidth: 0 }}>
-        <Text numberOfLines={1} style={primaryTextStyle}>
-          {readAgentLabel(session)}
-        </Text>
-        <Text numberOfLines={1} style={secondaryTextStyle}>
-          {session.hostOnline ? t(language, "在线", "Online") : t(language, "离线", "Offline")} · {updated}
-        </Text>
-      </View>
-      <View style={{ flex: compact ? undefined : 1.15, minWidth: 0 }}>
+      <View style={{ flex: compact ? undefined : 1.1, minWidth: 0 }}>
         <Text numberOfLines={1} style={primaryTextStyle}>
           {workspaces}
         </Text>
+        <Text numberOfLines={1} style={secondaryTextStyle}>
+          Host {shortId(session.hostId)} · Session {shortId(session.sessionId)}
+        </Text>
+      </View>
+      <View style={{ flex: compact ? undefined : 1.25, minWidth: 0 }}>
         <SessionMeta language={language} session={session} />
       </View>
-      <View style={{ flex: compact ? undefined : 1.45, minWidth: 0 }}>
-        <SessionIdentity language={language} session={session} />
+      <View style={{ flex: compact ? undefined : 0.95, minWidth: 0 }}>
+        <Text numberOfLines={1} style={primaryTextStyle}>
+          {updated}
+        </Text>
+        <Text numberOfLines={1} style={secondaryTextStyle}>
+          {readConnectionSummary(session, language)}
+        </Text>
       </View>
       <SessionActions
         copiedKey={copiedKey}
@@ -514,10 +474,10 @@ function SessionRow({
 function SessionHeader({ language }: { language: LanguageMode }) {
   return (
     <View style={[rowStyle, { backgroundColor: "#F5F1E8", minHeight: 34, paddingVertical: 8 }]}>
-      <Text style={[headerCellStyle, { flex: 1.05 }]}>{t(language, "主机", "Host")}</Text>
-      <Text style={[headerCellStyle, { flex: 0.9 }]}>{t(language, "Agent", "Agent")}</Text>
-      <Text style={[headerCellStyle, { flex: 1.15 }]}>{t(language, "上下文", "Context")}</Text>
-      <Text style={[headerCellStyle, { flex: 1.45 }]}>{t(language, "标识", "Identity")}</Text>
+      <Text style={[headerCellStyle, { flex: 1.35 }]}>{t(language, "Session", "Session")}</Text>
+      <Text style={[headerCellStyle, { flex: 1.1 }]}>{t(language, "上下文", "Context")}</Text>
+      <Text style={[headerCellStyle, { flex: 1.25 }]}>{t(language, "状态", "State")}</Text>
+      <Text style={[headerCellStyle, { flex: 0.95 }]}>{t(language, "更新", "Updated")}</Text>
       <Text style={[headerCellStyle, { minWidth: 154, textAlign: "right" }]}>{t(language, "操作", "Actions")}</Text>
     </View>
   );
@@ -530,9 +490,9 @@ function SessionMeta({
   language: LanguageMode;
   session: SessionRecord;
 }) {
-  const statusLabel = readStatusLabel(session.status, language);
+  const statusLabel = readLifecycleStatusLabel(session, language);
   const statusTone = readStatusTone(session.status);
-  const detail = session.error ?? session.latestEvent ?? "";
+  const detail = readSessionDetail(session, language);
   return (
     <View style={{ gap: 1, minWidth: 0 }}>
       <Text numberOfLines={1} style={[common.eyebrow, { color: statusTone }]}>
@@ -541,32 +501,6 @@ function SessionMeta({
       {detail ? (
         <Text numberOfLines={2} style={[secondaryTextStyle, session.error ? { color: colors.coral } : null]}>
           {detail}
-        </Text>
-      ) : null}
-    </View>
-  );
-}
-
-function SessionIdentity({
-  language,
-  session,
-}: {
-  language: LanguageMode;
-  session: SessionRecord;
-}) {
-  return (
-    <View style={{ gap: 2, minWidth: 0 }}>
-      <Text selectable numberOfLines={1} style={secondaryMonoStyle}>
-        {t(language, "Session", "Session")} {session.sessionId}
-      </Text>
-      {session.connectionId ? (
-        <Text selectable numberOfLines={1} style={secondaryMonoStyle}>
-          {t(language, "连接", "Connection")} {session.connectionId}
-        </Text>
-      ) : null}
-      {session.requestId !== undefined ? (
-        <Text selectable numberOfLines={1} style={secondaryMonoStyle}>
-          {t(language, "请求", "Request")} {String(session.requestId)}
         </Text>
       ) : null}
     </View>
@@ -587,7 +521,7 @@ function SessionActions({
   return (
     <View style={actionRailStyle}>
       <ActionButton
-        label={copiedKey === `${session.sessionId}:session` ? t(language, "已复制", "Copied") : t(language, "复制 ID", "Copy ID")}
+        label={copiedKey === `${session.sessionId}:session` ? t(language, "已复制", "Copied") : t(language, "复制 Session", "Copy session")}
         onPress={() => onCopy(session.sessionId, `${session.sessionId}:session`)}
       />
       {session.connectionId ? (
@@ -670,6 +604,91 @@ function readAgentLabel(session: SessionRecord): string {
 
 function readAgentKey(session: SessionRecord): string {
   return session.agent?.id ?? session.agent?.command ?? session.agent?.type ?? "unknown";
+}
+
+function readSessionTitle(session: SessionRecord, language: LanguageMode): string {
+  const title = session.title?.trim();
+  const workspace = readPrimaryWorkspaceLabel(session, language);
+  if (!title) return workspace;
+  const agent = readAgentLabel(session);
+  const hostName = session.hostName ?? session.hostMetadata?.displayName ?? session.hostMetadata?.machine;
+  const redundantTokens = [agent, hostName].filter((value): value is string =>
+    typeof value === "string" && value.trim().length > 0
+  );
+  if (redundantTokens.some((token) => title.includes(token)) && workspace !== title) {
+    return workspace;
+  }
+  return title;
+}
+
+function readPrimaryWorkspaceLabel(session: SessionRecord, language: LanguageMode): string {
+  const first = session.workspaceRoots[0];
+  if (!first) return t(language, "未限定目录", "No workspace limit");
+  return readWorkspaceLabel(first);
+}
+
+function readWorkspaceSummary(session: SessionRecord, language: LanguageMode): string {
+  if (session.workspaceRoots.length === 0) {
+    return t(language, "未限定目录", "No workspace limit");
+  }
+  const [first, ...rest] = session.workspaceRoots.map(readWorkspaceLabel);
+  return rest.length === 0 ? first : `${first} +${rest.length}`;
+}
+
+function readLifecycleStatusLabel(session: SessionRecord, language: LanguageMode): string {
+  if (session.lifecycle === "offline" || session.status === "offline") {
+    return t(language, "离线历史", "Offline history");
+  }
+  return readStatusLabel(session.status, language);
+}
+
+function readConnectionSummary(session: SessionRecord, language: LanguageMode): string {
+  if (session.connectionId) {
+    return `${t(language, "连接", "Conn")} ${shortId(session.connectionId)}`;
+  }
+  if (session.requestId !== undefined) {
+    return `${t(language, "请求", "Req")} ${String(session.requestId)}`;
+  }
+  return t(language, "无活动连接", "No active connection");
+}
+
+function readSessionDetail(session: SessionRecord, language: LanguageMode): string {
+  if (session.error) return session.error;
+  const event = session.latestEvent?.trim();
+  if (!event) return "";
+  if (event === "Session is not attached to a live ACP client.") {
+    return t(language, "未连接到实时 ACP 客户端。", "Not attached to a live ACP client.");
+  }
+  return event;
+}
+
+function matchesStatusFilter(session: SessionRecord, status: StatusFilter): boolean {
+  if (status === "all") return true;
+  if (status === "online") return session.lifecycle !== "offline" && session.status !== "offline";
+  if (status === "offline") return session.lifecycle === "offline" || session.status === "offline";
+  return session.status === status;
+}
+
+function readEmptyFilterMessage(
+  status: StatusFilter,
+  counts: { live: number; offline: number; total: number },
+  language: LanguageMode,
+): string {
+  if (status === "online" && counts.offline > 0) {
+    return t(
+      language,
+      "当前没有在线 Session。可在状态筛选中选择离线或全部查看历史。",
+      "No online sessions. Choose Offline or All in the state filter to view history.",
+    );
+  }
+  if (status === "offline" && counts.live > 0) {
+    return t(
+      language,
+      "当前没有离线 Session。可在状态筛选中选择在线或全部查看激活 Session。",
+      "No offline sessions. Choose Online or All in the state filter to view live sessions.",
+    );
+  }
+  return t(language, "调整筛选条件或搜索词后再查看。", "Adjust the filters or search text.");
 }
 
 function readStatusLabel(status: SessionRecord["status"], language: LanguageMode): string {

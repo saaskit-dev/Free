@@ -157,14 +157,13 @@ describe("createAcpRemoteStdioBridge", () => {
     }
   });
 
-  it("auto-authorizes the matching session selection before forwarding session/new", async () => {
+  it("opens authorization for session/new so workspace selection remains explicit", async () => {
     const input = new PassThrough();
     const output = new PassThrough();
-    const fetchBodies: unknown[] = [];
-    const fetchUrls: string[] = [];
+    const openedUrls: string[] = [];
     const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      fetchUrls.push(String(url));
-      fetchBodies.push(JSON.parse(String(init?.body ?? "{}")) as unknown);
+      void url;
+      void init;
       return new Response(JSON.stringify({ ok: true }), {
         headers: { "content-type": "application/json" },
         status: 200,
@@ -180,6 +179,9 @@ describe("createAcpRemoteStdioBridge", () => {
       clientId: "client-1",
       connectionId: "connection-1",
       input,
+      openAuthUrl(url) {
+        openedUrls.push(url);
+      },
       output,
       relayUrl: "ws://127.0.0.1:8791",
       socketFactory() {
@@ -217,7 +219,6 @@ describe("createAcpRemoteStdioBridge", () => {
         })}\n`,
       );
 
-      await waitFor(() => fetchMock.mock.calls.length === 2);
       await waitFor(() =>
         sockets[0]?.sent.some((message) => {
           try {
@@ -227,11 +228,6 @@ describe("createAcpRemoteStdioBridge", () => {
           }
         }) ?? false,
       );
-      const sessionAuthorizeUrl = new URL(fetchUrls[1]!);
-      const sessionAuthorizeBody = fetchBodies[1] as {
-        hostId?: string;
-        sessionSelectionId?: string;
-      };
       const outboundMessage = sockets[0]!.sent.find((message) => {
         try {
           return JSON.parse(message).method === "session/new";
@@ -245,13 +241,95 @@ describe("createAcpRemoteStdioBridge", () => {
       const outboundSelectionId =
         outbound.params?._meta?.["acp-runtime/remote/sessionSelectionId"];
 
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(openedUrls).toHaveLength(1);
+      const sessionAuthorizeUrl = new URL(openedUrls[0]!);
       expect(sessionAuthorizeUrl.searchParams.get("sessionSelectionId")).toBe(
         outboundSelectionId,
       );
-      expect(sessionAuthorizeBody).toMatchObject({
-        hostId: "host-1",
-        sessionSelectionId: outboundSelectionId,
+    } finally {
+      bridge.close();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("opens authorization for session/new after bridge restart before initialize provides auth url", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const openedUrls: string[] = [];
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      void url;
+      void init;
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { "content-type": "application/json" },
+        status: 200,
       });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const sockets: TestSocket[] = [];
+    const bridge = createAcpRemoteStdioBridge({
+      autoAuthorize: {
+        accountSession: "account-session-1",
+        hostId: "host-1",
+      },
+      clientId: "client-1",
+      connectionId: "connection-1",
+      input,
+      openAuthUrl(url) {
+        openedUrls.push(url);
+      },
+      output,
+      relayUrl: "ws://127.0.0.1:8791",
+      socketFactory() {
+        const socket = new TestSocket();
+        sockets.push(socket);
+        return socket;
+      },
+    });
+
+    try {
+      input.write(
+        `${JSON.stringify({
+          id: 3,
+          jsonrpc: "2.0",
+          method: "session/new",
+          params: { cwd: "/tmp/project", mcpServers: [] },
+        })}\n`,
+      );
+
+      await waitFor(() =>
+        sockets[0]?.sent.some((message) => {
+          try {
+            return JSON.parse(message).method === "session/new";
+          } catch {
+            return false;
+          }
+        }) ?? false,
+      );
+      const outboundMessage = sockets[0]!.sent.find((message) => {
+        try {
+          return JSON.parse(message).method === "session/new";
+        } catch {
+          return false;
+        }
+      })!;
+      const outbound = JSON.parse(outboundMessage) as {
+        params?: { _meta?: Record<string, string> };
+      };
+      const outboundSelectionId =
+        outbound.params?._meta?.["acp-runtime/remote/sessionSelectionId"];
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(openedUrls).toHaveLength(1);
+      const sessionAuthorizeUrl = new URL(openedUrls[0]!);
+      expect(sessionAuthorizeUrl.origin).toBe("http://127.0.0.1:8790");
+      expect(sessionAuthorizeUrl.pathname).toBe("/authorize");
+      expect(sessionAuthorizeUrl.searchParams.get("connectionId")).toBe(
+        "connection-1",
+      );
+      expect(sessionAuthorizeUrl.searchParams.get("sessionSelectionId")).toBe(
+        outboundSelectionId,
+      );
     } finally {
       bridge.close();
       vi.unstubAllGlobals();

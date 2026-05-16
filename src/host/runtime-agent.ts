@@ -107,6 +107,7 @@ export type AcpRemoteRuntimeAgentOptions = {
   remoteHostId?: string;
   remoteMachineName?: string;
   runtime: {
+    isClosed?: () => boolean;
     sessions: RemoteRuntimeSessions;
   };
   sessionAgent?: AcpRuntimeAgentInput;
@@ -129,6 +130,7 @@ const REMOTE_SESSION_MACHINE_META = "acp-runtime/remote/sessionMachine";
 const REMOTE_SESSION_WORKSPACE_ROOTS_META =
   "acp-runtime/remote/sessionWorkspaceRoots";
 const REMOTE_HOST_ID_META = "acp-runtime/remote/hostId";
+const REMOTE_RUNTIME_REQUEST_KEY_META = "acp-runtime/remote/requestKey";
 
 export class AcpRemoteRuntimeAgent implements Agent {
   private clientCapabilities: ClientCapabilities = {};
@@ -137,6 +139,7 @@ export class AcpRemoteRuntimeAgent implements Agent {
     string,
     Promise<ActiveRemoteSession>
   >();
+  private recoveryTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(
     private readonly connection: AgentSideConnection,
@@ -167,11 +170,13 @@ export class AcpRemoteRuntimeAgent implements Agent {
         "session/new",
         workspaceRoots,
       );
+      const agent = selection.agent ?? this.requireAgent();
+      const mcpServers = mapAcpMcpServersToRuntime(params.mcpServers);
       const session = await this.options.runtime.sessions.start({
-        agent: selection.agent ?? this.requireAgent(),
+        agent,
         cwd,
         handlers: this.createAuthorityHandlers(),
-        mcpServers: mapAcpMcpServersToRuntime(params.mcpServers),
+        mcpServers,
         _traceContext: span.context,
       });
       this.storeActiveSession(session);
@@ -374,7 +379,12 @@ export class AcpRemoteRuntimeAgent implements Agent {
       }
       const turn = active.session.turn.start(
         mapAcpPromptToRuntimePrompt(params.prompt),
-        { _traceContext: span.context },
+        {
+          _traceContext: span.context,
+          acpRuntimeRequestKey: readRuntimeRequestKey(params),
+        } as Parameters<typeof active.session.turn.start>[1] & {
+          acpRuntimeRequestKey?: string;
+        },
       );
       span.span.setAttributes({
         "acp.turn.id": turn.turnId,
@@ -431,6 +441,25 @@ export class AcpRemoteRuntimeAgent implements Agent {
           }),
           span.traceparent,
         );
+      } catch (error) {
+        if (isRuntimeServiceRestartRequiredError(error)) {
+          this.deleteSessionAliases(active);
+          emitFreeLog({
+            body: `ACP runtime service disconnected during prompt: ${formatError(error)}`,
+            eventName: "acp.remote.runtime_service.disconnected",
+            exception: error,
+            severityNumber: SeverityNumber.ERROR,
+          });
+          throw RequestError.internalError(
+            {
+              reason: "runtime_service_restarted",
+              sessionId: params.sessionId,
+              turnId: turn.turnId,
+            },
+            "ACP runtime service restarted before this request completed. The message was not completed; resend it to continue.",
+          );
+        }
+        throw error;
       } finally {
         if (active.turnId === turn.turnId) {
           active.turnId = undefined;
@@ -508,6 +537,9 @@ export class AcpRemoteRuntimeAgent implements Agent {
   ): Promise<ActiveRemoteSession> {
     const active = this.sessions.get(params.sessionId);
     if (active) {
+      if (this.options.runtime.isClosed?.()) {
+        return this.restoreActiveSession(active, params.sessionId, method);
+      }
       return active;
     }
 
@@ -546,21 +578,37 @@ export class AcpRemoteRuntimeAgent implements Agent {
     );
     const agent =
       selection.agent ?? this.options.sessionAgent ?? this.requireAgent();
-    const session = await this.loadOrResumeRuntimeSession({
-      agent,
-      cwd,
-      method,
-      sessionId: params.sessionId,
-      traceContext,
-    });
+    let session: AcpRuntimeSession;
+    try {
+      const mcpServers: ReturnType<typeof mapAcpMcpServersToRuntime> = [];
+      session = await this.loadOrResumeRuntimeSession({
+        agent,
+        cwd,
+        mcpServers,
+        method,
+        sessionId: params.sessionId,
+        traceContext,
+      });
+    } catch (error) {
+      if (method !== "session/prompt") {
+        throw error;
+      }
+      session = await this.options.runtime.sessions.start({
+        agent,
+        cwd,
+        handlers: this.createAuthorityHandlers(),
+        mcpServers: [],
+        _traceContext: traceContext,
+      });
+    }
     const active = this.storeActiveSession(session, [params.sessionId]);
     await this.replayHistory(params.sessionId, session);
     return active;
   }
 
   private async loadOrResumeRuntimeSession(input: {
-    agent: AcpRuntimeAgentInput;
-    cwd: string;
+    agent?: AcpRuntimeAgentInput;
+    cwd?: string;
     mcpServers?: ReturnType<typeof mapAcpMcpServersToRuntime>;
     preferred?: "load" | "resume";
     method: string;
@@ -581,14 +629,22 @@ export class AcpRemoteRuntimeAgent implements Agent {
     let secondError: unknown;
     for (const attempt of attempts) {
       try {
-        return await attempt({
-          agent: input.agent,
-          cwd: input.cwd,
+        const options = {
           handlers: this.createAuthorityHandlers(),
-          mcpServers: input.mcpServers ?? [],
           sessionId: input.sessionId,
           _traceContext: input.traceContext,
-        } as Parameters<typeof attempt>[0]);
+        } as Parameters<typeof attempt>[0];
+        if (input.agent !== undefined) {
+          (options as { agent?: AcpRuntimeAgentInput }).agent = input.agent;
+        }
+        if (input.cwd !== undefined) {
+          (options as { cwd?: string }).cwd = input.cwd;
+        }
+        if (input.mcpServers !== undefined) {
+          (options as { mcpServers?: ReturnType<typeof mapAcpMcpServersToRuntime> })
+            .mcpServers = input.mcpServers;
+        }
+        return await attempt(options);
       } catch (error) {
         if (firstError === undefined) {
           firstError = error;
@@ -622,7 +678,81 @@ export class AcpRemoteRuntimeAgent implements Agent {
         this.sessions.set(alias, active);
       }
     }
+    this.ensureRuntimeRecoveryMonitor();
     return active;
+  }
+
+  private async restoreActiveSession(
+    active: ActiveRemoteSession,
+    alias: string,
+    method: string,
+  ): Promise<ActiveRemoteSession> {
+    if (active.turnId) {
+      throw RequestError.internalError(
+        {
+          reason: "runtime_service_restarted",
+          sessionId: alias,
+          turnId: active.turnId,
+        },
+        "ACP runtime service restarted before this request completed. The message was not completed; resend it to continue.",
+      );
+    }
+    const snapshot = active.session.snapshot();
+    const session = await this.loadOrResumeRuntimeSession({
+      agent: snapshot.agent,
+      cwd: snapshot.cwd,
+      method,
+      mcpServers: snapshot.mcpServers,
+      preferred: "resume",
+      sessionId: active.session.metadata.id,
+    });
+    const aliases = [...this.sessionAliasesFor(active), alias];
+    this.deleteSessionAliases(active);
+    const restored = this.storeActiveSession(session, aliases);
+    emitFreeLog({
+      body: `ACP runtime session resumed after runtime service restart: ${active.session.metadata.id}`,
+      eventName: "acp.remote.runtime_session.resumed",
+    });
+    return restored;
+  }
+
+  private ensureRuntimeRecoveryMonitor(): void {
+    if (this.recoveryTimer || !this.options.runtime.isClosed) {
+      return;
+    }
+    this.recoveryTimer = setInterval(() => {
+      if (!this.options.runtime.isClosed?.()) {
+        return;
+      }
+      void this.restoreIdleSessionsAfterRuntimeRestart();
+    }, 1000);
+    this.recoveryTimer.unref?.();
+  }
+
+  private async restoreIdleSessionsAfterRuntimeRestart(): Promise<void> {
+    const activeSessions = [...new Set(this.sessions.values())].filter(
+      (active) => !active.turnId,
+    );
+    for (const active of activeSessions) {
+      const alias = this.sessionAliasesFor(active)[0] ?? active.session.metadata.id;
+      if (!this.sessions.has(alias)) {
+        continue;
+      }
+      await this.restoreActiveSession(active, alias, "session/resume").catch((error) => {
+        emitFreeLog({
+          body: `ACP runtime session resume failed after runtime service restart: ${formatError(error)}`,
+          eventName: "acp.remote.runtime_session.resume.failed",
+          exception: error,
+          severityNumber: SeverityNumber.ERROR,
+        });
+      });
+    }
+  }
+
+  private sessionAliasesFor(active: ActiveRemoteSession): string[] {
+    return [...this.sessions.entries()]
+      .filter(([, candidate]) => candidate === active || candidate.session === active.session)
+      .map(([sessionId]) => sessionId);
   }
 
   private async replayHistory(
@@ -813,6 +943,11 @@ export class AcpRemoteRuntimeAgent implements Agent {
   }
 }
 
+function readRuntimeRequestKey(params: { _meta?: Record<string, unknown> | null }): string | undefined {
+  const value = params._meta?.[REMOTE_RUNTIME_REQUEST_KEY_META];
+  return typeof value === "string" && value ? value : undefined;
+}
+
 function readSessionSelection(params: unknown): {
   agent?: AcpRuntimeAgentInput;
   workspaceRoots?: readonly string[];
@@ -887,6 +1022,17 @@ function spanNameForRuntimeMethod(method: string): string {
 
 function phaseForRuntimeMethod(method: string): string | undefined {
   return method === "session/prompt" ? "runtime.run" : undefined;
+}
+
+function isRuntimeServiceRestartRequiredError(error: unknown): boolean {
+  const message = formatError(error);
+  return (
+    message.includes("ACP runtime service connection closed") ||
+    message.includes("Runtime service connection closed") ||
+    message.includes("Runtime service peer disconnected") ||
+    message.includes("EPIPE") ||
+    message.includes("ECONNRESET")
+  );
 }
 
 function promptTextLength(prompt: PromptRequest["prompt"]): number {

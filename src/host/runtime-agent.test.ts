@@ -1013,6 +1013,90 @@ describe("AcpRemoteRuntimeAgent", () => {
     expect(startCalled).toBe(false);
   });
 
+  it("starts a replacement runtime session when a prompt targets a stale remote session", async () => {
+    const streams = createStreamPair();
+    const prompts: AcpRuntimePrompt[] = [];
+    let loadCalled = false;
+    let resumeCalled = false;
+    let startCalled = 0;
+    const replacementSession = createFakeRuntimeSession({
+      id: "replacement-runtime-session",
+      onPrompt(prompt) {
+        prompts.push(prompt);
+      },
+    });
+    const runtime = {
+      sessions: {
+        async list() {
+          return { sessions: [] };
+        },
+        async load() {
+          loadCalled = true;
+          throw new Error("missing local runtime snapshot");
+        },
+        async resume() {
+          resumeCalled = true;
+          throw new Error("missing active runtime snapshot");
+        },
+        async start() {
+          startCalled += 1;
+          return replacementSession;
+        },
+      },
+    };
+
+    const agentConnection = new AgentSideConnection(
+      (connection) =>
+        createAcpRemoteRuntimeAgent({
+          connection,
+          options: { agent: { command: "fake", type: "fake" }, runtime },
+        }),
+      streams.server,
+    );
+    void agentConnection.closed.catch(() => {});
+
+    const clientConnection = new ClientSideConnection(
+      () =>
+        ({
+          async requestPermission() {
+            return { outcome: { optionId: "allow_once", outcome: "selected" } };
+          },
+          async sessionUpdate() {},
+        }) satisfies Client,
+      streams.client,
+    );
+    void clientConnection.closed.catch(() => {});
+
+    await clientConnection.initialize({
+      clientCapabilities: {},
+      protocolVersion: PROTOCOL_VERSION,
+    });
+
+    const stalePrompt = {
+      _meta: {
+        "acp-runtime/remote/sessionAgent": {
+          command: "fake",
+          type: "fake",
+        },
+        "acp-runtime/remote/sessionWorkspaceRoots": ["/workspace"],
+      },
+      prompt: [{ text: "continue after host restart", type: "text" }],
+      sessionId: "stale-zed-session-id",
+    } satisfies Parameters<typeof clientConnection.prompt>[0];
+
+    await expect(clientConnection.prompt(stalePrompt)).resolves.toMatchObject({
+      stopReason: "end_turn",
+    });
+    await expect(clientConnection.prompt(stalePrompt)).resolves.toMatchObject({
+      stopReason: "end_turn",
+    });
+
+    expect(loadCalled).toBe(true);
+    expect(resumeCalled).toBe(true);
+    expect(startCalled).toBe(1);
+    expect(prompts).toHaveLength(2);
+  });
+
   it("handles setSessionMode and setSessionConfigOption", async () => {
     const streams = createStreamPair();
     let modeSet: string | undefined;
@@ -1331,6 +1415,269 @@ describe("AcpRemoteRuntimeAgent", () => {
       }),
     ).rejects.toThrow(
       "ACP prompt request failed. Caused by: Failed to authenticate. API Error: 401",
+    );
+  });
+
+  it("resumes an open idle session from the runtime snapshot after runtime service restart", async () => {
+    const streams = createStreamPair();
+    let runtimeClosed = false;
+    const startedSession = createFakeRuntimeSession({
+      id: "runtime-session-1",
+      onPrompt() {},
+    });
+    const resumedSession = createFakeRuntimeSession({
+      id: "runtime-session-1",
+      onPrompt() {},
+    });
+    const resumeCalls: unknown[] = [];
+    const runtime = {
+      isClosed: () => runtimeClosed,
+      sessions: {
+        async list() {
+          return { sessions: [] };
+        },
+        async load() {
+          throw new Error("load should not run before resume");
+        },
+        async resume(options: unknown) {
+          resumeCalls.push(options);
+          runtimeClosed = false;
+          return resumedSession;
+        },
+        async start() {
+          return startedSession;
+        },
+      },
+    };
+
+    const agentConnection = new AgentSideConnection(
+      (connection) =>
+        createAcpRemoteRuntimeAgent({
+          connection,
+          options: {
+            agent: { command: "default-agent", type: "default" },
+            runtime,
+            workspaceRoots: ["/workspace"],
+          },
+        }),
+      streams.server,
+    );
+    void agentConnection.closed.catch(() => {});
+
+    const clientConnection = new ClientSideConnection(
+      () =>
+        ({
+          async requestPermission() {
+            return { outcome: { optionId: "allow_once", outcome: "selected" } };
+          },
+          async sessionUpdate() {},
+        }) satisfies Client,
+      streams.client,
+    );
+    void clientConnection.closed.catch(() => {});
+
+    await clientConnection.initialize({
+      clientCapabilities: {},
+      protocolVersion: PROTOCOL_VERSION,
+    });
+
+    const created = await clientConnection.newSession({
+      _meta: {
+        "acp-runtime/remote/sessionAgent": {
+          command: "codex-acp",
+          args: ["--fast"],
+          env: { FREE_ENV: "test" },
+          type: "codex",
+        },
+        "acp-runtime/remote/sessionWorkspaceRoots": ["/workspace"],
+      },
+      cwd: "/workspace",
+      mcpServers: [],
+    } as never);
+
+    runtimeClosed = true;
+    const response = await clientConnection.prompt({
+      prompt: [{ text: "after restart", type: "text" }],
+      sessionId: created.sessionId,
+    });
+
+    expect(response.stopReason).toBe("end_turn");
+    expect(resumeCalls).toHaveLength(1);
+    expect(resumeCalls[0]).toMatchObject({
+      agent: {
+        command: "fake-agent",
+        type: "fake",
+      },
+      cwd: "/workspace",
+      sessionId: "runtime-session-1",
+    });
+    expect(resumeCalls[0]).toHaveProperty("handlers");
+  });
+
+  it("falls back to loading the runtime snapshot when resume is unsupported after service restart", async () => {
+    const streams = createStreamPair();
+    let runtimeClosed = false;
+    const startedSession = createFakeRuntimeSession({
+      id: "runtime-session-1",
+      onPrompt() {},
+    });
+    const loadedSession = createFakeRuntimeSession({
+      id: "runtime-session-1",
+      onPrompt() {},
+    });
+    const resumeCalls: unknown[] = [];
+    const loadCalls: unknown[] = [];
+    const runtime = {
+      isClosed: () => runtimeClosed,
+      sessions: {
+        async list() {
+          return { sessions: [] };
+        },
+        async load(options: unknown) {
+          loadCalls.push(options);
+          runtimeClosed = false;
+          return loadedSession;
+        },
+        async resume(options: unknown) {
+          resumeCalls.push(options);
+          throw new Error('"Method not found": session/resume');
+        },
+        async start() {
+          return startedSession;
+        },
+      },
+    };
+
+    const agentConnection = new AgentSideConnection(
+      (connection) =>
+        createAcpRemoteRuntimeAgent({
+          connection,
+          options: {
+            agent: { command: "default-agent", type: "default" },
+            runtime,
+            workspaceRoots: ["/workspace"],
+          },
+        }),
+      streams.server,
+    );
+    void agentConnection.closed.catch(() => {});
+
+    const clientConnection = new ClientSideConnection(
+      () =>
+        ({
+          async requestPermission() {
+            return { outcome: { optionId: "allow_once", outcome: "selected" } };
+          },
+          async sessionUpdate() {},
+        }) satisfies Client,
+      streams.client,
+    );
+    void clientConnection.closed.catch(() => {});
+
+    await clientConnection.initialize({
+      clientCapabilities: {},
+      protocolVersion: PROTOCOL_VERSION,
+    });
+
+    const created = await clientConnection.newSession({
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+
+    runtimeClosed = true;
+    await expect(
+      clientConnection.prompt({
+        prompt: [{ text: "after restart", type: "text" }],
+        sessionId: created.sessionId,
+      }),
+    ).resolves.toMatchObject({ stopReason: "end_turn" });
+
+    expect(resumeCalls).toHaveLength(1);
+    expect(loadCalls).toHaveLength(1);
+    expect(loadCalls[0]).toMatchObject({
+      agent: {
+        command: "fake-agent",
+        type: "fake",
+      },
+      cwd: "/workspace",
+      sessionId: "runtime-session-1",
+    });
+    expect(loadCalls[0]).not.toHaveProperty("mcpServers");
+    expect(loadCalls[0]).toHaveProperty("handlers");
+  });
+
+  it("fails an in-flight prompt with a resend message when runtime service disconnects", async () => {
+    const streams = createStreamPair();
+    const session = createFakeRuntimeSession({ onPrompt() {} });
+    session.turn.start = () => ({
+      completion: Promise.resolve({
+        output: [],
+        outputText: "",
+        turnId: "turn-runtime-closed",
+      }),
+      events: (async function* () {
+        yield { turnId: "turn-runtime-closed", type: AcpRuntimeTurnEventType.Started };
+        throw new Error("ACP runtime service connection closed.");
+      })(),
+      turnId: "turn-runtime-closed",
+    });
+    const runtime = {
+      isClosed: () => false,
+      sessions: {
+        async list() {
+          return { sessions: [] };
+        },
+        async load() {
+          return session;
+        },
+        async resume() {
+          return session;
+        },
+        async start() {
+          return session;
+        },
+      },
+    };
+
+    const agentConnection = new AgentSideConnection(
+      (connection) =>
+        createAcpRemoteRuntimeAgent({
+          connection,
+          options: { agent: { command: "fake", type: "fake" }, runtime },
+        }),
+      streams.server,
+    );
+    void agentConnection.closed.catch(() => {});
+
+    const clientConnection = new ClientSideConnection(
+      () =>
+        ({
+          async requestPermission() {
+            return { outcome: { optionId: "allow_once", outcome: "selected" } };
+          },
+          async sessionUpdate() {},
+        }) satisfies Client,
+      streams.client,
+    );
+    void clientConnection.closed.catch(() => {});
+
+    await clientConnection.initialize({
+      clientCapabilities: {},
+      protocolVersion: PROTOCOL_VERSION,
+    });
+
+    const created = await clientConnection.newSession({
+      cwd: "/workspace",
+      mcpServers: [],
+    });
+
+    await expect(
+      clientConnection.prompt({
+        prompt: [{ text: "will fail", type: "text" }],
+        sessionId: created.sessionId,
+      }),
+    ).rejects.toThrow(
+      "ACP runtime service restarted before this request completed. The message was not completed; resend it to continue.",
     );
   });
 });
