@@ -175,6 +175,11 @@ installed_bin="$INSTALL_DIR/free"
 cp "$tmp_file" "$installed_bin"
 chmod 0755 "$installed_bin"
 
+# Remove macOS quarantine flag that prevents unsigned binaries from launching.
+if command -v xattr >/dev/null 2>&1; then
+  xattr -cr "$installed_bin" 2>/dev/null || true
+fi
+
 ensure_active_path "$installed_bin"
 
 auth_args=(login)
