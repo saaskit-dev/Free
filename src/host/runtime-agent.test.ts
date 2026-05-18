@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 
 import { AcpProcessError } from "@saaskit-dev/acp-runtime";
 import {
+  AcpRuntimeAgentConfigOptionType,
   AcpRuntimeOperationKind,
   AcpRuntimeOperationPhase,
   AcpRuntimeThreadEntryKind,
@@ -1018,6 +1019,7 @@ describe("AcpRemoteRuntimeAgent", () => {
     const prompts: AcpRuntimePrompt[] = [];
     let loadCalled = false;
     let resumeCalled = false;
+    const restoreCalls: string[] = [];
     let startCalled = 0;
     const replacementSession = createFakeRuntimeSession({
       id: "replacement-runtime-session",
@@ -1032,10 +1034,12 @@ describe("AcpRemoteRuntimeAgent", () => {
         },
         async load() {
           loadCalled = true;
+          restoreCalls.push("load");
           throw new Error("missing local runtime snapshot");
         },
         async resume() {
           resumeCalled = true;
+          restoreCalls.push("resume");
           throw new Error("missing active runtime snapshot");
         },
         async start() {
@@ -1093,6 +1097,7 @@ describe("AcpRemoteRuntimeAgent", () => {
 
     expect(loadCalled).toBe(true);
     expect(resumeCalled).toBe(true);
+    expect(restoreCalls).toEqual(["resume", "load"]);
     expect(startCalled).toBe(1);
     expect(prompts).toHaveLength(2);
   });
@@ -1102,6 +1107,16 @@ describe("AcpRemoteRuntimeAgent", () => {
     let modeSet: string | undefined;
     let configSet: { id: string; value: unknown } | undefined;
     const session = createFakeRuntimeSession({ onPrompt() {} });
+    session.metadata.agentConfigOptions = [
+      {
+        category: "permissions",
+        description: "Auto approve changes",
+        id: "auto_approve",
+        name: "Auto Approve",
+        type: AcpRuntimeAgentConfigOptionType.Boolean,
+        value: false,
+      },
+    ];
     session.agent.setMode = async (modeId: string) => {
       modeSet = modeId;
     };
@@ -1163,13 +1178,19 @@ describe("AcpRemoteRuntimeAgent", () => {
     });
     expect(modeSet).toBe("plan");
 
-    await clientConnection.setSessionConfigOption({
+    const configResponse = await clientConnection.setSessionConfigOption({
       configId: "auto_approve",
       sessionId: created.sessionId,
       type: "boolean",
       value: true,
     });
     expect(configSet).toEqual({ id: "auto_approve", value: true });
+    expect(configResponse.configOptions).toEqual([
+      expect.objectContaining({
+        currentValue: true,
+        id: "auto_approve",
+      }),
+    ]);
   });
 
   it("forwards permission prompts to the remote client", async () => {

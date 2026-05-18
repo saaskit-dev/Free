@@ -43,7 +43,14 @@ describe("remote auth CLI", () => {
       name: "status",
       relayUrl: "ws://127.0.0.1:8791",
     });
-    expect(parseFreeAuthCommand(["logout"])).toEqual({ name: "logout" });
+    expect(parseFreeAuthCommand(["logout"])).toEqual({
+      name: "logout",
+      relayUrl: "wss://free-relay.saaskit.app",
+    });
+    expect(parseFreeAuthCommand(["logout", "--relay-env", "local"])).toEqual({
+      name: "logout",
+      relayUrl: "ws://127.0.0.1:8791",
+    });
   });
 
   it("rejects unknown auth commands", () => {

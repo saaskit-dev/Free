@@ -2,6 +2,7 @@ node_modules/
 dist/
 dist-bin/
 .tmp/
+.playwright-mcp/
 .expo/
 
 relay/node_modules/

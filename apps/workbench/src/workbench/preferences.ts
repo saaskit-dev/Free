@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 
-import type { LanguageMode, ThemeMode, WorkbenchPreferences } from "../types";
+import type { LanguageMode, SidebarState, ThemeMode, WorkbenchPreferences } from "../types";
 
 const STORAGE_KEY = "free.workbench.preferences";
 
 const defaultPreferences: WorkbenchPreferences = {
+  sidebar: "expanded",
   language: "zh",
   theme: "system",
 };
@@ -19,6 +20,7 @@ export function useWorkbenchPreferences() {
     try {
       const parsed = JSON.parse(raw) as Partial<WorkbenchPreferences>;
       setPreferences({
+        sidebar: readSidebar(parsed.sidebar),
         language: readLanguage(parsed.language),
         theme: readTheme(parsed.theme),
       });
@@ -42,9 +44,14 @@ export function useWorkbenchPreferences() {
 
   return {
     preferences,
+    setSidebar: (sidebar: SidebarState) => updatePreferences({ sidebar }),
     setLanguage: (language: LanguageMode) => updatePreferences({ language }),
     setTheme: (theme: ThemeMode) => updatePreferences({ theme }),
   };
+}
+
+function readSidebar(value: unknown): SidebarState {
+  return value === "collapsed" ? "collapsed" : "expanded";
 }
 
 function readLanguage(value: unknown): LanguageMode {

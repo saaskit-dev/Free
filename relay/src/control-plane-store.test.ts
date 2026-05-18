@@ -463,9 +463,11 @@ class FakeD1PreparedStatement implements D1PreparedStatementLike {
         account_id: this.readStringBinding(0),
         agent_json: this.readNullableStringBinding(4),
         client_device_id: this.readStringBinding(1),
+        closed_at: this.readNullableStringBinding(7),
         created_at: "2026-05-11T10:00:00.000Z",
         host_id: this.readStringBinding(3),
         session_id: this.readStringBinding(2),
+        title: this.readNullableStringBinding(6),
         updated_at: "2026-05-11T10:00:00.000Z",
         workspace_roots_json: this.readNullableStringBinding(5),
       };

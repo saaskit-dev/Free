@@ -1,11 +1,14 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { ACP_REMOTE_DEFAULT_RELAY_URL } from "../defaults.js";
+import { FREE_LOCAL_RELAY_URL } from "../relay-environment.js";
 
 export const ACP_REMOTE_HOST_LAUNCHD_LABEL =
-  "dev.saaskit.free.host";
+  "app.saaskit.free";
 
 export type AcpRemoteHostServiceInstallOptions = {
   hostBinPath: string;
@@ -29,6 +32,17 @@ export type AcpRemoteHostServiceStatus = {
   plistPath: string;
   running: boolean;
 };
+
+export function resolveAcpRemoteHostLaunchdLabel(relayUrl?: string): string {
+  if (!relayUrl || relayUrl === ACP_REMOTE_DEFAULT_RELAY_URL) {
+    return ACP_REMOTE_HOST_LAUNCHD_LABEL;
+  }
+  if (relayUrl === FREE_LOCAL_RELAY_URL) {
+    return `${ACP_REMOTE_HOST_LAUNCHD_LABEL}.local`;
+  }
+  const digest = createHash("sha256").update(relayUrl).digest("hex").slice(0, 12);
+  return `${ACP_REMOTE_HOST_LAUNCHD_LABEL}.${digest}`;
+}
 
 export async function acpRemoteHostServiceUsesExecutable(input: {
   homeDir?: string;
@@ -78,6 +92,9 @@ export async function installAcpRemoteHostUserService(
   const scope = options.scope ?? "user";
   const label = options.label ?? ACP_REMOTE_HOST_LAUNCHD_LABEL;
   const homeDir = options.homeDir ?? homedir();
+  const logSuffix = label === ACP_REMOTE_HOST_LAUNCHD_LABEL
+    ? "host"
+    : `host.${label.slice(`${ACP_REMOTE_HOST_LAUNCHD_LABEL}.`.length)}`;
   await removeOppositeLaunchdService({
     homeDir,
     label,
@@ -95,8 +112,8 @@ export async function installAcpRemoteHostUserService(
       homeDir,
       label,
       scope,
-      standardErrorPath: join(logDir, "host.err.log"),
-      standardOutPath: join(logDir, "host.out.log"),
+      standardErrorPath: join(logDir, `${logSuffix}.err.log`),
+      standardOutPath: join(logDir, `${logSuffix}.out.log`),
     }),
     "utf8",
   );
@@ -132,7 +149,7 @@ async function removeOppositeLaunchdService(input: {
   if (process.getuid?.() !== 0) {
     throw new Error(
       `System host is already installed at ${systemPlistPath}. ` +
-      "Run `sudo free host uninstall --system` before installing user mode.",
+      "Run `sudo free logout` before starting user mode.",
     );
   }
   ignoreLaunchctlFailure("bootout", launchdServiceTarget(input.label, "system"));
@@ -411,7 +428,7 @@ function ignoreLaunchctlFailure(...args: string[]): void {
 
 function assertMacOSServiceSupport(): void {
   if (process.platform !== "darwin") {
-    throw new Error("free host service install currently supports macOS launchd only.");
+    throw new Error("Free service install currently supports macOS launchd only.");
   }
 }
 
@@ -419,7 +436,7 @@ function assertLaunchdScopePermissions(
   scope: AcpRemoteHostServiceScope = "user",
 ): void {
   if (scope === "system" && process.getuid?.() !== 0) {
-    throw new Error("System host install/restart/stop/uninstall requires root. Re-run with sudo.");
+    throw new Error("System host start/stop requires root. Re-run with sudo.");
   }
 }
 

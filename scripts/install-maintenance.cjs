@@ -14,7 +14,7 @@ const {
 const { dirname, join, resolve } = require("node:path");
 const { homedir } = require("node:os");
 
-const LABEL = "dev.saaskit.free.host";
+const LABEL = "app.saaskit.free";
 
 function main() {
   const installedBin = resolveInstalledBin();

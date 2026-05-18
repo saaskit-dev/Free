@@ -12,6 +12,9 @@ const children: ChildProcess[] = [];
 const tempDirs: string[] = [];
 const testDir = dirname(fileURLToPath(import.meta.url));
 const previousSocketPath = process.env.FREE_RUNTIME_SERVICE_SOCKET_PATH;
+const cliRuntime = (process.versions as { bun?: string }).bun
+  ? process.execPath
+  : "bun";
 
 afterEach(async () => {
   for (const child of children.splice(0)) {
@@ -33,7 +36,7 @@ describe("ACP runtime service", () => {
     const tempDir = await mkdtemp(join(tmpdir(), "free-runtime-service-"));
     tempDirs.push(tempDir);
     const socketPath = join(tempDir, "runtime.sock");
-    const child = spawn("bun", ["src/bin.ts", "runtime-service", "run"], {
+    const child = spawn(cliRuntime, ["src/bin.ts", "host", "runtime-service"], {
       cwd: resolve(testDir, "../.."),
       env: {
         ...process.env,
@@ -95,7 +98,7 @@ describe("ACP runtime service", () => {
     const tempDir = await mkdtemp(join(tmpdir(), "free-runtime-service-term-"));
     tempDirs.push(tempDir);
     const socketPath = join(tempDir, "runtime.sock");
-    const child = spawn("bun", ["src/bin.ts", "runtime-service", "run"], {
+    const child = spawn(cliRuntime, ["src/bin.ts", "host", "runtime-service"], {
       cwd: resolve(testDir, "../.."),
       env: {
         ...process.env,

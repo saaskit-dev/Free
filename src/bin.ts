@@ -7,7 +7,6 @@ import { runFreeBridgeCommand } from "./client/relay-bridge.js";
 import { runFreeHostCommand } from "./host/bin.js";
 import {
   connectAcpRuntimeServiceClient,
-  runAcpRuntimeService,
   type AcpRuntimeServiceManagedSession,
 } from "./host/runtime-service.js";
 import { resolveCurrentFreeExecutablePath } from "./launcher.js";
@@ -18,8 +17,20 @@ async function main(argv: readonly string[]): Promise<void> {
     printHelp();
     return;
   }
+  if (command === "login") {
+    await runFreeAuthCommand(["login", ...rest]);
+    return;
+  }
+  if (command === "logout") {
+    await runFreeAuthCommand(["logout", ...rest]);
+    return;
+  }
   if (command === "auth") {
     await runFreeAuthCommand(rest);
+    return;
+  }
+  if (command === "status") {
+    await runFreeStatusCommand(rest);
     return;
   }
   if (command === "bridge") {
@@ -43,33 +54,26 @@ async function main(argv: readonly string[]): Promise<void> {
     await runFreeHostCommand(rest);
     return;
   }
-  if (command === "runtime") {
-    await runFreeRuntimeCommand(rest);
-    return;
-  }
-  if (command === "runtime-service") {
-    if (rest[0] && rest[0] !== "run") {
-      throw new Error(`Unknown runtime-service command: ${rest[0]}`);
-    }
-    await runAcpRuntimeService();
+  if (command === "session" || command === "sessions") {
+    await runFreeSessionCommand(rest);
     return;
   }
   throw new Error(`Unknown free command: ${command}`);
 }
 
-async function runFreeRuntimeCommand(argv: readonly string[]): Promise<void> {
-  const [command, ...rest] = argv;
-  if (!command || command === "--help" || command === "-h") {
-    printRuntimeHelp();
+async function runFreeStatusCommand(argv: readonly string[]): Promise<void> {
+  if (argv.length === 1 && (argv[0] === "--help" || argv[0] === "-h")) {
+    printStatusHelp();
     return;
   }
-  if (command === "status") {
+  await runFreeAuthCommand(["status", ...argv]);
+  try {
     const client = await connectAcpRuntimeServiceClient({});
     try {
       const status = await client.management.status();
       process.stdout.write(
         [
-          `runtime: ${status.instanceId}`,
+          `runtimeService: ${status.instanceId}`,
           `sessions: ${status.sessionCount}`,
           `active turns: ${status.activeTurns}`,
           `attached clients: ${status.peerCount}`,
@@ -78,19 +82,27 @@ async function runFreeRuntimeCommand(argv: readonly string[]): Promise<void> {
     } finally {
       client.close();
     }
-    return;
+  } catch (error) {
+    process.stdout.write(
+      `runtimeService: unavailable (${error instanceof Error ? error.message : String(error)})\n`,
+    );
   }
-  if (command === "sessions") {
-    await runFreeRuntimeSessionsCommand(rest);
-    return;
-  }
-  throw new Error(`Unknown runtime command: ${command}`);
 }
 
-async function runFreeRuntimeSessionsCommand(argv: readonly string[]): Promise<void> {
+function printStatusHelp(): void {
+  process.stdout.write(
+    [
+      "Usage:",
+      "  free status [--relay-env online|local]",
+      "  free status [--relay-url <ws-url>]",
+    ].join("\n") + "\n",
+  );
+}
+
+async function runFreeSessionCommand(argv: readonly string[]): Promise<void> {
   const [command, ...rest] = argv;
   if (!command || command === "--help" || command === "-h") {
-    printRuntimeSessionsHelp();
+    printSessionHelp();
     return;
   }
   const client = await connectAcpRuntimeServiceClient({});
@@ -105,26 +117,26 @@ async function runFreeRuntimeSessionsCommand(argv: readonly string[]): Promise<v
         for (const session of sessions) {
           await client.management.closeSession(session.id);
         }
-        process.stdout.write(`Closed ${sessions.length} runtime session(s).\n`);
+        process.stdout.write(`Closed ${sessions.length} session(s).\n`);
         return;
       }
       const sessionId = rest[0];
       if (!sessionId) {
-        throw new Error("Missing runtime session id.");
+        throw new Error("Missing session id.");
       }
       await client.management.closeSession(sessionId);
-      process.stdout.write(`Closed runtime session ${sessionId}.\n`);
+      process.stdout.write(`Closed session ${sessionId}.\n`);
       return;
     }
   } finally {
     client.close();
   }
-  throw new Error(`Unknown runtime sessions command: ${command}`);
+  throw new Error(`Unknown session command: ${command}`);
 }
 
 function printManagedSessions(sessions: readonly AcpRuntimeServiceManagedSession[]): void {
   if (sessions.length === 0) {
-    process.stdout.write("No managed ACP runtime sessions.\n");
+    process.stdout.write("No managed Free sessions.\n");
     return;
   }
   const rows = sessions.map((session) => [
@@ -148,30 +160,13 @@ function formatRuntimeRow(row: readonly string[], widths: readonly number[]): st
   return row.map((value, index) => value.padEnd(widths[index] ?? 0)).join("  ");
 }
 
-function printRuntimeHelp(): void {
+function printSessionHelp(): void {
   process.stdout.write(
     [
       "Usage:",
-      "  free runtime status",
-      "  free runtime sessions list",
-      "  free runtime sessions close <session-id>",
-      "  free runtime sessions close --all",
-      "",
-      "Lifecycle:",
-      "  Runtime sessions are owned by the local ACP runtime service.",
-      "  Host restarts do not close managed ACP sessions.",
-      "  ACP session/close and runtime sessions close release the underlying ACP agent process.",
-    ].join("\n") + "\n",
-  );
-}
-
-function printRuntimeSessionsHelp(): void {
-  process.stdout.write(
-    [
-      "Usage:",
-      "  free runtime sessions list",
-      "  free runtime sessions close <session-id>",
-      "  free runtime sessions close --all",
+      "  free session list",
+      "  free session close <session-id>",
+      "  free session close --all",
     ].join("\n") + "\n",
   );
 }
@@ -262,15 +257,14 @@ function printHelp(): void {
   process.stdout.write(
     [
       "Usage:",
-      "  free auth login",
-      "  free auth status",
-      "  free auth logout",
-      "  free bridge run",
-      "  free bridge config",
-      "  free host run",
-      "  free host install",
+      "  free login",
+      "  free logout",
+      "  free status",
+      "  free session list",
+      "  free session close <session-id>",
+      "  free session close --all",
       "",
-      "free auth login signs in and starts the local Free host service.",
+      "free login signs in and enables this machine.",
       "Default relay environment is online. Use --relay-env local for ws://127.0.0.1:8791.",
       "",
       "Run a subcommand with --help for details.",

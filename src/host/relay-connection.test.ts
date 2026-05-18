@@ -191,6 +191,12 @@ describe("createAcpRemoteHostConnection", () => {
       runtime: {
         sessions: {
           async load() {
+            throw new Error("resume should restore the test session");
+          },
+          async list() {
+            return { sessions: [] };
+          },
+          async resume() {
             return createRuntimeSession({
               onPromptStart() {
                 promptStarts += 1;
@@ -202,14 +208,8 @@ describe("createAcpRemoteHostConnection", () => {
               },
             });
           },
-          async list() {
-            return { sessions: [] };
-          },
-          async resume() {
-            throw new Error("load should restore the test session");
-          },
           async start() {
-            throw new Error("prompt restore should load the test session");
+            throw new Error("prompt restore should resume the test session");
           },
         },
       } as never,

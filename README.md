@@ -17,13 +17,13 @@ curl -fsSL https://free.saaskit.app/install | bash
 ```
 
 The binary installer downloads the current GitHub `latest` release asset for
-your platform, installs it to `~/.local/bin/free`, then runs `free auth login`
-by default.
+your platform, installs the unified `free` CLI to `~/.local/bin/free`, then runs
+`free login` by default.
 
 Useful binary install flags:
 
 - `--no-login` installs only the `free` CLI.
-- `--force-login` refreshes browser login and reinstalls the active host mode.
+- `--force-login` refreshes browser login and re-enables this machine.
 - `--relay-env local` signs in against the local relay.
 - `--relay-url <ws-url>` uses a custom relay.
 
@@ -35,12 +35,12 @@ curl -fsSL https://raw.githubusercontent.com/saaskit-dev/Free/main/scripts/insta
 
 The source installer clones Free and `acp-runtime`, builds the required local
 packages, packs Free, installs the resulting CLI globally with npm, then runs
-`free auth login` by default.
+`free login` by default.
 
 Useful source install flags:
 
 - `--no-login` installs only the `free` CLI.
-- `--force-login` refreshes browser login and reinstalls the active host mode.
+- `--force-login` refreshes browser login and re-enables this machine.
 - `--relay-url <ws-url>` uses a non-default relay.
 - `--ref <git-ref>` installs a specific Free branch, tag, or commit.
 
@@ -55,17 +55,18 @@ For a local checkout:
 The installed package exposes `free`:
 
 ```sh
-free auth login
-free auth status
-free auth logout
-free bridge run
-free bridge config
+free login
+free logout
+free status
+free session list
+free session close <session-id>
 ```
 
 The normal user flow is:
 
-1. Run `free auth login` on each machine that should host agents.
-2. Configure the editor ACP client to launch `free bridge run`.
+1. Install the unified `free` CLI.
+2. Run `free login` on each machine that should be available.
+3. Check availability with `free status`.
 
 Hosts are registered in the relay control plane. Offline hosts can still appear
 in discovery using their last known metadata, but only currently connected hosts
@@ -202,19 +203,21 @@ Workbench.
 The default bridge, auth, and host environment is online:
 
 ```sh
-free bridge config
-free bridge run
-free auth login
+free login
+free status
 ```
 
 Use the local environment when testing against `make relay-dev` on port `8791`
 and Workbench Web on port `8790`:
 
 ```sh
-free bridge config --relay-env local
-free bridge run --relay-env local
-free auth login --relay-env local
+free login --relay-env local
+free status --relay-env local
 ```
+
+The online host and local test host use separate launchd services, so both can
+run at the same time. `free logout --relay-env local` stops only the local test
+host; plain `free logout` targets the default online host.
 
 `--relay-url <ws-url>` remains available for custom relay deployments, but it
 should not be mixed with `--relay-env`.

@@ -81,6 +81,7 @@ create table if not exists acp_remote_session_bindings (
   agent_json text,
   workspace_roots_json text,
   title text,
+  closed_at text,
   created_at text not null default current_timestamp,
   updated_at text not null default current_timestamp,
   primary key (account_id, client_device_id, session_id),

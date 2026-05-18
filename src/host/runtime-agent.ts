@@ -348,11 +348,15 @@ export class AcpRemoteRuntimeAgent implements Agent {
         const value: AcpRuntimeConfigValue =
           "type" in params && params.type === "boolean" ? params.value : params.value;
         await active.session.agent.setConfigOption(params.configId, value);
+        const configOptions = mapRuntimeConfigOptionsToAcp(
+          active.session.metadata.agentConfigOptions,
+        ) ?? [];
         return addTraceparentMetadata({
-          configOptions:
-            mapRuntimeConfigOptionsToAcp(
-              active.session.metadata.agentConfigOptions,
-            ) ?? [],
+          configOptions: applyAcceptedConfigOptionValue(
+            configOptions,
+            params.configId,
+            value,
+          ),
         }, span.traceparent);
       },
     );
@@ -586,6 +590,7 @@ export class AcpRemoteRuntimeAgent implements Agent {
         cwd,
         mcpServers,
         method,
+        preferred: "resume",
         sessionId: params.sessionId,
         traceContext,
       });
@@ -1118,6 +1123,22 @@ function emitRemotePromptFailureLog(input: {
     eventName: "acp.remote.host.prompt.failed",
     exception: input.error,
     severityNumber: SeverityNumber.ERROR,
+  });
+}
+
+function applyAcceptedConfigOptionValue<T extends { currentValue?: unknown; id: string }>(
+  options: readonly T[],
+  configId: string,
+  value: AcpRuntimeConfigValue,
+): T[] {
+  return options.map((option) => {
+    if (option.id !== configId) {
+      return option;
+    }
+    return {
+      ...option,
+      currentValue: typeof value === "boolean" ? value : String(value),
+    };
   });
 }
 

@@ -16,6 +16,12 @@ export type HostRecord = {
   hostId: string;
   online?: boolean;
   metadata?: {
+    agentTypes?: {
+      command?: string;
+      id?: string;
+      label?: string;
+      type?: string;
+    }[];
     agentName?: string;
     displayName?: string;
     machine?: string;
@@ -31,7 +37,9 @@ export type SessionRecord = {
     id?: string;
     type?: string;
   };
+  bridgeConnected?: boolean;
   connectionId?: string;
+  closedAt?: string;
   createdAt?: string;
   error?: string;
   lifecycle?: "live" | "offline";
@@ -39,10 +47,11 @@ export type SessionRecord = {
   hostMetadata?: HostRecord["metadata"];
   hostName?: string;
   hostOnline?: boolean;
+  hasActiveEvent?: boolean;
   latestEvent?: string;
   requestId?: string | number;
   sessionId: string;
-  status?: "waiting_authorization" | "starting" | "active" | "failed" | "offline";
+  status?: "waiting_authorization" | "starting" | "active" | "detached" | "failed" | "offline";
   title?: string;
   updatedAt?: string;
   workspaceRoots: string[];
@@ -56,6 +65,7 @@ export type SessionHealth = {
     message: string;
     status: "ok" | "warning" | "error";
   }[];
+  detachedSessionCount?: number;
   liveSessionCount: number;
   offlineSessionCount: number;
   onlineHostCount: number;
@@ -113,6 +123,9 @@ export type ThemeMode = "system" | "light" | "dark";
 export type LanguageMode = "zh" | "en";
 
 export type WorkbenchPreferences = {
+  sidebar: SidebarState;
   language: LanguageMode;
   theme: ThemeMode;
 };
+
+export type SidebarState = "expanded" | "collapsed";

@@ -256,7 +256,7 @@ function normalizeHostSocketErrorEvent(event: unknown): string | undefined {
 
 function formatHostSocketErrorMessage(message: string): string {
   if (/unexpected server response:\s*401/i.test(message)) {
-    return "relay login expired or invalid (HTTP 401); run `free auth login --force` and restart the host";
+    return "relay login expired or invalid (HTTP 401); run `free login --force`";
   }
   return message;
 }

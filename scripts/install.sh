@@ -27,9 +27,9 @@ Usage:
   ./scripts/install.sh [--force-login] [--no-login] [--relay-url <ws-url>]
 
 Options:
-  --force-login  Force browser login refresh and reinstall the active host mode.
+  --force-login  Force browser login refresh and re-enable this machine.
   --no-login     Only install the Free CLI.
-  --relay-url    Relay WebSocket URL passed to auth commands.
+  --relay-url    Relay WebSocket URL passed to login.
   --repo-url     Git repository URL, default: https://github.com/saaskit-dev/Free.git.
   --ref          Git ref to checkout, default: repository default branch.
   --source-git   Force the installer to clone source instead of using the current checkout.
@@ -318,7 +318,7 @@ if ! command -v free >/dev/null 2>&1; then
   print_path_hint "$FREE_BIN"
 fi
 
-auth_args=(auth login)
+auth_args=(login)
 if [ -n "$RELAY_URL" ]; then
   auth_args+=(--relay-url "$RELAY_URL")
 fi

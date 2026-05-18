@@ -559,7 +559,7 @@ describe("AcpRelayBroker", () => {
     });
   });
 
-  it("lists stored session bindings as offline history", async () => {
+  it("lists unclosed stored session bindings as detached open sessions", async () => {
     const broker = new AcpRelayBroker({
       controlPlaneStore: new AcpRelayInMemoryControlPlaneStore({
         accounts: [{ accountId: "acct-1" }],
@@ -609,16 +609,140 @@ describe("AcpRelayBroker", () => {
       sessions: [
         expect.objectContaining({
           agent: { id: "codex-acp" },
+          bridgeConnected: false,
+          hasActiveEvent: false,
           hostId: "host-1",
           hostName: "Studio Mac",
           hostOnline: false,
-          latestEvent: "Host is offline. Session history is retained for inspection.",
-          lifecycle: "offline",
+          latestEvent: "ACP session is open.",
+          lifecycle: "live",
           sessionId: "session-1",
-          status: "offline",
+          status: "detached",
           title: "/dev · codex-acp · Studio Mac",
           updatedAt: "2026-05-14T01:00:00.000Z",
           workspaceRoots: ["/Users/dev"],
+        }),
+      ],
+    });
+  });
+
+  it("marks a disconnected stored session as closed from the workbench", async () => {
+    const broker = new AcpRelayBroker({
+      controlPlaneStore: new AcpRelayInMemoryControlPlaneStore({
+        accounts: [{ accountId: "acct-1" }],
+        clientDevices: [
+          { accountId: "acct-1", clientId: "browser-client" },
+          { accountId: "acct-1", clientId: "zed-client" },
+        ],
+        grants: [
+          {
+            accountId: "acct-1",
+            clientId: "browser-client",
+            hostId: "host-1",
+            policyVersion: 1,
+            scopes: ["acp:connect"],
+          },
+        ],
+        hosts: [
+          {
+            accountId: "acct-1",
+            hostId: "host-1",
+          },
+        ],
+        sessionBindings: [
+          {
+            accountId: "acct-1",
+            clientId: "zed-client",
+            hostId: "host-1",
+            sessionId: "session-1",
+            updatedAt: "2026-05-14T01:00:00.000Z",
+            workspaceRoots: ["/Users/dev"],
+          },
+        ],
+      }),
+      now: () => new Date("2026-05-14T02:00:00.000Z"),
+    });
+
+    await expect(
+      broker.closeDisconnectedSession({
+        accountId: "acct-1",
+        sessionId: "session-1",
+      }),
+    ).resolves.toEqual({ ok: true });
+    await expect(
+      broker.listSessions({ accountId: "acct-1", clientId: "browser-client" }),
+    ).resolves.toEqual({
+      ok: true,
+      sessions: [
+        expect.objectContaining({
+          closedAt: "2026-05-14T02:00:00.000Z",
+          lifecycle: "offline",
+          sessionId: "session-1",
+          status: "offline",
+        }),
+      ],
+    });
+  });
+
+  it("lists closed stored session bindings as closed history", async () => {
+    const broker = new AcpRelayBroker({
+      controlPlaneStore: new AcpRelayInMemoryControlPlaneStore({
+        accounts: [{ accountId: "acct-1" }],
+        clientDevices: [
+          { accountId: "acct-1", clientId: "browser-client" },
+          { accountId: "acct-1", clientId: "zed-client" },
+        ],
+        grants: [
+          {
+            accountId: "acct-1",
+            clientId: "browser-client",
+            hostId: "host-1",
+            policyVersion: 1,
+            scopes: ["acp:connect"],
+          },
+        ],
+        hosts: [
+          {
+            accountId: "acct-1",
+            hostId: "host-1",
+            metadata: {
+              agentTypes: [{ id: "codex-acp", label: "Codex" }],
+              displayName: "Studio Mac",
+              machine: "studio.local",
+              workspaceRoots: [{ path: "/Users/dev" }],
+            },
+          },
+        ],
+        sessionBindings: [
+          {
+            accountId: "acct-1",
+            agent: { id: "codex-acp" },
+            clientId: "zed-client",
+            closedAt: "2026-05-14T02:00:00.000Z",
+            hostId: "host-1",
+            sessionId: "session-1",
+            updatedAt: "2026-05-14T01:00:00.000Z",
+            workspaceRoots: ["/Users/dev"],
+          },
+        ],
+      }),
+    });
+
+    await expect(
+      broker.listSessions({ accountId: "acct-1", clientId: "browser-client" }),
+    ).resolves.toEqual({
+      ok: true,
+      sessions: [
+        expect.objectContaining({
+          bridgeConnected: false,
+          closedAt: "2026-05-14T02:00:00.000Z",
+          hasActiveEvent: false,
+          hostId: "host-1",
+          latestEvent: "ACP session was closed.",
+          lifecycle: "offline",
+          sessionId: "session-1",
+          status: "offline",
+          updatedAt: "2026-05-14T02:00:00.000Z",
         }),
       ],
     });
@@ -760,6 +884,18 @@ describe("AcpRelayBroker", () => {
             },
           },
         ],
+        sessionBindings: [
+          {
+            accountId: "acct-1",
+            agent: { id: "codex-acp" },
+            clientId: "zed-client",
+            createdAt: "2026-05-14T00:00:00.000Z",
+            hostId: "host-1",
+            sessionId: "live-session",
+            updatedAt: "2026-05-14T01:00:00.000Z",
+            workspaceRoots: ["/Users/dev"],
+          },
+        ],
       }),
     });
     const [, relayHostSocket] = createMemoryWebSocketPair();
@@ -821,19 +957,24 @@ describe("AcpRelayBroker", () => {
       sessions: [
         expect.objectContaining({
           agent: { id: "codex-acp" },
+          bridgeConnected: true,
+          connectionId: "conn-1",
+          hasActiveEvent: false,
           hostId: "host-1",
           hostName: "Studio Mac",
           lifecycle: "live",
+          createdAt: "2026-05-14T00:00:00.000Z",
           sessionId: "live-session",
           status: "active",
           title: "/dev · codex-acp · Studio Mac",
+          updatedAt: "2026-05-14T01:00:00.000Z",
           workspaceRoots: ["/Users/dev"],
         }),
       ],
     });
   });
 
-  it("does not list remembered client sessions when the host is offline", async () => {
+  it("lists remembered client sessions by ACP lifecycle even when the host is offline", async () => {
     const broker = new AcpRelayBroker({
       controlPlaneStore: new AcpRelayInMemoryControlPlaneStore({
         accounts: [{ accountId: "acct-1" }],
@@ -908,7 +1049,20 @@ describe("AcpRelayBroker", () => {
       broker.listSessions({ accountId: "acct-1", clientId: "browser-client" }),
     ).resolves.toEqual({
       ok: true,
-      sessions: [],
+      sessions: [
+        expect.objectContaining({
+          agent: { id: "codex-acp" },
+          bridgeConnected: true,
+          connectionId: "conn-1",
+          hasActiveEvent: false,
+          hostId: "host-1",
+          hostOnline: false,
+          lifecycle: "live",
+          sessionId: "remembered-session",
+          status: "active",
+          workspaceRoots: ["/Users/dev"],
+        }),
+      ],
     });
   });
 
@@ -957,8 +1111,9 @@ describe("AcpRelayBroker", () => {
       broker.checkSessionHealth({ accountId: "acct-1", clientId: "browser-client" }),
     ).resolves.toMatchObject({
       health: {
+        detachedSessionCount: 1,
         liveSessionCount: 0,
-        offlineSessionCount: 1,
+        offlineSessionCount: 0,
         onlineHostCount: 0,
         status: "unhealthy",
       },
@@ -1020,6 +1175,8 @@ describe("AcpRelayBroker", () => {
       sessions: [
         expect.objectContaining({
           agent: { id: "fake-agent" },
+          bridgeConnected: true,
+          hasActiveEvent: true,
           hostId: "host-1",
           latestEvent: "Waiting for host runtime response.",
           requestId: 41,
@@ -1100,6 +1257,165 @@ describe("AcpRelayBroker", () => {
           status: "failed",
         }),
       ],
+    });
+  });
+
+  it("does not time out a slow session load with the session start timeout", async () => {
+    const identity = await createProofFixture();
+    const broker = new AcpRelayBroker({
+      controlPlaneStore: new AcpRelayInMemoryControlPlaneStore({
+        accounts: [{ accountId: "acct-1" }],
+        clientDevices: [{ accountId: "acct-1", clientId: "client-1" }],
+        grants: [
+          {
+            accountId: "acct-1",
+            clientId: "client-1",
+            hostId: "host-1",
+            policyVersion: 1,
+            scopes: ["acp:connect", "acp:session:resume"],
+          },
+        ],
+        hosts: [{ accountId: "acct-1", hostId: "host-1" }],
+      }),
+      sessionOpenTimeoutMs: 5,
+    });
+    const [, relayHostSocket] = createMemoryWebSocketPair();
+    await broker.registerHost({
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        displayName: "Studio Mac",
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: relayHostSocket,
+    });
+
+    const [clientSocket, relayClientSocket] = createMemoryWebSocketPair();
+    const clientMessages: unknown[] = [];
+    clientSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        clientMessages.push(JSON.parse(event.data));
+      }
+    });
+    broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      connectionProof: identity.proof,
+      socket: relayClientSocket,
+    });
+    await broker.authorizeClient({
+      clientAgent: { id: "fake-agent" },
+      connectionId: "conn-1",
+      hostId: "host-1",
+      skipHostBootstrapInitialize: true,
+      workspaceRoots: ["/workspace"],
+    });
+    await broker.handleClientText(
+      "conn-1",
+      JSON.stringify({
+        id: 44,
+        jsonrpc: "2.0",
+        method: "session/load",
+        params: { sessionId: "session-1" },
+      }),
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(clientMessages).toEqual([]);
+    await expect(
+      broker.listSessions({ accountId: "acct-1", clientId: "client-1" }),
+    ).resolves.toMatchObject({
+      ok: true,
+      sessions: expect.arrayContaining([
+        expect.objectContaining({
+          hostId: "host-1",
+          requestId: 44,
+          status: "starting",
+        }),
+      ]),
+    });
+  });
+
+  it("returns a product error when a queued prompt waits too long for host reconnect", async () => {
+    const identity = await createProofFixture();
+    const broker = createBroker({ pendingHostRequestTimeoutMs: 5 });
+    const [, relayHostSocket] = createMemoryWebSocketPair();
+    await broker.registerHost({
+      hostId: "host-1",
+      metadata: {
+        agentTypes: [{ id: "fake-agent", label: "Fake Agent" }],
+        displayName: "Studio Mac",
+        workspaceRoots: [{ path: "/workspace" }],
+      },
+      socket: relayHostSocket,
+    });
+
+    const [clientSocket, relayClientSocket] = createMemoryWebSocketPair();
+    const clientMessages: unknown[] = [];
+    clientSocket.addEventListener("message", (event) => {
+      if (typeof event.data === "string") {
+        clientMessages.push(JSON.parse(event.data));
+      }
+    });
+    broker.registerClient({
+      accountId: "acct-1",
+      authUrl: "https://relay.test/authorize?connectionId=conn-1",
+      clientId: "client-1",
+      connectionId: "conn-1",
+      connectionProof: identity.proof,
+      socket: relayClientSocket,
+    });
+    await broker.authorizeClient({
+      clientAgent: { id: "fake-agent" },
+      connectionId: "conn-1",
+      hostId: "host-1",
+      skipHostBootstrapInitialize: true,
+      workspaceRoots: ["/workspace"],
+    });
+    broker.removeHost("host-1", relayHostSocket);
+
+    await broker.handleClientText(
+      "conn-1",
+      JSON.stringify({
+        id: 43,
+        jsonrpc: "2.0",
+        method: "session/prompt",
+        params: {
+          prompt: [{ text: "run", type: "text" }],
+          sessionId: "session-1",
+        },
+      }),
+    );
+
+    await waitFor(() => clientMessages.length > 0);
+    expect(clientMessages[0]).toMatchObject({
+      error: {
+        code: -32006,
+        data: {
+          reason: "host_reconnect_timeout",
+          sessionId: "session-1",
+        },
+        message:
+          "Host did not reconnect in time. The message was not sent; restart the host and retry.",
+      },
+      id: 43,
+      jsonrpc: "2.0",
+    });
+    await expect(
+      broker.listSessions({ accountId: "acct-1", clientId: "client-1" }),
+    ).resolves.toMatchObject({
+      ok: true,
+      sessions: expect.arrayContaining([
+        expect.objectContaining({
+          error:
+            "Host did not reconnect in time. The message was not sent; restart the host and retry.",
+          hostId: "host-1",
+          requestId: 43,
+          status: "failed",
+        }),
+      ]),
     });
   });
 

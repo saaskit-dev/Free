@@ -18,6 +18,8 @@ import {
   getAcpRemoteHostUserServiceStatus,
   installAcpRemoteHostUserService,
   restartAcpRemoteHostUserService,
+  resolveAcpRemoteHostLaunchdLabel,
+  uninstallAcpRemoteHostUserService,
 } from "./host/service.js";
 import { resolveCurrentFreeExecutablePath } from "./launcher.js";
 import { execFileSync } from "node:child_process";
@@ -27,7 +29,7 @@ import { fileURLToPath } from "node:url";
 type AuthCommand =
   | { name: "help" }
   | { force: boolean; name: "login"; relayUrl: string }
-  | { name: "logout" }
+  | { name: "logout"; relayUrl: string }
   | { name: "status"; relayUrl: string };
 
 export function parseFreeAuthCommand(
@@ -43,8 +45,7 @@ export function parseFreeAuthCommand(
     case "login":
       return parseLoginCommand(rest, env);
     case "logout":
-      assertNoArgs(rest, "logout");
-      return { name: "logout" };
+      return parseLogoutCommand(rest, env);
     case "status":
       return parseStatusCommand(rest, env);
     default:
@@ -62,7 +63,7 @@ export async function runFreeAuthCommand(argv: readonly string[]): Promise<void>
       await login(command);
       return;
     case "logout":
-      await logout();
+      await logout(command);
       return;
     case "status":
       await status(command);
@@ -96,7 +97,7 @@ function parseLoginCommand(
       case "-h":
         return { name: "help" };
       default:
-        throw new Error(`Unknown free auth login option: ${arg}`);
+        throw new Error(`Unknown free login option: ${arg}`);
     }
   }
   return {
@@ -130,7 +131,7 @@ function parseStatusCommand(
         index += 1;
         break;
       default:
-        throw new Error(`Unknown free auth status option: ${arg}`);
+        throw new Error(`Unknown free status option: ${arg}`);
     }
   }
   return {
@@ -145,10 +146,37 @@ function parseStatusCommand(
   };
 }
 
-function assertNoArgs(argv: readonly string[], command: string): void {
-  if (argv.length > 0) {
-    throw new Error(`Unexpected arguments for free auth ${command}: ${argv.join(" ")}`);
+function parseLogoutCommand(
+  argv: readonly string[],
+  env: Record<string, string | undefined>,
+): AuthCommand {
+  let relayEnvironment: string | undefined;
+  let relayUrl: string | undefined;
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    switch (arg) {
+      case "--relay-url":
+        relayUrl = readArgValue(argv, index, arg);
+        index += 1;
+        break;
+      case "--relay-env":
+        relayEnvironment = readArgValue(argv, index, arg);
+        index += 1;
+        break;
+      default:
+        throw new Error(`Unknown free logout option: ${arg}`);
+    }
   }
+  return {
+    name: "logout",
+    relayUrl: resolveFreeRelayUrl({
+      env,
+      envRelayEnvironmentName: "FREE_RELAY_ENV",
+      envRelayUrlName: "FREE_RELAY_URL",
+      explicitRelayEnvironment: relayEnvironment,
+      explicitRelayUrl: relayUrl,
+    }),
+  };
 }
 
 function readArgValue(
@@ -244,16 +272,9 @@ async function ensureDefaultHostInstalled(
     return "Host service install skipped: automatic service install currently supports macOS launchd only.";
   }
   const homeDir = homedir();
-  const systemStatus = getAcpRemoteHostUserServiceStatus(
-    undefined,
-    "system",
-    homeDir,
-  );
-  const userStatus = getAcpRemoteHostUserServiceStatus(
-    undefined,
-    "user",
-    homeDir,
-  );
+  const label = resolveAcpRemoteHostLaunchdLabel(relayUrl);
+  const systemStatus = getAcpRemoteHostUserServiceStatus(label, "system", homeDir);
+  const userStatus = getAcpRemoteHostUserServiceStatus(label, "user", homeDir);
   if (systemStatus.installed && !userStatus.installed) {
     return reinstallSystemHostService(relayUrl);
   }
@@ -263,6 +284,7 @@ async function ensureDefaultHostInstalled(
     const matchesCurrentConfig = await acpRemoteHostServiceMatchesConfig({
       homeDir,
       hostBinPath,
+      label,
       relayUrl,
       scope: "user",
       workspaceRoots,
@@ -274,6 +296,7 @@ async function ensureDefaultHostInstalled(
           ...process.env,
         },
         homeDir,
+        label,
         relayUrl,
         scope: "user",
         workspaceRoots,
@@ -284,7 +307,7 @@ async function ensureDefaultHostInstalled(
       return `Host service already installed: running (${userStatus.plistPath})`;
     }
     const started = await restartAcpRemoteHostUserService(
-      undefined,
+      label,
       "user",
       homeDir,
     );
@@ -296,6 +319,7 @@ async function ensureDefaultHostInstalled(
       ...process.env,
     },
     homeDir,
+    label,
     relayUrl,
     scope: "user",
     workspaceRoots,
@@ -311,7 +335,7 @@ function reinstallSystemHostService(relayUrl: string): string {
       [
         hostBinPath,
         "host",
-        "install",
+        "start",
         "--system",
         "--relay-url",
         relayUrl,
@@ -324,18 +348,55 @@ function reinstallSystemHostService(relayUrl: string): string {
   }
 }
 
-async function logout(): Promise<void> {
-  const path = getSessionPath();
-  const cached = await loadCachedSession();
-  await clearCachedSession();
+async function logout(command: Extract<AuthCommand, { name: "logout" }>): Promise<void> {
+  const path = getSessionPath(undefined, command.relayUrl);
+  const cached = await loadCachedSession(undefined, command.relayUrl);
+  await clearCachedSession(undefined, command.relayUrl);
+  const hostMessage = await stopDefaultHostService(command.relayUrl);
   if (!cached) {
-    process.stdout.write(`Not authenticated. No cached session at ${path}.\n`);
+    process.stdout.write(
+      [`Not authenticated. No cached session at ${path}.`, hostMessage].join("\n") +
+        "\n",
+    );
     return;
   }
-  process.stdout.write(`Logged out. Removed cached session at ${path}.\n`);
+  process.stdout.write(
+    [`Logged out. Removed cached session at ${path}.`, hostMessage].join("\n") +
+      "\n",
+  );
+}
+
+async function stopDefaultHostService(relayUrl: string): Promise<string> {
+  if (process.platform !== "darwin") {
+    return "Host service stop skipped: automatic service management currently supports macOS launchd only.";
+  }
+  const homeDir = homedir();
+  const label = resolveAcpRemoteHostLaunchdLabel(relayUrl);
+  const userStatus = getAcpRemoteHostUserServiceStatus(label, "user", homeDir);
+  const systemStatus = getAcpRemoteHostUserServiceStatus(
+    label,
+    "system",
+    homeDir,
+  );
+  if (userStatus.installed) {
+    await uninstallAcpRemoteHostUserService(label, "user", homeDir);
+    return "Host service stopped.";
+  }
+  if (systemStatus.installed) {
+    if (process.getuid?.() === 0) {
+      await uninstallAcpRemoteHostUserService(label, "system", homeDir);
+      return "System host service stopped.";
+    }
+    return `System host service is still installed. Run \`sudo ${loginCommandForRelay(relayUrl).replace("login", "logout")}\` to stop it.`;
+  }
+  return "Host service already stopped.";
 }
 
 async function status(command: Extract<AuthCommand, { name: "status" }>): Promise<void> {
+  const serviceLabel = resolveAcpRemoteHostLaunchdLabel(command.relayUrl);
+  const serviceStatus = process.platform === "darwin"
+    ? getAcpRemoteHostUserServiceStatus(serviceLabel)
+    : undefined;
   const cached = await loadCachedSession(undefined, command.relayUrl);
   if (cached) {
     process.stderr.write("Validating cached account session with relay...\n");
@@ -364,6 +425,13 @@ async function status(command: Extract<AuthCommand, { name: "status" }>): Promis
         ? [`reason: ${validation?.reason ?? "cached session missing"}`]
         : []),
       `session: ${getSessionPath(undefined, command.relayUrl)}`,
+      ...(serviceStatus
+        ? [
+            `hostService: ${serviceStatus.running ? "running" : serviceStatus.installed ? "installed" : "not installed"}`,
+            `hostServiceLabel: ${serviceStatus.label}`,
+            `hostServicePlist: ${serviceStatus.plistPath}`,
+          ]
+        : []),
     ].join("\n") + "\n",
   );
 }
@@ -393,18 +461,19 @@ function printHelp(): void {
   process.stdout.write(
     [
       "Usage:",
-      "  free auth login [--relay-env online|local] [--force]",
-      "  free auth login [--relay-url <ws-url>] [--force]",
-      "  free auth status [--relay-env online|local]",
-      "  free auth status [--relay-url <ws-url>]",
-      "  free auth logout",
+      "  free login [--relay-env online|local] [--force]",
+      "  free login [--relay-url <ws-url>] [--force]",
+      "  free logout [--relay-env online|local]",
+      "  free logout [--relay-url <ws-url>]",
+      "  free status [--relay-env online|local]",
+      "  free status [--relay-url <ws-url>]",
       "",
       "Options:",
       `  --relay-url   Relay WebSocket URL (default: ${ACP_REMOTE_DEFAULT_RELAY_URL})`,
       "  --relay-env   Relay environment name. online is the default, local uses ws://127.0.0.1:8791.",
       "  --force       Ignore any cached account session and open browser OAuth.",
       "",
-      "The auth login command caches the account session and ensures the default",
+      "The login command caches the account session and ensures the default",
       "user host service is installed, running, and pointed at the selected relay.",
       "--force refreshes login and reinstalls the default user host service.",
       "",
@@ -428,12 +497,12 @@ function describeRelayTarget(relayUrl: string): string {
 
 function loginCommandForRelay(relayUrl: string): string {
   if (relayUrl === FREE_LOCAL_RELAY_URL) {
-    return "free auth login --relay-env local";
+    return "free login --relay-env local";
   }
   if (relayUrl === ACP_REMOTE_DEFAULT_RELAY_URL) {
-    return "free auth login --relay-env online";
+    return "free login --relay-env online";
   }
-  return `free auth login --relay-url ${relayUrl}`;
+  return `free login --relay-url ${relayUrl}`;
 }
 
 if (fileURLToPath(import.meta.url) === process.argv[1]) {

@@ -50,7 +50,7 @@ describe("binary installer", () => {
     }
   });
 
-  it("runs auth login with the requested relay environment", async () => {
+  it("runs login with the requested relay environment", async () => {
     const root = join(tmpdir(), `free-binary-login-${randomUUID()}`);
     const releaseDir = join(root, "release");
     const installDir = join(root, "bin");
@@ -92,7 +92,7 @@ describe("binary installer", () => {
       );
 
       await expect(readFile(argsLog, "utf8")).resolves.toBe(
-        "auth login --relay-env local --force\n",
+        "login --relay-env local --force\n",
       );
     } finally {
       await rm(root, { force: true, recursive: true });

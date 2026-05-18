@@ -5,7 +5,9 @@ import type { AccountSession, HostRecord, LoadState, SessionRecord } from "../ty
 
 type WorkbenchData = {
   hosts: LoadState<HostRecord[]>;
+  markSessionClosed: (sessionId: string) => void;
   refresh: () => Promise<void>;
+  refreshSessions: (options?: { loading?: boolean }) => Promise<void>;
   session: LoadState<AccountSession>;
   sessions: LoadState<SessionRecord[]>;
 };
@@ -19,7 +21,7 @@ export function useWorkbenchData(): WorkbenchData {
     if (options.loading) {
       setHosts({ status: "loading" });
     }
-    const hostsResult = await loadHosts();
+    const hostsResult = await safeLoad(loadHosts);
     if (!hostsResult.ok) {
       setHosts({
         status: hostsResult.status === 401 ? "unauthorized" : "error",
@@ -34,7 +36,7 @@ export function useWorkbenchData(): WorkbenchData {
     if (options.loading) {
       setSessions({ status: "loading" });
     }
-    const sessionsResult = await loadSessions();
+    const sessionsResult = await safeLoad(loadSessions);
     if (!sessionsResult.ok) {
       setSessions({
         status: sessionsResult.status === 401 ? "unauthorized" : "error",
@@ -45,12 +47,37 @@ export function useWorkbenchData(): WorkbenchData {
     setSessions({ status: "ready", data: sessionsResult.value.sessions });
   }, []);
 
+  const markSessionClosed = useCallback((sessionId: string) => {
+    const closedAt = new Date().toISOString();
+    setSessions((current) => {
+      if (current.status !== "ready") return current;
+      return {
+        status: "ready",
+        data: current.data.map((sessionRecord) =>
+          sessionRecord.sessionId === sessionId
+            ? {
+                ...sessionRecord,
+                bridgeConnected: false,
+                closedAt,
+                connectionId: undefined,
+                hasActiveEvent: false,
+                latestEvent: "ACP session was closed.",
+                lifecycle: "offline",
+                status: "offline",
+                updatedAt: closedAt,
+              }
+            : sessionRecord
+        ),
+      };
+    });
+  }, []);
+
   const refresh = useCallback(async () => {
     setHosts({ status: "loading" });
     setSession({ status: "loading" });
     setSessions({ status: "loading" });
 
-    const sessionResult = await loadSession();
+    const sessionResult = await safeLoad(loadSession);
     if (!sessionResult.ok) {
       const state =
         sessionResult.status === 401
@@ -93,5 +120,25 @@ export function useWorkbenchData(): WorkbenchData {
     };
   }, [refreshHosts, refreshSessions, session.status]);
 
-  return { hosts, refresh, session, sessions };
+  return { hosts, markSessionClosed, refresh, refreshSessions, session, sessions };
+}
+
+async function safeLoad<T>(
+  loader: () => Promise<
+    | { ok: true; value: T }
+    | { ok: false; status: number; message: string }
+  >,
+): Promise<
+  | { ok: true; value: T }
+  | { ok: false; status: number; message: string }
+> {
+  try {
+    return await loader();
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
 }

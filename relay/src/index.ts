@@ -89,297 +89,301 @@ const MAX_RELAY_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    if (request.method === "OPTIONS" && isWorkbenchApiCorsPath(url.pathname)) {
-      return createWorkbenchApiCorsPreflightResponse(request, env);
-    }
+    return withRelayHttpAccessLog(request, url, "worker", async () => {
+      if (request.method === "OPTIONS" && isWorkbenchApiCorsPath(url.pathname)) {
+        return createWorkbenchApiCorsPreflightResponse(request, env);
+      }
 
-    if (url.pathname === "/health") {
-      return withWorkbenchApiCors(json({ ok: true }), request, env);
-    }
+      if (url.pathname === "/health") {
+        return withWorkbenchApiCors(json({ ok: true }), request, env);
+      }
 
-    if (
-      url.pathname === "/api/login/start" ||
-      url.pathname === "/api/login/callback" ||
-      url.pathname === "/api/login/confirm"
-    ) {
-      return handleGitHubAuthRequest(request, env, url);
-    }
+      if (
+        url.pathname === "/api/login/start" ||
+        url.pathname === "/api/login/callback" ||
+        url.pathname === "/api/login/confirm"
+      ) {
+        return handleGitHubAuthRequest(request, env, url);
+      }
 
-    if (url.pathname === "/logout") {
-      return createLogoutResponse(request, env);
-    }
+      if (url.pathname === "/logout") {
+        return createLogoutResponse(request, env);
+      }
 
-    if (url.pathname.startsWith("/control-plane/")) {
-      return handleControlPlaneRequest(request, env, url);
-    }
+      if (url.pathname.startsWith("/control-plane/")) {
+        return handleControlPlaneRequest(request, env, url);
+      }
 
-    if (
-      url.pathname !== "/acp" &&
-      url.pathname !== "/api/hosts" &&
-      url.pathname !== "/api/logs" &&
-      url.pathname !== "/api/otel/logs" &&
-      url.pathname !== "/api/otel/traces" &&
-      url.pathname !== "/api/session" &&
-      url.pathname !== "/api/sessions" &&
-      url.pathname !== "/api/sessions/health" &&
-      url.pathname !== "/api/login/start" &&
-      url.pathname !== "/api/login/callback" &&
-      url.pathname !== "/api/login/confirm" &&
-      url.pathname !== "/api/authorize" &&
-      !url.pathname.startsWith("/api/login/approvals/") &&
-      url.pathname !== "/attachments" &&
-      url.pathname !== "/logout" &&
-      url.pathname !== "/host" &&
-      !url.pathname.startsWith("/api/hosts/") &&
-      url.pathname !== "/authorize"
-    ) {
-      return new Response("Not found.", { status: 404 });
-    }
+      if (
+        url.pathname !== "/acp" &&
+        url.pathname !== "/api/hosts" &&
+        url.pathname !== "/api/logs" &&
+        url.pathname !== "/api/otel/logs" &&
+        url.pathname !== "/api/otel/traces" &&
+        url.pathname !== "/api/session" &&
+        url.pathname !== "/api/sessions" &&
+        url.pathname !== "/api/sessions/health" &&
+        url.pathname !== "/api/login/start" &&
+        url.pathname !== "/api/login/callback" &&
+        url.pathname !== "/api/login/confirm" &&
+        url.pathname !== "/api/authorize" &&
+        !url.pathname.startsWith("/api/login/approvals/") &&
+        !url.pathname.startsWith("/api/sessions/") &&
+        url.pathname !== "/attachments" &&
+        url.pathname !== "/logout" &&
+        url.pathname !== "/host" &&
+        !url.pathname.startsWith("/api/hosts/") &&
+        url.pathname !== "/authorize"
+      ) {
+        return new Response("Not found.", { status: 404 });
+      }
 
-    // OAuth and API endpoints that persist data require D1
-    if (url.pathname === "/api/logs") {
-      return handleRelayLogUploadRequest(
-        request,
-        env,
-        verifyAccountSessionRequest,
-      );
-    }
-    if (url.pathname === "/api/otel/logs" || url.pathname === "/api/otel/traces") {
-      return handleRelayOtlpProxyRequest(
-        request,
-        env,
-        url,
-        verifyAccountSessionRequest,
-      );
-    }
-    if (url.pathname.startsWith("/api/") && !env.ACP_RELAY_DB) {
-      return new Response("API endpoints require a database (D1).", { status: 503 });
-    }
-
-    if (url.pathname.startsWith("/api/login/approvals/")) {
-      if (!env.ACP_RELAY_DB) {
+      // OAuth and API endpoints that persist data require D1
+      if (url.pathname === "/api/logs") {
+        return handleRelayLogUploadRequest(
+          request,
+          env,
+          verifyAccountSessionRequest,
+        );
+      }
+      if (url.pathname === "/api/otel/logs" || url.pathname === "/api/otel/traces") {
+        return handleRelayOtlpProxyRequest(
+          request,
+          env,
+          url,
+          verifyAccountSessionRequest,
+        );
+      }
+      if (url.pathname.startsWith("/api/") && !env.ACP_RELAY_DB) {
         return new Response("API endpoints require a database (D1).", { status: 503 });
       }
-      return handleLoginApprovalApi({
-        db: env.ACP_RELAY_DB,
-        env,
-        request,
-        url,
-      });
-    }
 
-    if (url.pathname === "/api/session") {
-      const accountSession = await verifyAccountSessionRequest({
-        env,
-        request,
-      });
-      if (!accountSession.ok) {
+      if (url.pathname.startsWith("/api/login/approvals/")) {
+        if (!env.ACP_RELAY_DB) {
+          return new Response("API endpoints require a database (D1).", { status: 503 });
+        }
+        return handleLoginApprovalApi({
+          db: env.ACP_RELAY_DB,
+          env,
+          request,
+          url,
+        });
+      }
+
+      if (url.pathname === "/api/session") {
+        const accountSession = await verifyAccountSessionRequest({
+          env,
+          request,
+        });
+        if (!accountSession.ok) {
+          return withWorkbenchApiCors(
+            json({ error: accountSession.reason }, {
+              status: accountSession.status,
+            }),
+            request,
+            env,
+          );
+        }
+        const githubAccount = await new D1GitHubAccountStore(env.ACP_RELAY_DB as D1Database)
+          .findByAccountId(accountSession.session.accountId);
         return withWorkbenchApiCors(
-          json({ error: accountSession.reason }, {
-            status: accountSession.status,
+          json({
+            account: {
+              id: accountSession.session.accountId,
+              name: githubAccount?.githubLogin ?? accountSession.session.accountId,
+              provider: githubAccount ? "github" : "unknown",
+            },
+            accountId: accountSession.session.accountId,
+            accountName: githubAccount?.githubLogin ?? accountSession.session.accountId,
+            expiresAt: accountSession.session.expiresAt,
+            sessionId: accountSession.session.sessionId,
           }),
           request,
           env,
         );
       }
-      const githubAccount = await new D1GitHubAccountStore(env.ACP_RELAY_DB as D1Database)
-        .findByAccountId(accountSession.session.accountId);
-      return withWorkbenchApiCors(
-        json({
-          account: {
-            id: accountSession.session.accountId,
-            name: githubAccount?.githubLogin ?? accountSession.session.accountId,
-            provider: githubAccount ? "github" : "unknown",
+
+      if (url.pathname === "/attachments") {
+        const connectionProof = readConnectionProof(request, url);
+        if (!connectionProof) {
+          return new Response("Missing connection proof.", { status: 401 });
+        }
+        const verificationKeys = readAccountSessionVerificationKeys(env);
+        if (!verificationKeys.ok) {
+          return new Response(verificationKeys.reason, { status: 503 });
+        }
+        const proof = await verifyAcpRemoteConnectionProof(
+          connectionProof,
+          verificationKeys.keys,
+          {
+            clientId: resolveClientId(request, url),
+            connectionId: url.searchParams.get("connectionId") ?? undefined,
+            hostId: resolveHostId(request, url),
           },
-          accountId: accountSession.session.accountId,
-          accountName: githubAccount?.githubLogin ?? accountSession.session.accountId,
-          expiresAt: accountSession.session.expiresAt,
-          sessionId: accountSession.session.sessionId,
-        }),
-        request,
-        env,
-      );
-    }
-
-    if (url.pathname === "/attachments") {
-      const connectionProof = readConnectionProof(request, url);
-      if (!connectionProof) {
-        return new Response("Missing connection proof.", { status: 401 });
-      }
-      const verificationKeys = readAccountSessionVerificationKeys(env);
-      if (!verificationKeys.ok) {
-        return new Response(verificationKeys.reason, { status: 503 });
-      }
-      const proof = await verifyAcpRemoteConnectionProof(
-        connectionProof,
-        verificationKeys.keys,
-        {
-          clientId: resolveClientId(request, url),
-          connectionId: url.searchParams.get("connectionId") ?? undefined,
-          hostId: resolveHostId(request, url),
-        },
-      );
-      if (!proof.ok) {
-        return new Response(proof.reason, { status: 401 });
-      }
-      const shardId = env.ACP_RELAY_SHARDS.idFromName(`account:${proof.accountId}`);
-      return env.ACP_RELAY_SHARDS.get(shardId).fetch(
-        withVerifiedConnectionProof(request, proof),
-      );
-    }
-
-    if (
-      url.pathname === "/api/hosts" ||
-      url.pathname.startsWith("/api/hosts/") ||
-      url.pathname === "/api/sessions" ||
-      url.pathname === "/api/sessions/health"
-    ) {
-      const accountSession = await verifyAccountSessionRequest({
-        env,
-        request,
-        requestedAccountId: resolveRequestedAccountId(request, url),
-      });
-      if (!accountSession.ok) {
-        return withWorkbenchApiCors(
-          json({ error: accountSession.reason }, { status: accountSession.status }),
-          request,
-          env,
+        );
+        if (!proof.ok) {
+          return new Response(proof.reason, { status: 401 });
+        }
+        const shardId = env.ACP_RELAY_SHARDS.idFromName(`account:${proof.accountId}`);
+        return env.ACP_RELAY_SHARDS.get(shardId).fetch(
+          withVerifiedConnectionProof(request, proof),
         );
       }
-      const shardId = env.ACP_RELAY_SHARDS.idFromName(
-        `account:${accountSession.session.accountId}`,
-      );
-      return env.ACP_RELAY_SHARDS
-        .get(shardId)
-        .fetch(withVerifiedAccountSession(request, accountSession.session))
-        .then((response) => withWorkbenchApiCors(response, request, env));
-    }
 
-    if (url.pathname === "/authorize" && request.method === "GET") {
-      const workbenchOrigin = resolveWorkbenchOrigin({ env, request });
-      if (workbenchOrigin) {
-        const workbenchUrl = new URL("/authorize", workbenchOrigin);
-        url.searchParams.forEach((value, key) => {
-          workbenchUrl.searchParams.append(key, value);
+      if (
+        url.pathname === "/api/hosts" ||
+        url.pathname.startsWith("/api/hosts/") ||
+        url.pathname === "/api/sessions" ||
+        url.pathname === "/api/sessions/health" ||
+        url.pathname.startsWith("/api/sessions/")
+      ) {
+        const accountSession = await verifyAccountSessionRequest({
+          env,
+          request,
+          requestedAccountId: resolveRequestedAccountId(request, url),
         });
-        return Response.redirect(workbenchUrl.toString(), 302);
-      }
-    }
-
-    if (url.pathname === "/authorize" || url.pathname === "/api/authorize") {
-      const accountSession = await verifyAccountSessionRequest({
-        env,
-        request,
-        requestedAccountId: resolveRequestedAccountId(request, url),
-      });
-      if (!accountSession.ok) {
-        if (url.pathname === "/api/authorize") {
+        if (!accountSession.ok) {
           return withWorkbenchApiCors(
             json({ error: accountSession.reason }, { status: accountSession.status }),
             request,
             env,
           );
         }
-        return createAuthorizationSessionFailureResponse({
-          env,
-          failure: accountSession,
-          request,
-          url,
-        });
-      }
-
-      const shardId = env.ACP_RELAY_SHARDS.idFromName(
-        `account:${accountSession.session.accountId}`,
-      );
-      return env.ACP_RELAY_SHARDS
-        .get(shardId)
-        .fetch(withVerifiedAccountSession(request, accountSession.session))
-        .then((response) =>
-          url.pathname === "/api/authorize"
-            ? withWorkbenchApiCors(response, request, env)
-            : response,
+        const shardId = env.ACP_RELAY_SHARDS.idFromName(
+          `account:${accountSession.session.accountId}`,
         );
-    }
-
-    if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
-      return new Response(UPGRADE_REQUIRED, { status: 426 });
-    }
-
-    if (url.pathname === "/host" && !resolveHostId(request, url)) {
-      return new Response("Missing host id.", { status: 400 });
-    }
-
-    let routeRequest = request;
-    let accountId: string;
-    if (url.pathname === "/host") {
-      const accountSession = await verifyAccountSessionRequest({
-        env,
-        request,
-        requestedAccountId: resolveRequestedAccountId(request, url),
-      });
-      if (!accountSession.ok) {
-        return new Response(accountSession.reason, {
-          status: accountSession.status,
-        });
+        return env.ACP_RELAY_SHARDS
+          .get(shardId)
+          .fetch(withVerifiedAccountSession(request, accountSession.session))
+          .then((response) => withWorkbenchApiCors(response, request, env));
       }
-      accountId = accountSession.session.accountId;
-      routeRequest = withVerifiedAccountSession(request, accountSession.session);
-      const hostId = resolveHostId(request, url);
-      if (!hostId) {
+
+      if (url.pathname === "/authorize" && request.method === "GET") {
+        const workbenchOrigin = resolveWorkbenchOrigin({ env, request });
+        if (workbenchOrigin) {
+          const workbenchUrl = new URL("/authorize", workbenchOrigin);
+          url.searchParams.forEach((value, key) => {
+            workbenchUrl.searchParams.append(key, value);
+          });
+          return Response.redirect(workbenchUrl.toString(), 302);
+        }
+      }
+
+      if (url.pathname === "/authorize" || url.pathname === "/api/authorize") {
+        const accountSession = await verifyAccountSessionRequest({
+          env,
+          request,
+          requestedAccountId: resolveRequestedAccountId(request, url),
+        });
+        if (!accountSession.ok) {
+          if (url.pathname === "/api/authorize") {
+            return withWorkbenchApiCors(
+              json({ error: accountSession.reason }, { status: accountSession.status }),
+              request,
+              env,
+            );
+          }
+          return createAuthorizationSessionFailureResponse({
+            env,
+            failure: accountSession,
+            request,
+            url,
+          });
+        }
+
+        const shardId = env.ACP_RELAY_SHARDS.idFromName(
+          `account:${accountSession.session.accountId}`,
+        );
+        return env.ACP_RELAY_SHARDS
+          .get(shardId)
+          .fetch(withVerifiedAccountSession(request, accountSession.session))
+          .then((response) =>
+            url.pathname === "/api/authorize"
+              ? withWorkbenchApiCors(response, request, env)
+              : response,
+          );
+      }
+
+      if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+        return new Response(UPGRADE_REQUIRED, { status: 426 });
+      }
+
+      if (url.pathname === "/host" && !resolveHostId(request, url)) {
         return new Response("Missing host id.", { status: 400 });
       }
-      const proof = await verifyHostRegistrationRequest({
-        accountId,
-        env,
-        hostId,
-        request,
-      });
-      if (!proof.ok) {
-        return new Response(proof.reason, { status: 401 });
-      }
-    } else {
-      const connectionProof = readConnectionProof(request, url);
-      const connectionProofs = readConnectionProofs(request);
-      if (!connectionProof) {
-        return new Response("Missing connection proof.", { status: 401 });
-      }
-      const verificationKeys = readAccountSessionVerificationKeys(env);
-      if (!verificationKeys.ok) {
-        return new Response(verificationKeys.reason, { status: 503 });
-      }
-      const proof = await verifyAcpRemoteConnectionProof(
-        connectionProof,
-        verificationKeys.keys,
-        {
-          clientId: resolveClientId(request, url),
-          connectionId: url.searchParams.get("connectionId") ?? undefined,
-          hostId: resolveHostId(request, url),
-        },
-      );
-      if (!proof.ok) {
-        return new Response(proof.reason, { status: 401 });
-      }
-      for (const candidate of connectionProofs) {
-        const candidateProof = await verifyAcpRemoteConnectionProof(
-          candidate,
+
+      let routeRequest = request;
+      let accountId: string;
+      if (url.pathname === "/host") {
+        const accountSession = await verifyAccountSessionRequest({
+          env,
+          request,
+          requestedAccountId: resolveRequestedAccountId(request, url),
+        });
+        if (!accountSession.ok) {
+          return new Response(accountSession.reason, {
+            status: accountSession.status,
+          });
+        }
+        accountId = accountSession.session.accountId;
+        routeRequest = withVerifiedAccountSession(request, accountSession.session);
+        const hostId = resolveHostId(request, url);
+        if (!hostId) {
+          return new Response("Missing host id.", { status: 400 });
+        }
+        const proof = await verifyHostRegistrationRequest({
+          accountId,
+          env,
+          hostId,
+          request,
+        });
+        if (!proof.ok) {
+          return new Response(proof.reason, { status: 401 });
+        }
+      } else {
+        const connectionProof = readConnectionProof(request, url);
+        const connectionProofs = readConnectionProofs(request);
+        if (!connectionProof) {
+          return new Response("Missing connection proof.", { status: 401 });
+        }
+        const verificationKeys = readAccountSessionVerificationKeys(env);
+        if (!verificationKeys.ok) {
+          return new Response(verificationKeys.reason, { status: 503 });
+        }
+        const proof = await verifyAcpRemoteConnectionProof(
+          connectionProof,
           verificationKeys.keys,
           {
             clientId: resolveClientId(request, url),
             connectionId: url.searchParams.get("connectionId") ?? undefined,
+            hostId: resolveHostId(request, url),
           },
         );
-        if (!candidateProof.ok) {
-          return new Response(candidateProof.reason, { status: 401 });
+        if (!proof.ok) {
+          return new Response(proof.reason, { status: 401 });
         }
-        if (candidateProof.accountId !== proof.accountId) {
-          return new Response("Connection proof account mismatch.", { status: 401 });
+        for (const candidate of connectionProofs) {
+          const candidateProof = await verifyAcpRemoteConnectionProof(
+            candidate,
+            verificationKeys.keys,
+            {
+              clientId: resolveClientId(request, url),
+              connectionId: url.searchParams.get("connectionId") ?? undefined,
+            },
+          );
+          if (!candidateProof.ok) {
+            return new Response(candidateProof.reason, { status: 401 });
+          }
+          if (candidateProof.accountId !== proof.accountId) {
+            return new Response("Connection proof account mismatch.", { status: 401 });
+          }
         }
+        accountId = proof.accountId;
       }
-      accountId = proof.accountId;
-    }
 
-    const shardId = env.ACP_RELAY_SHARDS.idFromName(`account:${accountId}`);
-    return env.ACP_RELAY_SHARDS.get(shardId).fetch(routeRequest);
+      const shardId = env.ACP_RELAY_SHARDS.idFromName(`account:${accountId}`);
+      return env.ACP_RELAY_SHARDS.get(shardId).fetch(routeRequest);
+    });
   },
 };
 
@@ -414,6 +418,9 @@ export class AcpRelayShard {
       ),
       heartbeatTimeoutMs: readOptionalPositiveInteger(
         this.env.ACP_RELAY_HEARTBEAT_TIMEOUT_MS,
+      ),
+      pendingHostRequestTimeoutMs: readOptionalPositiveInteger(
+        this.env.ACP_RELAY_PENDING_HOST_REQUEST_TIMEOUT_MS,
       ),
       onClientStateChanged: (connectionId) =>
         this.writeOrDeleteClientStateSnapshot(connectionId),
@@ -462,167 +469,173 @@ export class AcpRelayShard {
   }
 
   async fetch(request: Request): Promise<Response> {
-    await this.restorePromise;
     const url = new URL(request.url);
-    if (url.pathname === "/internal/reconcile-authorizations") {
-      return this.reconcileAuthorizations(request);
-    }
-    if (url.pathname === "/authorize" || url.pathname === "/api/authorize") {
-      return this.authorize(request, url);
-    }
-
-    if (url.pathname === "/attachments") {
-      return this.handleAttachmentUpload(request, url);
-    }
-
-    if (url.pathname === "/api/hosts" || url.pathname.startsWith("/api/hosts/")) {
-      return this.handleHostApi(request, url);
-    }
-
-    if (url.pathname === "/api/sessions") {
-      return this.handleSessionsApi(request, url);
-    }
-
-    if (url.pathname === "/api/sessions/health") {
-      return this.handleSessionHealthApi(request);
-    }
-
-    if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
-      return new Response(UPGRADE_REQUIRED, { status: 426 });
-    }
-
-    const endpoint =
-      url.pathname === "/host"
-        ? AcpRemoteEndpointKind.Host
-        : AcpRemoteEndpointKind.Client;
-    const clientTransport: AcpRelayClientTransport = "native-acp";
-    const connectionId =
-      url.searchParams.get("connectionId") ?? crypto.randomUUID();
-    const hostId = resolveHostId(request, url);
-    const pair = new WebSocketPair();
-    const client = pair[0];
-    const server = pair[1];
-    const connectedAt = Date.now();
-    this.acceptRelayWebSocket(server, {
-      connectedAt,
-      connectionId,
-      hostId,
-      endpoint,
-      version: RELAY_SOCKET_ATTACHMENT_VERSION,
-    });
-
-    console.log(
-      `[relay-do] ws connected endpoint=${endpoint} connectionId=${connectionId} hostId=${hostId ?? "none"} instance=${this.instanceId}`,
-    );
-
-    if (endpoint === AcpRemoteEndpointKind.Host) {
-      if (!hostId) {
-        server.close(1008, "Missing host id.");
-      } else {
-        const hostMetadata = parseHostMetadataHeaders(request);
-        const hostAccountId = resolveVerifiedAccountId(request);
-        this.updateSocketAttachment(server, {
-          accountId: hostAccountId,
-          hostMetadata,
-        });
-        void (async () => {
-          try {
-            await this.broker.registerHost({
-              accountId: hostAccountId,
-              hostId,
-              metadata: hostMetadata,
-              socket: server,
-            });
-            await this.writeAllClientStateSnapshots();
-            await this.scheduleHeartbeat();
-          } catch (error) {
-            console.error("Failed to register ACP relay host route", error);
-            server.close(1011, "Failed to register host route.");
-          }
-        })();
+    return withRelayHttpAccessLog(request, url, "shard", async () => {
+      await this.restorePromise;
+      if (url.pathname === "/internal/reconcile-authorizations") {
+        return this.reconcileAuthorizations(request);
       }
-    } else {
-      const authUrl = createAuthorizationUrl(request, connectionId).toString();
-      const nativeClientAck = url.searchParams.get("nativeClientAck") === "1";
-      const connectionProof = readConnectionProof(request, url);
-      const connectionProofs = readConnectionProofs(request);
-      if (!connectionProof) {
-        server.close(1008, "Missing connection proof.");
-        return new Response(null, {
-          status: 101,
-          webSocket: client,
-        } as ResponseInit & { webSocket: WebSocket });
+      if (url.pathname === "/authorize" || url.pathname === "/api/authorize") {
+        return this.authorize(request, url);
       }
-      const accountId = connectionProof.accountSession.accountId;
-      const clientId = resolveClientId(request, url) ?? connectionProof.clientId;
-      if (connectionProof.accountSession.accountId !== accountId) {
-        server.close(1008, "Connection proof account mismatch.");
-        return new Response(null, {
-          status: 101,
-          webSocket: client,
-        } as ResponseInit & { webSocket: WebSocket });
+
+      if (url.pathname === "/attachments") {
+        return this.handleAttachmentUpload(request, url);
       }
-      if (connectionProof.clientId !== clientId) {
-        server.close(1008, "Connection proof client mismatch.");
-        return new Response(null, {
-          status: 101,
-          webSocket: client,
-        } as ResponseInit & { webSocket: WebSocket });
+
+      if (url.pathname === "/api/hosts" || url.pathname.startsWith("/api/hosts/")) {
+        return this.handleHostApi(request, url);
       }
-      if (hostId && connectionProof.hostId !== hostId) {
-        server.close(1008, "Connection proof host mismatch.");
-        return new Response(null, {
-          status: 101,
-          webSocket: client,
-        } as ResponseInit & { webSocket: WebSocket });
+
+      if (
+        url.pathname === "/api/sessions" ||
+        (url.pathname.startsWith("/api/sessions/") &&
+          url.pathname !== "/api/sessions/health")
+      ) {
+        return this.handleSessionsApi(request, url);
       }
-      const stateSnapshot = await this.readClientStateSnapshot(connectionId);
-      this.updateSocketAttachment(server, {
-        accountId,
-        authUrl,
-        clientId,
-        connectionProof,
-        connectionProofs,
-        nativeClientAck,
-        transport: clientTransport,
-      });
-      await this.broker.registerClient({
-        accountId,
-        authUrl,
-        clientId,
+
+      if (url.pathname === "/api/sessions/health") {
+        return this.handleSessionHealthApi(request);
+      }
+
+      if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+        return new Response(UPGRADE_REQUIRED, { status: 426 });
+      }
+
+      const endpoint =
+        url.pathname === "/host"
+          ? AcpRemoteEndpointKind.Host
+          : AcpRemoteEndpointKind.Client;
+      const clientTransport: AcpRelayClientTransport = "native-acp";
+      const connectionId =
+        url.searchParams.get("connectionId") ?? crypto.randomUUID();
+      const hostId = resolveHostId(request, url);
+      const pair = new WebSocketPair();
+      const client = pair[0];
+      const server = pair[1];
+      const connectedAt = Date.now();
+      this.acceptRelayWebSocket(server, {
+        connectedAt,
         connectionId,
-        connectionProof,
-        connectionProofs,
         hostId,
-        nativeClientAck,
-        socket: server,
-        stateSnapshot,
-        transport: clientTransport,
+        endpoint,
+        version: RELAY_SOCKET_ATTACHMENT_VERSION,
       });
-      await this.writeOrDeleteClientStateSnapshot(connectionId);
-    }
 
-    if (!this.usesWebSocketHibernation()) {
-      server.addEventListener("message", (event) => {
-        void this.webSocketMessage(server, event.data);
-      });
-      server.addEventListener("close", (event) => {
-        const closeEvent = event as { code?: unknown; reason?: unknown } | undefined;
-        this.webSocketClose(
-          server,
-          typeof closeEvent?.code === "number" ? closeEvent.code : undefined,
-          typeof closeEvent?.reason === "string" ? closeEvent.reason : undefined,
-        );
-      });
-      server.addEventListener("error", (event) => {
-        this.webSocketError(server, event);
-      });
-    }
+      console.log(
+        `[relay-do] ws connected endpoint=${endpoint} connectionId=${connectionId} hostId=${hostId ?? "none"} instance=${this.instanceId}`,
+      );
 
-    return new Response(null, {
-      status: 101,
-      webSocket: client,
-    } as ResponseInit & { webSocket: WebSocket });
+      if (endpoint === AcpRemoteEndpointKind.Host) {
+        if (!hostId) {
+          server.close(1008, "Missing host id.");
+        } else {
+          const hostMetadata = parseHostMetadataHeaders(request);
+          const hostAccountId = resolveVerifiedAccountId(request);
+          this.updateSocketAttachment(server, {
+            accountId: hostAccountId,
+            hostMetadata,
+          });
+          void (async () => {
+            try {
+              await this.broker.registerHost({
+                accountId: hostAccountId,
+                hostId,
+                metadata: hostMetadata,
+                socket: server,
+              });
+              await this.writeAllClientStateSnapshots();
+              await this.scheduleHeartbeat();
+            } catch (error) {
+              console.error("Failed to register ACP relay host route", error);
+              server.close(1011, "Failed to register host route.");
+            }
+          })();
+        }
+      } else {
+        const authUrl = createAuthorizationUrl(request, connectionId).toString();
+        const nativeClientAck = url.searchParams.get("nativeClientAck") === "1";
+        const connectionProof = readConnectionProof(request, url);
+        const connectionProofs = readConnectionProofs(request);
+        if (!connectionProof) {
+          server.close(1008, "Missing connection proof.");
+          return new Response(null, {
+            status: 101,
+            webSocket: client,
+          } as ResponseInit & { webSocket: WebSocket });
+        }
+        const accountId = connectionProof.accountSession.accountId;
+        const clientId = resolveClientId(request, url) ?? connectionProof.clientId;
+        if (connectionProof.accountSession.accountId !== accountId) {
+          server.close(1008, "Connection proof account mismatch.");
+          return new Response(null, {
+            status: 101,
+            webSocket: client,
+          } as ResponseInit & { webSocket: WebSocket });
+        }
+        if (connectionProof.clientId !== clientId) {
+          server.close(1008, "Connection proof client mismatch.");
+          return new Response(null, {
+            status: 101,
+            webSocket: client,
+          } as ResponseInit & { webSocket: WebSocket });
+        }
+        if (hostId && connectionProof.hostId !== hostId) {
+          server.close(1008, "Connection proof host mismatch.");
+          return new Response(null, {
+            status: 101,
+            webSocket: client,
+          } as ResponseInit & { webSocket: WebSocket });
+        }
+        const stateSnapshot = await this.readClientStateSnapshot(connectionId);
+        this.updateSocketAttachment(server, {
+          accountId,
+          authUrl,
+          clientId,
+          connectionProof,
+          connectionProofs,
+          nativeClientAck,
+          transport: clientTransport,
+        });
+        await this.broker.registerClient({
+          accountId,
+          authUrl,
+          clientId,
+          connectionId,
+          connectionProof,
+          connectionProofs,
+          hostId,
+          nativeClientAck,
+          socket: server,
+          stateSnapshot,
+          transport: clientTransport,
+        });
+        await this.writeOrDeleteClientStateSnapshot(connectionId);
+      }
+
+      if (!this.usesWebSocketHibernation()) {
+        server.addEventListener("message", (event) => {
+          void this.webSocketMessage(server, event.data);
+        });
+        server.addEventListener("close", (event) => {
+          const closeEvent = event as { code?: unknown; reason?: unknown } | undefined;
+          this.webSocketClose(
+            server,
+            typeof closeEvent?.code === "number" ? closeEvent.code : undefined,
+            typeof closeEvent?.reason === "string" ? closeEvent.reason : undefined,
+          );
+        });
+        server.addEventListener("error", (event) => {
+          this.webSocketError(server, event);
+        });
+      }
+
+      return new Response(null, {
+        status: 101,
+        webSocket: client,
+      } as ResponseInit & { webSocket: WebSocket });
+    });
   }
 
   async webSocketMessage(socket: WebSocket, message: ArrayBuffer | string): Promise<void> {
@@ -640,12 +653,18 @@ export class AcpRelayShard {
       if (attachment.endpoint === AcpRemoteEndpointKind.Host) {
         const connectionId = await this.broker.handleHostText(text);
         if (connectionId) {
-          await this.writeOrDeleteClientStateSnapshot(connectionId);
+          await this.writeOrDeleteClientStateSnapshotBestEffort(
+            connectionId,
+            "acp.relay.client_state_snapshot.persist_failed_after_host_message",
+          );
         }
         return;
       }
       await this.broker.handleClientText(attachment.connectionId, text);
-      await this.writeOrDeleteClientStateSnapshot(attachment.connectionId);
+      await this.writeOrDeleteClientStateSnapshotBestEffort(
+        attachment.connectionId,
+        "acp.relay.client_state_snapshot.persist_failed_after_client_message",
+      );
     } catch (error) {
       console.error(
         JSON.stringify({
@@ -873,6 +892,23 @@ export class AcpRelayShard {
     await writeClientStateSnapshotToStorage(this.state.storage, snapshot);
   }
 
+  private async writeOrDeleteClientStateSnapshotBestEffort(
+    connectionId: string,
+    eventName: string,
+  ): Promise<void> {
+    try {
+      await this.writeOrDeleteClientStateSnapshot(connectionId);
+    } catch (error) {
+      console.warn(
+        JSON.stringify({
+          connectionId,
+          eventName,
+          reason: error instanceof Error ? error.message : String(error),
+        }),
+      );
+    }
+  }
+
   private async deleteClientStateSnapshot(connectionId: string): Promise<void> {
     await deleteClientStateSnapshotFromStorage(this.state.storage, connectionId);
   }
@@ -1085,6 +1121,35 @@ export class AcpRelayShard {
   }
 
   private async handleSessionsApi(request: Request, url: URL): Promise<Response> {
+    if (url.pathname.startsWith("/api/sessions/") && url.pathname !== "/api/sessions/health") {
+      if (request.method !== "DELETE") {
+        return json({ error: "Method not allowed." }, {
+          headers: { allow: "DELETE" },
+          status: 405,
+        });
+      }
+      const accountId = resolveVerifiedAccountId(request);
+      if (!accountId) {
+        return json({ error: "ACP relay account session is required." }, { status: 401 });
+      }
+      const sessionId = decodeURIComponent(url.pathname.slice("/api/sessions/".length));
+      if (!sessionId) {
+        return json({ error: "Missing session id." }, { status: 400 });
+      }
+      const result = await this.broker.closeDisconnectedSession({
+        accountId,
+        sessionId,
+      });
+      if (!result.ok) {
+        return json({ error: result.reason }, { status: result.status });
+      }
+      return json({ ok: true }, {
+        headers: {
+          "Cache-Control": "no-store",
+        },
+      });
+    }
+
     if (request.method !== "GET" && request.method !== "HEAD") {
       return json({ error: "Method not allowed." }, {
         headers: { allow: "GET, HEAD" },
@@ -1351,12 +1416,69 @@ function createLogoutResponse(request: Request, env: Env): Response {
   });
 }
 
+async function withRelayHttpAccessLog(
+  request: Request,
+  url: URL,
+  scope: "shard" | "worker",
+  work: () => Promise<Response>,
+): Promise<Response> {
+  const startedAt = Date.now();
+  const requestId = crypto.randomUUID();
+  try {
+    const response = await work();
+    logRelayHttpRequest({
+      durationMs: Date.now() - startedAt,
+      method: request.method,
+      path: url.pathname,
+      requestId,
+      scope,
+      status: response.status,
+    });
+    return response;
+  } catch (error) {
+    logRelayHttpRequest({
+      durationMs: Date.now() - startedAt,
+      error: error instanceof Error ? error.message : String(error),
+      method: request.method,
+      path: url.pathname,
+      requestId,
+      scope,
+      status: 500,
+    });
+    throw error;
+  }
+}
+
+function logRelayHttpRequest(input: {
+  durationMs: number;
+  error?: string;
+  method: string;
+  path: string;
+  requestId: string;
+  scope: "shard" | "worker";
+  status: number;
+}): void {
+  console.log(
+    JSON.stringify({
+      durationMs: input.durationMs,
+      error: input.error,
+      eventName: "acp.relay.http_request",
+      method: input.method,
+      path: input.path,
+      requestId: input.requestId,
+      scope: input.scope,
+      status: input.status,
+    }),
+  );
+}
+
 function isWorkbenchApiCorsPath(pathname: string): boolean {
   return (
     pathname === "/health" ||
     pathname === "/api/session" ||
     pathname === "/api/sessions" ||
     pathname === "/api/sessions/health" ||
+    pathname.startsWith("/api/sessions/") ||
     pathname === "/api/login/start" ||
     pathname === "/api/login/callback" ||
     pathname === "/api/login/confirm" ||
@@ -1405,6 +1527,10 @@ function createWorkbenchApiCorsHeaders(
     headers.set("Access-Control-Allow-Credentials", "true");
     headers.set("Access-Control-Allow-Origin", origin);
     headers.append("Vary", "Origin");
+    if (request.headers.get("Access-Control-Request-Private-Network") === "true") {
+      headers.set("Access-Control-Allow-Private-Network", "true");
+      headers.append("Vary", "Access-Control-Request-Private-Network");
+    }
   }
   return headers;
 }
@@ -1958,7 +2084,7 @@ async function handleLoginConfirmationRequest(input: {
   const approval = await openLoginApprovalStore(input.db).consume(approvalId);
   if (!approval || Date.now() - approval.createdAt > LOGIN_APPROVAL_TTL_MS) {
     const response = html(createLoginApprovalUnavailablePage({
-      message: "This login approval expired. Run `free auth login --force` to start again.",
+      message: "This login approval expired. Run `free login --force` to start again.",
     }), { status: 410 });
     return withWorkbenchApiCors(response, input.request, input.env);
   }

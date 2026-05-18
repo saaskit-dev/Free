@@ -6,6 +6,7 @@ import {
   createMacOSLaunchAgentPlist,
   launchHostPlistPath,
   parseMacOSLaunchAgentRunningState,
+  resolveAcpRemoteHostLaunchdLabel,
 } from "./service.js";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -13,6 +14,18 @@ import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 
 describe("remote host user service", () => {
+  it("uses separate launchd labels for online and local relay hosts", () => {
+    expect(resolveAcpRemoteHostLaunchdLabel("wss://free-relay.saaskit.app")).toBe(
+      "app.saaskit.free",
+    );
+    expect(resolveAcpRemoteHostLaunchdLabel("ws://127.0.0.1:8791")).toBe(
+      "app.saaskit.free.local",
+    );
+    expect(resolveAcpRemoteHostLaunchdLabel("wss://relay.example.com")).toMatch(
+      /^app\.saaskit\.free\.[a-f0-9]{12}$/,
+    );
+  });
+
   it("creates a launchd plist that runs host with self-healing settings", () => {
     const plist = createMacOSLaunchAgentPlist({
       hostBinPath: "/usr/local/bin/free",
@@ -21,7 +34,7 @@ describe("remote host user service", () => {
         PATH: "/opt/homebrew/bin:/usr/bin:/bin",
       },
       homeDir: "/Users/dev",
-      label: "dev.saaskit.free.host",
+      label: "app.saaskit.free",
       relayUrl: "wss://relay.example.com",
       standardErrorPath: "/Users/dev/.free/logs/host.err.log",
       standardOutPath: "/Users/dev/.free/logs/host.out.log",
@@ -53,7 +66,7 @@ describe("remote host user service", () => {
     const plist = createMacOSLaunchAgentPlist({
       hostBinPath: "/opt/free/dist/host/bin.js",
       homeDir: "/Users/dev",
-      label: "dev.saaskit.free.host",
+      label: "app.saaskit.free",
       nodePath: "/opt/node",
       relayUrl: "wss://relay.example.com",
       standardErrorPath: "/Users/dev/.free/logs/host.err.log",
@@ -63,7 +76,6 @@ describe("remote host user service", () => {
 
     expect(plist).toContain("<string>/opt/node</string>");
     expect(plist).toContain("<string>/opt/free/dist/host/bin.js</string>");
-    expect(plist).not.toContain("<string>host</string>");
     expect(plist).toContain("<string>run</string>");
   });
 
@@ -75,7 +87,7 @@ describe("remote host user service", () => {
         ACP_REMOTE_HOST_ACCOUNT_SESSION: "session-token",
         PATH: "/opt/homebrew/bin:/usr/bin:/bin",
       },
-      label: "dev.saaskit.free.host",
+      label: "app.saaskit.free",
       nodePath: "/usr/local/bin/node",
       relayUrl: "wss://relay.example.com",
       standardErrorPath: "/Users/dev/.free/logs/host.err.log",
@@ -92,7 +104,7 @@ describe("remote host user service", () => {
     const plist = createMacOSLaunchAgentPlist({
       hostBinPath: "/usr/local/bin/free",
       homeDir: "/Users/dev",
-      label: "dev.saaskit.free.host",
+      label: "app.saaskit.free",
       nodePath: "/usr/local/bin/node",
       relayUrl: "wss://relay.example.com",
       scope: "system",
@@ -103,7 +115,7 @@ describe("remote host user service", () => {
     });
 
     expect(launchHostPlistPath()).toBe(
-      "/Library/LaunchDaemons/dev.saaskit.free.host.plist",
+      "/Library/LaunchDaemons/app.saaskit.free.plist",
     );
     expect(plist).toContain("<key>UserName</key>");
     expect(plist).toContain("<string>dev</string>");
@@ -119,7 +131,7 @@ describe("remote host user service", () => {
     const plist = createMacOSLaunchAgentPlist({
       hostBinPath: "/usr/local/bin/free",
       homeDir: "/Users/dev",
-      label: "dev.saaskit.free.host",
+      label: "app.saaskit.free",
       nodePath: "/usr/local/bin/node",
       relayUrl: "wss://relay.example.com",
       scope: "system",
@@ -136,7 +148,7 @@ describe("remote host user service", () => {
   it("escapes plist values", () => {
     const plist = createMacOSLaunchAgentPlist({
       hostBinPath: "/tmp/acp-runtime",
-      label: "dev.saaskit.free.host",
+      label: "app.saaskit.free",
       nodePath: "/tmp/node",
       relayUrl: "wss://relay.example.com/?a=<b>&c=\"d\"",
       standardErrorPath: "/tmp/err.log",
@@ -151,14 +163,14 @@ describe("remote host user service", () => {
   it("parses actual launchd running state", () => {
     expect(
       parseMacOSLaunchAgentRunningState(`
-gui/501/dev.saaskit.free.host = {
+gui/501/app.saaskit.free = {
   state = running
 }
 `),
     ).toBe(true);
     expect(
       parseMacOSLaunchAgentRunningState(`
-gui/501/dev.saaskit.free.host = {
+gui/501/app.saaskit.free = {
   state = not running
 }
 `),
@@ -171,7 +183,7 @@ gui/501/dev.saaskit.free.host = {
       homeDir,
       "Library",
       "LaunchAgents",
-      "dev.saaskit.free.host.plist",
+      "app.saaskit.free.plist",
     );
     await mkdir(join(homeDir, "Library", "LaunchAgents"), { recursive: true });
     await writeFile(
@@ -179,7 +191,7 @@ gui/501/dev.saaskit.free.host = {
       createMacOSLaunchAgentPlist({
         hostBinPath: "/opt/free/dist/host/bin.js",
         homeDir,
-        label: "dev.saaskit.free.host",
+        label: "app.saaskit.free",
         nodePath: "/opt/node",
         relayUrl: "wss://relay.example.com",
         standardErrorPath: join(homeDir, ".free", "logs", "host.err.log"),
@@ -213,7 +225,7 @@ gui/501/dev.saaskit.free.host = {
       homeDir,
       "Library",
       "LaunchAgents",
-      "dev.saaskit.free.host.plist",
+      "app.saaskit.free.plist",
     );
     await mkdir(join(homeDir, "Library", "LaunchAgents"), { recursive: true });
     await writeFile(
@@ -221,7 +233,7 @@ gui/501/dev.saaskit.free.host = {
       createMacOSLaunchAgentPlist({
         hostBinPath: "/opt/free/dist/host/bin.js",
         homeDir,
-        label: "dev.saaskit.free.host",
+        label: "app.saaskit.free",
         nodePath: "/opt/node",
         relayUrl: "ws://127.0.0.1:8791",
         standardErrorPath: join(homeDir, ".free", "logs", "host.err.log"),

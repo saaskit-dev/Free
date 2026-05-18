@@ -258,6 +258,26 @@ export async function loadSessions() {
   return readJsonResult<{ sessions: SessionRecord[] }>("/api/sessions");
 }
 
+export async function closeSession(sessionId: string) {
+  const response = await fetch(`${defaultRelayUrl()}/api/sessions/${encodeURIComponent(sessionId)}`, {
+    credentials: "include",
+    headers: {
+      accept: "application/json",
+    },
+    method: "DELETE",
+  });
+  const value = (await response.json().catch(() => null)) as { error?: unknown; reason?: unknown } | null;
+  if (!response.ok) {
+    throw new Error(
+      value && typeof value === "object" && typeof value.error === "string"
+        ? value.error
+        : value && typeof value === "object" && typeof value.reason === "string"
+          ? value.reason
+          : `Request failed with ${response.status}.`,
+    );
+  }
+}
+
 export async function checkSessionHealth() {
   return readJsonResult<SessionHealth>("/api/sessions/health");
 }

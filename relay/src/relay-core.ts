@@ -42,6 +42,7 @@ export type AcpRelayBrokerOptions = {
   controlPlaneStore?: AcpRelayWritableControlPlaneStore;
   hostReconnectGraceMs?: number;
   heartbeatTimeoutMs?: number;
+  pendingHostRequestTimeoutMs?: number;
   onClientStateChanged?: (connectionId: string) => Promise<void> | void;
   sessionOpenTimeoutMs?: number;
   maxBufferedFramesPerConnection?: number;
@@ -152,6 +153,7 @@ const DEFAULT_CLIENT_RECONNECT_GRACE_MS = DEFAULT_RECONNECT_GRACE_MS;
 const DEFAULT_HOST_RECONNECT_GRACE_MS = DEFAULT_RECONNECT_GRACE_MS;
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = 45 * 1000;
 const DEFAULT_SESSION_OPEN_TIMEOUT_MS = 35 * 1000;
+const DEFAULT_PENDING_HOST_REQUEST_TIMEOUT_MS = 45 * 1000;
 const DEFAULT_MAX_BUFFERED_FRAMES_PER_CONNECTION = Number.MAX_SAFE_INTEGER;
 const DEFAULT_MAX_QUEUED_FRAMES_PER_CONNECTION = Number.MAX_SAFE_INTEGER;
 const DEFAULT_COMPLETED_RESPONSE_CACHE_LIMIT = 256;
@@ -181,6 +183,7 @@ type RelayClient = {
   lastHostSeq?: number;
   nativeClientAck: boolean;
   seq: number;
+  sessionActivities: Map<string, RelaySessionActivity>;
   sessionTitles: Map<string, string>;
   sessionControlRequests: Map<string, RelayJsonRpcRequest>;
   socket?: RelaySocket;
@@ -199,8 +202,15 @@ type RelayClient = {
 
 type RelayHostRequestState = {
   connectionId: string;
+  pendingReconnectTimeout?: ReturnType<typeof setTimeout>;
   startedAt: string;
   timeout?: ReturnType<typeof setTimeout>;
+};
+
+type RelaySessionActivity = {
+  createdAt: string;
+  latestEvent?: string;
+  updatedAt: string;
 };
 
 type RelaySessionFailure = {
@@ -209,8 +219,16 @@ type RelaySessionFailure = {
   error: string;
   failedAt: string;
   hostId?: string;
+  latestEvent?: string;
   requestId: string | number;
   workspaceRoots?: readonly string[];
+};
+
+type ActiveSessionBindingRecord = AcpRelaySessionBindingRecord & {
+  bridgeConnected: boolean;
+  connectionId?: string;
+  hasActiveEvent?: boolean;
+  latestEvent?: string;
 };
 
 type NativeClientRecoverRequest = {
@@ -305,7 +323,9 @@ export type AcpRelayAuthorizableHostsResult =
 
 export type AcpRelaySessionSummary = {
   agent?: AcpRemoteAgentGrant;
+  bridgeConnected?: boolean;
   connectionId?: string;
+  closedAt?: string;
   createdAt?: string;
   error?: string;
   lifecycle?: "live" | "offline";
@@ -313,10 +333,11 @@ export type AcpRelaySessionSummary = {
   hostName?: string;
   hostOnline?: boolean;
   hostMetadata?: HostMetadata;
+  hasActiveEvent?: boolean;
   latestEvent?: string;
   requestId?: string | number;
   sessionId: string;
-  status?: "waiting_authorization" | "starting" | "active" | "failed" | "offline";
+  status?: "waiting_authorization" | "starting" | "active" | "detached" | "failed" | "offline";
   title?: string;
   updatedAt?: string;
   workspaceRoots: readonly string[];
@@ -330,6 +351,7 @@ export type AcpRelaySessionHealth = {
     message: string;
     status: "ok" | "warning" | "error";
   }[];
+  detachedSessionCount: number;
   liveSessionCount: number;
   offlineSessionCount: number;
   onlineHostCount: number;
@@ -556,6 +578,7 @@ export class AcpRelayBroker {
   private readonly pendingAttachmentForwards =
     new Map<string, PendingAttachmentForward>();
   private readonly heartbeatTimeoutMs: number;
+  private readonly pendingHostRequestTimeoutMs: number;
   private readonly onClientStateChanged?:
     | ((connectionId: string) => Promise<void> | void)
     | undefined;
@@ -584,6 +607,9 @@ export class AcpRelayBroker {
       options.hostReconnectGraceMs ?? DEFAULT_HOST_RECONNECT_GRACE_MS;
     this.heartbeatTimeoutMs =
       options.heartbeatTimeoutMs ?? DEFAULT_HEARTBEAT_TIMEOUT_MS;
+    this.pendingHostRequestTimeoutMs =
+      options.pendingHostRequestTimeoutMs ??
+      DEFAULT_PENDING_HOST_REQUEST_TIMEOUT_MS;
     this.onClientStateChanged = options.onClientStateChanged;
     this.sessionOpenTimeoutMs =
       options.sessionOpenTimeoutMs ?? DEFAULT_SESSION_OPEN_TIMEOUT_MS;
@@ -750,6 +776,7 @@ export class AcpRelayBroker {
       lastHostSeq: snapshot?.lastHostSeq,
       nativeClientAck: input.nativeClientAck ?? false,
       seq: snapshot?.seq ?? 0,
+      sessionActivities: new Map(),
       sessionTitles: new Map(),
       sessionControlRequests: sessionControlRequestsToKeyMap(
         snapshot?.sessionControlRequests,
@@ -1192,16 +1219,22 @@ export class AcpRelayBroker {
     const sessions: AcpRelaySessionSummary[] = [];
     for (const binding of bindings) {
       const host = hostsById.get(binding.hostId);
-      if (!host?.online) {
+      if (!host) {
         continue;
       }
+      const key = sessionBindingKey(binding);
+      const storedBinding = storedBindingsByKey.get(key);
       sessions.push({
+        bridgeConnected: binding.bridgeConnected,
+        ...(binding.connectionId ? { connectionId: binding.connectionId } : {}),
+        hasActiveEvent: Boolean(binding.hasActiveEvent),
         hostId: binding.hostId,
         hostOnline: host.online,
         lifecycle: "live",
+        ...(binding.latestEvent ? { latestEvent: binding.latestEvent } : {}),
         sessionId: binding.sessionId,
         status: "active",
-        title: storedBindingsByKey.get(sessionBindingKey(binding))?.title ??
+        title: storedBinding?.title ??
           binding.title ??
           createSessionTitle({
           agent: binding.agent,
@@ -1210,8 +1243,12 @@ export class AcpRelayBroker {
         }),
         workspaceRoots: binding.workspaceRoots ?? [],
         ...(binding.agent ? { agent: binding.agent } : {}),
-        ...(binding.createdAt ? { createdAt: binding.createdAt } : {}),
-        ...(binding.updatedAt ? { updatedAt: binding.updatedAt } : {}),
+        ...(storedBinding?.createdAt ?? binding.createdAt
+          ? { createdAt: storedBinding?.createdAt ?? binding.createdAt }
+          : {}),
+        ...(storedBinding?.updatedAt ?? binding.updatedAt
+          ? { updatedAt: storedBinding?.updatedAt ?? binding.updatedAt }
+          : {}),
         ...(host.metadata ? { hostMetadata: host.metadata } : {}),
         ...(host.metadata?.displayName || host.metadata?.machine
           ? { hostName: host.metadata.displayName ?? host.metadata.machine }
@@ -1237,15 +1274,19 @@ export class AcpRelayBroker {
       if (!host) {
         continue;
       }
+      const isClosed = Boolean(binding.closedAt);
       sessions.push({
+        bridgeConnected: false,
+        ...(binding.closedAt ? { closedAt: binding.closedAt } : {}),
+        hasActiveEvent: false,
         hostId: binding.hostId,
         hostOnline: host.online,
-        lifecycle: "offline",
-        latestEvent: host.online
-          ? "Session is not attached to a live ACP client."
-          : "Host is offline. Session history is retained for inspection.",
+        lifecycle: isClosed ? "offline" : "live",
+        latestEvent: isClosed
+          ? "ACP session was closed."
+          : "ACP session is open.",
         sessionId: binding.sessionId,
-        status: "offline",
+        status: isClosed ? "offline" : "detached",
         title: binding.title ?? createSessionTitle({
           agent: binding.agent,
           host,
@@ -1254,7 +1295,9 @@ export class AcpRelayBroker {
         workspaceRoots: binding.workspaceRoots ?? [],
         ...(binding.agent ? { agent: binding.agent } : {}),
         ...(binding.createdAt ? { createdAt: binding.createdAt } : {}),
-        ...(binding.updatedAt ? { updatedAt: binding.updatedAt } : {}),
+        ...(binding.closedAt ?? binding.updatedAt
+          ? { updatedAt: binding.closedAt ?? binding.updatedAt }
+          : {}),
         ...(host.metadata ? { hostMetadata: host.metadata } : {}),
         ...(host.metadata?.displayName || host.metadata?.machine
           ? { hostName: host.metadata.displayName ?? host.metadata.machine }
@@ -1266,6 +1309,50 @@ export class AcpRelayBroker {
       ok: true,
       sessions: sessions.slice(0, input.limit),
     };
+  }
+
+  async closeDisconnectedSession(input: {
+    accountId: string;
+    sessionId: string;
+  }): Promise<
+    | { ok: true }
+    | { ok: false; reason: string; status: number }
+  > {
+    const activeBinding = this.activeSessionBindings(input.accountId)
+      .find((binding) => binding.sessionId === input.sessionId);
+    if (activeBinding?.bridgeConnected) {
+      return {
+        ok: false,
+        reason: "Session still has an active bridge connection.",
+        status: 409,
+      };
+    }
+
+    const bindings = await this.controlPlaneStore.listSessionBindings({
+      accountId: input.accountId,
+      limit: 500,
+    });
+    const binding = bindings.find((candidate) =>
+      candidate.sessionId === input.sessionId
+    );
+    if (!binding) {
+      return {
+        ok: false,
+        reason: "Session not found.",
+        status: 404,
+      };
+    }
+    if (binding.closedAt) {
+      return { ok: true };
+    }
+
+    const closedAt = this.now().toISOString();
+    await this.controlPlaneStore.upsertSessionBinding({
+      ...binding,
+      closedAt,
+      updatedAt: closedAt,
+    });
+    return { ok: true };
   }
 
   async checkSessionHealth(input: {
@@ -1284,8 +1371,11 @@ export class AcpRelayBroker {
     ]);
     const hosts = hostsResult.ok ? hostsResult.hosts : [];
     const onlineHostCount = hosts.filter((host) => host.online).length;
-    const liveSessions = sessionsResult.sessions.filter((session) => session.lifecycle !== "offline");
+    const liveSessions = sessionsResult.sessions.filter((session) =>
+      session.lifecycle !== "offline" && session.status !== "detached"
+    );
     const offlineSessions = sessionsResult.sessions.filter((session) => session.lifecycle === "offline");
+    const detachedSessions = sessionsResult.sessions.filter((session) => session.status === "detached");
     const failedLiveSessions = liveSessions.filter((session) => session.status === "failed");
     const checks: AcpRelaySessionHealth["checks"] = [
       {
@@ -1328,7 +1418,9 @@ export class AcpRelayBroker {
             id: "session",
             label: "Session",
             message: offlineSessions.length > 0
-              ? "No live session. Offline session history is available."
+              ? "No live session. Closed session history is available."
+              : detachedSessions.length > 0
+                ? "No live session. Detached open sessions are available."
               : "No live session. Start a session from an ACP client.",
             status: "warning",
           },
@@ -1339,6 +1431,7 @@ export class AcpRelayBroker {
       health: {
         checkedAt: new Date().toISOString(),
         checks,
+        detachedSessionCount: detachedSessions.length,
         liveSessionCount: liveSessions.length,
         offlineSessionCount: offlineSessions.length,
         onlineHostCount,
@@ -1435,7 +1528,7 @@ export class AcpRelayBroker {
           connectionId: failure.connectionId,
           error: failure.error,
           host,
-          latestEvent: "Session start failed.",
+          latestEvent: failure.latestEvent ?? "Session start failed.",
           lifecycle: "live",
           requestId: failure.requestId,
           sessionId: `failed:${failure.connectionId}:${String(failure.requestId)}`,
@@ -1495,6 +1588,8 @@ export class AcpRelayBroker {
     return {
       hostId: input.host.hostId,
       hostOnline: input.host.online,
+      bridgeConnected: Boolean(input.connectionId),
+      hasActiveEvent: Boolean(input.error ?? input.latestEvent),
       lifecycle: input.lifecycle ?? "live",
       sessionId: input.sessionId,
       status: input.status,
@@ -1518,9 +1613,9 @@ export class AcpRelayBroker {
     };
   }
 
-  private activeSessionBindings(accountId: string): AcpRelaySessionBindingRecord[] {
-    const bindings: AcpRelaySessionBindingRecord[] = [];
-    for (const client of this.clients.values()) {
+  private activeSessionBindings(accountId: string): ActiveSessionBindingRecord[] {
+    const bindings: ActiveSessionBindingRecord[] = [];
+    for (const [connectionId, client] of this.clients.entries()) {
       if (client.accountId !== accountId) {
         continue;
       }
@@ -1530,15 +1625,23 @@ export class AcpRelayBroker {
       }
       const sessions = new Map<
         string,
-        Pick<AcpRelaySessionBindingRecord, "agent" | "title" | "workspaceRoots">
+        Pick<
+          AcpRelaySessionBindingRecord,
+          "agent" | "createdAt" | "title" | "updatedAt" | "workspaceRoots"
+        >
+        & { latestEvent?: string }
       >();
       for (const request of client.hostRequests.values()) {
         const sessionId = readRequestSessionId(request);
         if (sessionId) {
           const selection = readSessionRestoreSelection(request);
+          const activity = client.sessionActivities.get(sessionId);
           sessions.set(sessionId, {
             agent: selection?.agent ?? client.lastAuthorization?.agent,
+            createdAt: activity?.createdAt,
+            latestEvent: activity?.latestEvent,
             title: client.sessionTitles.get(sessionId),
+            updatedAt: activity?.updatedAt,
             workspaceRoots:
               selection?.workspaceRoots ?? client.lastAuthorization?.workspaceRoots,
           });
@@ -1547,9 +1650,13 @@ export class AcpRelayBroker {
       for (const request of client.sessionControlRequests.values()) {
         const sessionId = readRequestSessionId(request);
         if (sessionId && !sessions.has(sessionId)) {
+          const activity = client.sessionActivities.get(sessionId);
           sessions.set(sessionId, {
             agent: client.lastAuthorization?.agent,
+            createdAt: activity?.createdAt,
+            latestEvent: activity?.latestEvent,
             title: client.sessionTitles.get(sessionId),
+            updatedAt: activity?.updatedAt,
             workspaceRoots: client.lastAuthorization?.workspaceRoots,
           });
         }
@@ -1560,9 +1667,13 @@ export class AcpRelayBroker {
           continue;
         }
         const binding = readSessionBindingMetadata(response.result);
+        const activity = client.sessionActivities.get(sessionId);
         sessions.set(sessionId, {
           agent: binding?.agent ?? client.lastAuthorization?.agent,
+          createdAt: activity?.createdAt,
+          latestEvent: activity?.latestEvent,
           title: client.sessionTitles.get(sessionId),
+          updatedAt: activity?.updatedAt,
           workspaceRoots:
             binding?.workspaceRoots ?? client.lastAuthorization?.workspaceRoots,
         });
@@ -1571,10 +1682,16 @@ export class AcpRelayBroker {
         bindings.push({
           accountId: client.accountId,
           agent: session.agent,
+          bridgeConnected: true,
           clientId: client.clientId,
+          connectionId,
+          createdAt: session.createdAt,
+          hasActiveEvent: Boolean(session.latestEvent),
           hostId,
+          latestEvent: session.latestEvent,
           sessionId,
           title: session.title,
+          updatedAt: session.updatedAt,
           workspaceRoots: session.workspaceRoots,
         });
       }
@@ -3626,6 +3743,13 @@ export class AcpRelayBroker {
       eventName: "acp.relay.host_frame.queued_for_reconnect",
       pendingReconnect: options.pendingReconnect,
     });
+    if (options.pendingReconnect && isJsonRpcRequestPayload(traced.payload)) {
+      this.trackPendingHostReconnectRequestTimeout(
+        connectionId,
+        client,
+        traced.payload,
+      );
+    }
     await this.persistClientStateBeforeHostDelivery(connectionId);
   }
 
@@ -3721,6 +3845,7 @@ export class AcpRelayBroker {
     payload: unknown,
   ): Promise<void> {
     client.hostPendingFrames.set(frame.seq, frame);
+    this.clearPendingHostReconnectRequestTimeout(client, payload);
     this.logRelayTransportFrame({
       channelKind: frame.channelKind,
       client,
@@ -3730,6 +3855,22 @@ export class AcpRelayBroker {
     });
     await this.persistClientStateBeforeHostDelivery(connectionId);
     host.send(JSON.stringify(frame));
+  }
+
+  private clearPendingHostReconnectRequestTimeout(
+    client: RelayClient,
+    payload: unknown,
+  ): void {
+    const request = isJsonRpcRequestPayload(payload) ? payload : undefined;
+    if (!request || !isStoredJsonRpcId(request.id)) {
+      return;
+    }
+    const state = client.hostRequestStates.get(request.id);
+    if (!state?.pendingReconnectTimeout) {
+      return;
+    }
+    clearTimeout(state.pendingReconnectTimeout);
+    state.pendingReconnectTimeout = undefined;
   }
 
   private trackHostDataFrameRequest(
@@ -3785,6 +3926,7 @@ export class AcpRelayBroker {
     this.rememberCompletedClientResponse(client, response);
     if (request && !response.error) {
       this.rememberSessionControlRequest(client, request);
+      await this.persistClosedSessionBindingFromHostResponse(client, request);
     }
     if (!request || !isSessionOpenRequest(request) || response.error) {
       return;
@@ -3836,6 +3978,9 @@ export class AcpRelayBroker {
     if (!sessionId || !title) {
       return;
     }
+    this.recordSessionActivity(client, sessionId, {
+      latestEvent: "Prompt sent to session.",
+    });
     client.sessionTitles.set(sessionId, title);
     const binding = await this.controlPlaneStore.getSessionBinding({
       accountId: client.accountId,
@@ -3852,6 +3997,39 @@ export class AcpRelayBroker {
       });
     } catch (error) {
       console.error("Failed to persist ACP remote session prompt title", error);
+    }
+  }
+
+  private async persistClosedSessionBindingFromHostResponse(
+    client: RelayClient,
+    request: RelayJsonRpcRequest,
+  ): Promise<void> {
+    if (request.method !== "session/close") {
+      return;
+    }
+    const sessionId = readRequestSessionId(request);
+    if (!sessionId) {
+      return;
+    }
+    const binding = await this.controlPlaneStore.getSessionBinding({
+      accountId: client.accountId,
+      clientId: client.clientId,
+      sessionId,
+    });
+    if (!binding) {
+      return;
+    }
+    const closedAt = this.now().toISOString();
+    this.recordSessionActivity(client, sessionId, {
+      latestEvent: "ACP session was closed.",
+    });
+    try {
+      await this.controlPlaneStore.upsertSessionBinding({
+        ...binding,
+        closedAt,
+      });
+    } catch (error) {
+      console.error("Failed to persist ACP remote session close", error);
     }
   }
 
@@ -3877,6 +4055,12 @@ export class AcpRelayBroker {
     const notification = isJsonRpcNotificationPayload(payload) ? payload : undefined;
     if (!notification || notification.method !== "session/update") {
       return;
+    }
+    const updatedSessionId = readPayloadSessionId(notification);
+    if (updatedSessionId) {
+      this.recordSessionActivity(client, updatedSessionId, {
+        latestEvent: "Session update received.",
+      });
     }
     const titleUpdate = readSessionTitleFromUpdateNotification(notification);
     if (!titleUpdate) {
@@ -3916,7 +4100,7 @@ export class AcpRelayBroker {
       connectionId,
       startedAt: this.now().toISOString(),
     };
-    if (isSessionOpenRequest(request) && this.sessionOpenTimeoutMs > 0) {
+    if (isSessionStartRequest(request) && this.sessionOpenTimeoutMs > 0) {
       state.timeout = setTimeout(() => {
         this.failTimedOutSessionOpenRequest(connectionId, client, request);
       }, this.sessionOpenTimeoutMs);
@@ -3924,15 +4108,142 @@ export class AcpRelayBroker {
     client.hostRequestStates.set(requestId, state);
   }
 
+  private trackPendingHostReconnectRequestTimeout(
+    connectionId: string,
+    client: RelayClient,
+    request: RelayJsonRpcRequest,
+  ): void {
+    if (
+      this.pendingHostRequestTimeoutMs <= 0 ||
+      !isStoredJsonRpcId(request.id)
+    ) {
+      return;
+    }
+    const state = client.hostRequestStates.get(request.id);
+    if (!state) {
+      return;
+    }
+    if (state.pendingReconnectTimeout) {
+      clearTimeout(state.pendingReconnectTimeout);
+    }
+    state.pendingReconnectTimeout = setTimeout(() => {
+      this.failTimedOutPendingHostReconnectRequest(connectionId, client, request);
+    }, this.pendingHostRequestTimeoutMs);
+  }
+
   private clearHostRequestState(
     client: RelayClient,
     requestId: string | number,
   ): void {
     const state = client.hostRequestStates.get(requestId);
+    if (state?.pendingReconnectTimeout) {
+      clearTimeout(state.pendingReconnectTimeout);
+    }
     if (state?.timeout) {
       clearTimeout(state.timeout);
     }
     client.hostRequestStates.delete(requestId);
+  }
+
+  private failTimedOutPendingHostReconnectRequest(
+    connectionId: string,
+    client: RelayClient,
+    request: RelayJsonRpcRequest,
+  ): void {
+    if (!isStoredJsonRpcId(request.id)) {
+      return;
+    }
+    const requestId = request.id;
+    if (client.hostRequests.get(requestId) !== request) {
+      return;
+    }
+    client.hostRequests.delete(requestId);
+    client.hostQueuedFrames = client.hostQueuedFrames.filter((frame) => {
+      const payload = isJsonRpcRequestPayload(frame.payload)
+        ? frame.payload
+        : undefined;
+      return !payload || payload.id !== requestId;
+    });
+    this.clearHostRequestState(client, requestId);
+
+    const selection = readSessionRestoreSelection(request) ?? client.lastAuthorization;
+    const hostId = selection?.hostId ?? client.hostId;
+    const message =
+      "Host did not reconnect in time. The message was not sent; restart the host and retry.";
+    client.recentSessionFailures.set(requestId, {
+      agent: selection?.agent,
+      connectionId,
+      error: message,
+      failedAt: this.now().toISOString(),
+      hostId,
+      latestEvent: "Session request failed.",
+      requestId,
+      workspaceRoots: selection?.workspaceRoots,
+    });
+    while (client.recentSessionFailures.size > 32) {
+      const firstKey = client.recentSessionFailures.keys().next().value;
+      if (firstKey === undefined) {
+        break;
+      }
+      client.recentSessionFailures.delete(firstKey);
+    }
+
+    const error = {
+      code: -32006,
+      data: {
+        connectionId,
+        hostId,
+        method: request.method,
+        reason: "host_reconnect_timeout",
+        requestId,
+        sessionId: readRequestSessionId(request),
+        timeoutMs: this.pendingHostRequestTimeoutMs,
+      },
+      message,
+    };
+    this.rememberCompletedClientResponse(client, {
+      error,
+      id: requestId,
+      jsonrpc: "2.0",
+    });
+    this.logRelayLifecycle({
+      accountId: client.accountId,
+      clientId: client.clientId,
+      connectionId,
+      hostId,
+      eventName: "acp.relay.host_reconnect.request_timeout",
+      jsonRpcId: requestId,
+      method: request.method,
+      severityText: "ERROR",
+      sessionId: readRequestSessionId(request),
+      traceContext: readAcpRemoteTraceContextFromJsonRpcMessage(request),
+      transport: client.transport,
+    });
+    if (client.socket) {
+      sendJsonRpcError(client.socket, request, error);
+      return;
+    }
+    if (!this.shouldKeepDisconnectedClient(client)) {
+      return;
+    }
+    this.queueClientPayload(
+      connectionId,
+      client,
+      {
+        channelId: "acp",
+        channelKind: AcpRemoteChannelKind.Acp,
+        connectionId,
+        frameType: AcpRemoteFrameType.Data,
+        payload: {
+          error,
+          id: requestId,
+          jsonrpc: "2.0",
+        },
+        seq: 0,
+      },
+      "client_buffer_overflow",
+      "ACP relay client outbound queue limit exceeded.",
+    );
   }
 
   private failTimedOutSessionOpenRequest(
@@ -4027,6 +4338,12 @@ export class AcpRelayBroker {
     if (!key) {
       return;
     }
+    const sessionId = readRequestSessionId(request);
+    if (sessionId) {
+      this.recordSessionActivity(client, sessionId, {
+        latestEvent: `Client requested ${request.method}.`,
+      });
+    }
     client.sessionControlRequests.set(key, request);
   }
 
@@ -4036,6 +4353,14 @@ export class AcpRelayBroker {
   ): void {
     if (!isStoredJsonRpcId(response.id)) {
       return;
+    }
+    const sessionId = readResultSessionId(response.result);
+    if (sessionId) {
+      this.recordSessionActivity(client, sessionId, {
+        latestEvent: response.error
+          ? "Session request returned an error."
+          : "Session response received.",
+      });
     }
     client.completedClientResponses.delete(response.id);
     client.completedClientResponses.set(response.id, response);
@@ -4049,6 +4374,20 @@ export class AcpRelayBroker {
       }
       client.completedClientResponses.delete(oldest.value);
     }
+  }
+
+  private recordSessionActivity(
+    client: RelayClient,
+    sessionId: string,
+    input: { latestEvent?: string } = {},
+  ): void {
+    const now = this.now().toISOString();
+    const previous = client.sessionActivities.get(sessionId);
+    client.sessionActivities.set(sessionId, {
+      createdAt: previous?.createdAt ?? now,
+      latestEvent: input.latestEvent ?? previous?.latestEvent,
+      updatedAt: now,
+    });
   }
 
   private handleNativeClientAck(
@@ -6089,6 +6428,12 @@ function isSessionOpenRequest(
       message.method === "session/load" ||
       message.method === "session/resume")
   );
+}
+
+function isSessionStartRequest(
+  message: RelayJsonRpcMessage,
+): message is RelayJsonRpcRequest {
+  return isJsonRpcRequest(message) && message.method === "session/new";
 }
 
 function isSessionRestoreRequest(message: RelayJsonRpcMessage): boolean {

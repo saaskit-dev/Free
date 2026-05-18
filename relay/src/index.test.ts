@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  AcpRemoteEndpointKind,
   createAcpRemoteAccountSession,
   createAcpRemoteConnectionProof,
   decodeAcpRemoteAccountSession,
@@ -22,6 +23,46 @@ describe("relay worker", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ ok: true });
+  });
+
+  it("logs HTTP request duration at the worker entrypoint", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      const response = await worker.fetch(
+        new Request("https://relay.test/health"),
+        createEnv({
+          ACP_RELAY_ACCOUNT_SESSION_PUBLIC_KEYS: undefined,
+          ACP_RELAY_DB: new FakeAuthD1Database() as unknown as D1Database,
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      const records = logSpy.mock.calls
+        .map(([entry]) => (typeof entry === "string" ? entry : ""))
+        .map((entry) => {
+          try {
+            return JSON.parse(entry) as Record<string, unknown>;
+          } catch {
+            return {};
+          }
+        });
+      expect(records).toContainEqual(
+        expect.objectContaining({
+          eventName: "acp.relay.http_request",
+          method: "GET",
+          path: "/health",
+          scope: "worker",
+          status: 200,
+        }),
+      );
+      const accessRecord = records.find(
+        (record) => record.eventName === "acp.relay.http_request",
+      );
+      expect(accessRecord?.durationMs).toEqual(expect.any(Number));
+      expect(accessRecord?.requestId).toEqual(expect.any(String));
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 
   it("requires a connection proof for attachment uploads", async () => {
@@ -204,8 +245,9 @@ describe("relay worker", () => {
 
   it("allows Workbench mutating API preflight requests", async () => {
     const response = await worker.fetch(
-      new Request("https://relay.test/api/hosts/host-1", {
+      new Request("https://relay.test/api/sessions/session-1", {
         headers: {
+          "Access-Control-Request-Private-Network": "true",
           origin: "https://free.saaskit.app",
         },
         method: "OPTIONS",
@@ -215,6 +257,7 @@ describe("relay worker", () => {
 
     expect(response.status).toBe(204);
     expect(response.headers.get("access-control-allow-origin")).toBe("https://free.saaskit.app");
+    expect(response.headers.get("access-control-allow-private-network")).toBe("true");
     expect(response.headers.get("access-control-allow-methods")).toContain("DELETE");
     expect(response.headers.get("access-control-allow-methods")).toContain("PATCH");
     expect(response.headers.get("access-control-allow-methods")).toContain("POST");
@@ -664,6 +707,53 @@ describe("relay worker", () => {
       reason: "otel_export_disabled",
     });
   });
+
+  it("does not close a WebSocket message path when client state snapshot persistence fails", async () => {
+    const shard = new AcpRelayShard(
+      createFakeDurableObjectState({ failPut: true }),
+      createEnv(),
+    );
+    const handledMessages: string[] = [];
+    Object.defineProperty(shard, "broker", {
+      value: {
+        clientStateSnapshot(connectionId: string) {
+          return {
+            bufferedClientPayloads: [],
+            clientPendingFrames: [],
+            completedClientResponses: [],
+            connectionId,
+            connectionProofs: [],
+            hostPendingFrames: [],
+            hostQueuedFrames: [],
+            hostRequests: [],
+            routeReady: true,
+            seq: 1,
+          };
+        },
+        async handleHostText(text: string) {
+          handledMessages.push(text);
+          return "conn-1";
+        },
+      },
+    });
+    Object.defineProperty(shard, "readSocketAttachment", {
+      value: () => ({
+        connectedAt: Date.now(),
+        connectionId: "host-socket",
+        endpoint: AcpRemoteEndpointKind.Host,
+        hostId: "host-1",
+        version: 1,
+      }),
+    });
+    const socket = {
+      close: vi.fn(),
+    } as unknown as WebSocket;
+
+    await shard.webSocketMessage(socket, JSON.stringify({ ok: true }));
+
+    expect(handledMessages).toEqual([JSON.stringify({ ok: true })]);
+    expect(socket.close).not.toHaveBeenCalled();
+  });
 });
 
 function createEnv(overrides: Partial<Env> = {}): Env {
@@ -685,7 +775,9 @@ function createEnv(overrides: Partial<Env> = {}): Env {
   };
 }
 
-function createFakeDurableObjectState(): DurableObjectState {
+function createFakeDurableObjectState(
+  options: { failPut?: boolean } = {},
+): DurableObjectState {
   const storage = new Map<string, unknown>();
   return {
     getWebSockets: () => [],
@@ -697,6 +789,9 @@ function createFakeDurableObjectState(): DurableObjectState {
         return storage.get(key) as T | undefined;
       },
       async put<T>(key: string, value: T): Promise<void> {
+        if (options.failPut) {
+          throw new Error("snapshot storage unavailable");
+        }
         storage.set(key, value);
       },
       async setAlarm(): Promise<void> {},

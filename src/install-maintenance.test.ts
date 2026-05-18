@@ -31,7 +31,7 @@ describe("install maintenance", () => {
       home,
       "Library",
       "LaunchAgents",
-      "dev.saaskit.free.host.plist",
+      "app.saaskit.free.plist",
     );
     const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0">
@@ -128,7 +128,7 @@ describe("install maintenance", () => {
       home,
       "Library",
       "LaunchAgents",
-      "dev.saaskit.free.host.plist",
+      "app.saaskit.free.plist",
     );
 
     await mkdir(join(packageRoot, "dist"), { recursive: true });

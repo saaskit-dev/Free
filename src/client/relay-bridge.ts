@@ -155,7 +155,7 @@ function readAccountCredentialFromEnv(): AcpRemoteAccountSessionCredential | und
   return decodeAcpRemoteAccountCredential(value);
 }
 
-async function resolveBridgeHostId(input: {
+export async function resolveBridgeHostId(input: {
   accountCredential: AcpRemoteAccountSessionCredential;
   relayUrl: string;
 }): Promise<{
@@ -186,18 +186,19 @@ async function resolveBridgeHostId(input: {
     ? body.hosts.filter(isHostDiscoveryEntry)
     : [];
   const onlineHosts = hosts.filter((host) => host.online !== false);
-  if (onlineHosts.length === 0) {
-    throw new Error(createNoOnlineHostMessage(input.relayUrl));
+  const selectableHosts = onlineHosts.length > 0 ? onlineHosts : hosts;
+  if (selectableHosts.length === 0) {
+    throw new Error(createNoRegisteredHostMessage(input.relayUrl));
   }
-  if (onlineHosts.length === 1) {
+  if (selectableHosts.length === 1) {
     return {
       hosts,
-      primaryHostId: onlineHosts[0].hostId,
+      primaryHostId: selectableHosts[0].hostId,
     };
   }
 
   const localMachine = hostname();
-  const localHosts = onlineHosts.filter(
+  const localHosts = selectableHosts.filter(
     (host) => host.metadata?.machine === localMachine,
   );
   if (localHosts.length > 0) {
@@ -208,7 +209,7 @@ async function resolveBridgeHostId(input: {
   }
   return {
     hosts,
-    primaryHostId: onlineHosts.sort(compareHostDiscoveryEntries)[0].hostId,
+    primaryHostId: selectableHosts.sort(compareHostDiscoveryEntries)[0].hostId,
   };
 }
 
@@ -277,9 +278,9 @@ function isFatalHostDiscoveryError(error: unknown): boolean {
   );
 }
 
-function createNoOnlineHostMessage(relayUrl: string): string {
+function createNoRegisteredHostMessage(relayUrl: string): string {
   return [
-    `No online Free host found for ${describeRelayTarget(relayUrl)}.`,
+    `No Free host is registered for ${describeRelayTarget(relayUrl)}.`,
     `Run \`${authLoginCommandForRelay(relayUrl)}\` to sign in and start the local Free host.`,
   ].join(" ");
 }
@@ -296,12 +297,12 @@ function describeRelayTarget(relayUrl: string): string {
 
 function authLoginCommandForRelay(relayUrl: string): string {
   if (relayUrl === FREE_LOCAL_RELAY_URL) {
-    return "free auth login --relay-env local";
+    return "free login --relay-env local";
   }
   if (relayUrl === ACP_REMOTE_DEFAULT_RELAY_URL) {
-    return "free auth login --relay-env online";
+    return "free login --relay-env online";
   }
-  return `free auth login --relay-url ${relayUrl}`;
+  return `free login --relay-url ${relayUrl}`;
 }
 
 export type HostDiscoveryEntry = {
@@ -427,6 +428,13 @@ export async function runFreeBridgeCommand(argv: readonly string[] = process.arg
     relayUrl,
   });
   const hostId = hostSelection.primaryHostId;
+  const selectedHost = hostSelection.hosts.find((host) => host.hostId === hostId);
+  if (selectedHost?.online === false) {
+    log(
+      `selected registered host ${hostId}; it is not connected yet, so the bridge will stay connected to the relay and wait.`,
+      "INFO",
+    );
+  }
   const connectionId = crypto.randomUUID();
   const connectionProofs = await Promise.all(
     hostSelection.hosts.map((host) =>
@@ -508,8 +516,9 @@ export async function runFreeBridgeCommand(argv: readonly string[] = process.arg
           freePhase: "install_update",
         },
       );
-      bridge.close();
-      exitAfterLogUpload(0);
+      bridge.close({
+        reason: "Bridge executable changed before this request completed.",
+      });
     },
   });
   process.on("SIGINT", () => bridge.close());

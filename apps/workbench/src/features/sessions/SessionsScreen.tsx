@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Pressable,
   ScrollView,
@@ -8,14 +8,18 @@ import {
   View,
 } from "react-native";
 
-import { checkSessionHealth } from "../../api/relay";
+import { checkSessionHealth, closeSession } from "../../api/relay";
 import type { HostRecord, LanguageMode, LoadState, SessionHealth, SessionRecord } from "../../types";
+import { minimumLoadingDelay } from "../../ui/loading";
 import { colors, common, typography } from "../../ui/theme";
+import { ConfirmDialog } from "../../ui/ConfirmDialog";
 import { t } from "../../workbench/preferences";
 
 type SessionsScreenProps = {
   hosts: LoadState<HostRecord[]>;
   language: LanguageMode;
+  onChanged: () => Promise<void>;
+  onSessionClosed: (sessionId: string) => void;
   sessions: LoadState<SessionRecord[]>;
 };
 
@@ -26,8 +30,9 @@ type HealthState =
   | { status: "checking" }
   | { status: "ready"; value: SessionHealth }
   | { status: "error"; message: string };
+type ToastState = { id: number; tone: "error" | "success"; value: string };
 
-export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProps) {
+export function SessionsScreen({ hosts, language, onChanged, onSessionClosed, sessions }: SessionsScreenProps) {
   const { width } = useWindowDimensions();
   const compact = width < 900;
   const [query, setQuery] = useState("");
@@ -37,7 +42,19 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
   const [status, setStatus] = useState<StatusFilter>("online");
   const [openFilter, setOpenFilter] = useState<FilterId | undefined>();
   const [copiedKey, setCopiedKey] = useState<string | undefined>();
+  const [closingSessionId, setClosingSessionId] = useState<string | undefined>();
+  const [confirmSession, setConfirmSession] = useState<SessionRecord | undefined>();
+  const [toast, setToast] = useState<ToastState | undefined>();
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [health, setHealth] = useState<HealthState>({ status: "idle" });
+
+  useEffect(() => {
+    return () => {
+      if (toastTimer.current) {
+        clearTimeout(toastTimer.current);
+      }
+    };
+  }, []);
 
   const hostLabels = useMemo(() => {
     const labels = new Map<string, string>();
@@ -94,9 +111,10 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
         readSessionHostLabel(session, hostLabels),
         readAgentLabel(session),
         readStatusLabel(session.status, language),
+        readBridgeLabel(session, language),
+        readActivityLabel(session, language),
         session.latestEvent ?? "",
         session.error ?? "",
-        ...session.workspaceRoots,
       ];
       return values.some((value) => value.toLowerCase().includes(needle));
     });
@@ -104,35 +122,77 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
 
   const sessionCounts = useMemo(() => {
     if (sessions.status !== "ready") {
-      return { live: 0, offline: 0, total: 0 };
+      return { detached: 0, live: 0, offline: 0, total: 0 };
     }
     return sessions.data.reduce(
       (counts, session) => {
         counts.total += 1;
         if (session.lifecycle === "offline") {
           counts.offline += 1;
+        } else if (session.status === "detached") {
+          counts.detached += 1;
         } else {
           counts.live += 1;
         }
         return counts;
       },
-      { live: 0, offline: 0, total: 0 },
+      { detached: 0, live: 0, offline: 0, total: 0 },
     );
   }, [sessions]);
 
   const copyValue = (value: string, key: string) => {
     void copyText(value).then((ok) => {
-      if (!ok) return;
+      if (!ok) {
+        showToast("error", t(language, "复制失败", "Copy failed"));
+        return;
+      }
       setCopiedKey(key);
+      showToast("success", t(language, "已复制 Session ID", "Session ID copied"));
       setTimeout(() => {
         setCopiedKey((current) => current === key ? undefined : current);
       }, 1400);
     });
   };
 
+  const closeDisconnectedSession = (session: SessionRecord) => {
+    if (closingSessionId) return;
+    setConfirmSession(session);
+  };
+
+  const confirmCloseSession = () => {
+    if (!confirmSession || closingSessionId) return;
+    const session = confirmSession;
+    setClosingSessionId(session.sessionId);
+    void Promise.all([closeSession(session.sessionId), minimumLoadingDelay()])
+      .then(async () => {
+        onSessionClosed(session.sessionId);
+        setConfirmSession(undefined);
+        showToast("success", t(language, "Session 已关闭", "Session closed"));
+        void onChanged();
+      })
+      .catch((error: unknown) => {
+        showToast("error", error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        setClosingSessionId(undefined);
+      });
+  };
+
+  const showToast = (tone: ToastState["tone"], value: string) => {
+    if (toastTimer.current) {
+      clearTimeout(toastTimer.current);
+    }
+    const id = Date.now();
+    setToast({ id, tone, value });
+    toastTimer.current = setTimeout(() => {
+      setToast((current) => current?.id === id ? undefined : current);
+    }, 1800);
+  };
+
   const runHealthCheck = () => {
+    if (health.status === "checking") return;
     setHealth({ status: "checking" });
-    void checkSessionHealth().then((result) => {
+    void Promise.all([checkSessionHealth(), minimumLoadingDelay()]).then(([result]) => {
       if (!result.ok) {
         setHealth({ message: result.message, status: "error" });
         return;
@@ -170,8 +230,31 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
     return <Panel title={t(language, "Session 不可用", "Sessions unavailable")} body={sessions.message} tone="error" />;
   }
 
+  const confirmClosing = closingSessionId === confirmSession?.sessionId;
+
   return (
-    <View style={{ gap: 10 }}>
+    <View style={{ gap: 10, position: "relative" }}>
+      {toast ? <ToastNotice toast={toast} /> : null}
+      <ConfirmDialog
+        cancelDisabled={confirmClosing}
+        confirmLabel={confirmClosing ? t(language, "关闭中", "Closing") : t(language, "关闭 Session", "Close session")}
+        confirmLoading={confirmClosing}
+        description={confirmSession
+          ? t(
+            language,
+            "此操作会关闭这个未连接的 ACP Session。关闭后只能作为历史记录查看。",
+            "This closes the detached ACP session. After closing, it remains visible as history.",
+          )
+          : undefined}
+        language={language}
+        onCancel={() => {
+          if (!confirmClosing) setConfirmSession(undefined);
+        }}
+        onConfirm={confirmCloseSession}
+        tone="danger"
+        title={t(language, "确认关闭 Session", "Confirm session close")}
+        visible={confirmSession !== undefined}
+      />
       <View style={toolbarStyle}>
         <TextInput
           accessibilityLabel={t(language, "搜索 Session", "Search sessions")}
@@ -191,8 +274,10 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
         <Pressable
           accessibilityLabel={t(language, "检查链路健康", "Check chain health")}
           accessibilityRole="button"
+          accessibilityState={health.status === "checking" ? { busy: true, disabled: true } : undefined}
+          disabled={health.status === "checking"}
           onPress={runHealthCheck}
-          style={actionButtonStyle}
+          style={[actionButtonStyle, health.status === "checking" ? disabledActionButtonStyle : null]}
         >
           <Text style={actionButtonTextStyle}>
             {health.status === "checking" ? t(language, "检查中", "Checking") : t(language, "健康检查", "Health")}
@@ -210,7 +295,8 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
           openFilter={openFilter}
           options={[
             ["online", t(language, "在线", "Online")],
-            ["offline", t(language, "离线", "Offline")],
+            ["detached", t(language, "未连接", "Detached")],
+            ["offline", t(language, "已关闭", "Closed")],
             ["active", t(language, "运行中", "Active")],
             ["starting", t(language, "启动中", "Starting")],
             ["waiting_authorization", t(language, "等待授权", "Waiting")],
@@ -279,8 +365,7 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
           body={readEmptyFilterMessage(status, sessionCounts, language)}
         />
       ) : (
-        <View style={[common.panel, { overflow: "hidden" }]}>
-          {!compact ? <SessionHeader language={language} /> : null}
+        <View style={compact ? mobileListStyle : [common.panel, { overflow: "hidden" }]}>
           {visibleSessions.map((session) => (
             <SessionRow
               compact={compact}
@@ -288,7 +373,9 @@ export function SessionsScreen({ hosts, language, sessions }: SessionsScreenProp
               hostLabel={readSessionHostLabel(session, hostLabels)}
               key={session.sessionId}
               language={language}
+              onClose={closeDisconnectedSession}
               onCopy={copyValue}
+              closing={closingSessionId === session.sessionId}
               session={session}
             />
           ))}
@@ -338,7 +425,7 @@ function HealthPanel({
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, justifyContent: "space-between" }}>
         <Text style={[healthTitleStyle, { color: tone }]}>{title}</Text>
         <Text style={common.eyebrow}>
-          {t(language, "激活", "Live")} {health.value.liveSessionCount} · {t(language, "离线", "Offline")} {health.value.offlineSessionCount} · Host {health.value.onlineHostCount}
+          {t(language, "在线", "Live")} {health.value.liveSessionCount} · {t(language, "未连接", "Detached")} {health.value.detachedSessionCount ?? 0} · {t(language, "已关闭", "Closed")} {health.value.offlineSessionCount} · Host {health.value.onlineHostCount}
         </Text>
       </View>
       <View style={{ gap: 5 }}>
@@ -418,131 +505,312 @@ function SessionRow({
   copiedKey,
   hostLabel,
   language,
+  onClose,
   onCopy,
+  closing,
   session,
 }: {
+  closing: boolean;
   compact: boolean;
   copiedKey?: string;
   hostLabel: string;
   language: LanguageMode;
+  onClose: (session: SessionRecord) => void;
   onCopy: (value: string, key: string) => void;
   session: SessionRecord;
 }) {
-  const workspaces = readWorkspaceSummary(session, language);
-  const updated = formatTime(session.updatedAt ?? session.createdAt, language);
+  const updated = formatSessionUpdated(session, language);
   const agentLabel = readAgentLabel(session);
   const title = readSessionTitle(session, language);
-  return (
-    <View style={[rowStyle, compact ? compactRowStyle : null]}>
-      <View style={{ flex: compact ? undefined : 1.35, minWidth: 0 }}>
-        <Text numberOfLines={1} style={primaryTextStyle}>
-          {title}
-        </Text>
-        <Text numberOfLines={1} style={secondaryMonoStyle}>
-          {hostLabel} · {agentLabel}
-        </Text>
-      </View>
-      <View style={{ flex: compact ? undefined : 1.1, minWidth: 0 }}>
-        <Text numberOfLines={1} style={primaryTextStyle}>
-          {workspaces}
-        </Text>
-        <Text numberOfLines={1} style={secondaryTextStyle}>
-          Host {shortId(session.hostId)} · Session {shortId(session.sessionId)}
-        </Text>
-      </View>
-      <View style={{ flex: compact ? undefined : 1.25, minWidth: 0 }}>
-        <SessionMeta language={language} session={session} />
-      </View>
-      <View style={{ flex: compact ? undefined : 0.95, minWidth: 0 }}>
-        <Text numberOfLines={1} style={primaryTextStyle}>
-          {updated}
-        </Text>
-        <Text numberOfLines={1} style={secondaryTextStyle}>
-          {readConnectionSummary(session, language)}
-        </Text>
-      </View>
-      <SessionActions
-        copiedKey={copiedKey}
+  const sessionIdKey = `${session.sessionId}:session`;
+  if (compact) {
+    return (
+      <MobileSessionRow
+        agentLabel={agentLabel}
+        closing={closing}
+        copied={copiedKey === sessionIdKey}
+        hostLabel={hostLabel}
         language={language}
-        onCopy={onCopy}
+        onClose={() => onClose(session)}
+        onCopy={() => onCopy(session.sessionId, sessionIdKey)}
         session={session}
+        title={title}
+        updated={updated}
       />
-    </View>
-  );
-}
-
-function SessionHeader({ language }: { language: LanguageMode }) {
+    );
+  }
   return (
-    <View style={[rowStyle, { backgroundColor: "#F5F1E8", minHeight: 34, paddingVertical: 8 }]}>
-      <Text style={[headerCellStyle, { flex: 1.35 }]}>{t(language, "Session", "Session")}</Text>
-      <Text style={[headerCellStyle, { flex: 1.1 }]}>{t(language, "上下文", "Context")}</Text>
-      <Text style={[headerCellStyle, { flex: 1.25 }]}>{t(language, "状态", "State")}</Text>
-      <Text style={[headerCellStyle, { flex: 0.95 }]}>{t(language, "更新", "Updated")}</Text>
-      <Text style={[headerCellStyle, { minWidth: 154, textAlign: "right" }]}>{t(language, "操作", "Actions")}</Text>
-    </View>
+    <DesktopSessionRow
+      agentLabel={agentLabel}
+      closing={closing}
+      copied={copiedKey === sessionIdKey}
+      hostLabel={hostLabel}
+      language={language}
+      onClose={() => onClose(session)}
+      onCopy={() => onCopy(session.sessionId, sessionIdKey)}
+      session={session}
+      title={title}
+      updated={updated}
+    />
   );
 }
 
-function SessionMeta({
+function DesktopSessionRow({
+  agentLabel,
+  closing,
+  copied,
+  hostLabel,
   language,
-  session,
-}: {
-  language: LanguageMode;
-  session: SessionRecord;
-}) {
-  const statusLabel = readLifecycleStatusLabel(session, language);
-  const statusTone = readStatusTone(session.status);
-  const detail = readSessionDetail(session, language);
-  return (
-    <View style={{ gap: 1, minWidth: 0 }}>
-      <Text numberOfLines={1} style={[common.eyebrow, { color: statusTone }]}>
-        {statusLabel}
-      </Text>
-      {detail ? (
-        <Text numberOfLines={2} style={[secondaryTextStyle, session.error ? { color: colors.coral } : null]}>
-          {detail}
-        </Text>
-      ) : null}
-    </View>
-  );
-}
-
-function SessionActions({
-  copiedKey,
-  language,
+  onClose,
   onCopy,
   session,
+  title,
+  updated,
 }: {
-  copiedKey?: string;
+  agentLabel: string;
+  closing: boolean;
+  copied: boolean;
+  hostLabel: string;
   language: LanguageMode;
-  onCopy: (value: string, key: string) => void;
+  onClose: () => void;
+  onCopy: () => void;
   session: SessionRecord;
+  title: string;
+  updated: string;
+}) {
+  const canClose = canCloseFromWorkbench(session);
+  const statusTone = readLifecycleStatusTone(session);
+  const activityDetail = hasSessionActiveEvent(session) ? readSessionDetail(session, language) : "";
+  const rawTitle = session.title?.trim();
+  const workspace = readWorkspaceSummary(session, language);
+  const displayTitle = rawTitle ? title : workspace;
+  const subtitle = rawTitle && workspace !== displayTitle ? workspace : readSessionContextLine(session, language);
+  return (
+    <View style={desktopRowStyle}>
+      <View style={desktopMainStyle}>
+        <View style={desktopTitleLineStyle}>
+          <Text numberOfLines={1} style={mobileTitleStyle}>
+            {displayTitle}
+          </Text>
+          <View style={[mobileStatusPillStyle, { borderColor: statusTone }]}>
+            <View style={[mobileStatusDotStyle, { backgroundColor: statusTone }]} />
+            <Text numberOfLines={1} style={[mobileStatusTextStyle, { color: statusTone }]}>
+              {readLifecycleStatusLabel(session, language)}
+            </Text>
+          </View>
+        </View>
+        {subtitle ? (
+          <Text numberOfLines={1} style={mobileWorkspaceStyle}>
+            {subtitle}
+          </Text>
+        ) : null}
+        <Pressable
+          accessibilityLabel={t(language, "复制 Session ID", "Copy session ID")}
+          accessibilityRole="button"
+          onPress={onCopy}
+        >
+          <Text style={[
+            secondaryMonoStyle,
+            sessionIdTextStyle,
+            copied ? { color: colors.green } : null,
+          ]}>
+            {copied ? t(language, "已复制", "Copied") : session.sessionId}
+          </Text>
+        </Pressable>
+      </View>
+
+      <View style={desktopSignalsStyle}>
+        <DesktopSignal
+          label={t(language, "Host", "Host")}
+          tone={session.hostOnline === false ? colors.coral : colors.ink}
+          value={hostLabel}
+        />
+        <DesktopSignal
+          label={t(language, "Agent", "Agent")}
+          tone={colors.ink}
+          value={agentLabel}
+        />
+        <DesktopSignal
+          label={t(language, "Bridge", "Bridge")}
+          tone={session.bridgeConnected || session.connectionId ? colors.green : colors.muted}
+          value={readBridgeLabel(session, language)}
+        />
+        <DesktopSignal
+          label={t(language, "活动", "Activity")}
+          tone={session.error ? colors.coral : hasSessionActiveEvent(session) ? colors.cyan : colors.muted}
+          value={activityDetail || readActivityLabel(session, language)}
+        />
+      </View>
+
+      <View style={desktopTailStyle}>
+        <Text numberOfLines={1} style={secondaryTextStyle}>{updated}</Text>
+        {canClose ? (
+          <ActionButton
+            disabled={closing}
+            label={closing ? t(language, "关闭中", "Closing") : t(language, "关闭", "Close")}
+            onPress={onClose}
+          />
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
+function DesktopSignal({
+  label,
+  tone,
+  value,
+}: {
+  label: string;
+  tone: string;
+  value: string;
 }) {
   return (
-    <View style={actionRailStyle}>
-      <ActionButton
-        label={copiedKey === `${session.sessionId}:session` ? t(language, "已复制", "Copied") : t(language, "复制 Session", "Copy session")}
-        onPress={() => onCopy(session.sessionId, `${session.sessionId}:session`)}
-      />
-      {session.connectionId ? (
-        <ActionButton
-          label={copiedKey === `${session.sessionId}:connection` ? t(language, "已复制", "Copied") : t(language, "复制连接", "Copy conn")}
-          onPress={() => onCopy(session.connectionId ?? "", `${session.sessionId}:connection`)}
+    <View style={desktopSignalStyle}>
+      <Text numberOfLines={1} style={mobileSignalLabelStyle}>{label}</Text>
+      <Text numberOfLines={1} style={[mobileSignalValueStyle, { color: tone }]}>
+        {value}
+      </Text>
+    </View>
+  );
+}
+
+function MobileSessionRow({
+  agentLabel,
+  closing,
+  copied,
+  hostLabel,
+  language,
+  onClose,
+  onCopy,
+  session,
+  title,
+  updated,
+}: {
+  agentLabel: string;
+  closing: boolean;
+  copied: boolean;
+  hostLabel: string;
+  language: LanguageMode;
+  onClose: () => void;
+  onCopy: () => void;
+  session: SessionRecord;
+  title: string;
+  updated: string;
+}) {
+  const canClose = canCloseFromWorkbench(session);
+  const statusTone = readLifecycleStatusTone(session);
+  const activityDetail = hasSessionActiveEvent(session) ? readSessionDetail(session, language) : "";
+  const rawTitle = session.title?.trim();
+  const workspace = readWorkspaceSummary(session, language);
+  const mobileTitle = rawTitle ? title : workspace;
+  const mobileSubtitle = rawTitle && workspace !== mobileTitle ? workspace : "";
+  return (
+    <View style={mobileRowStyle}>
+      <View style={mobileRowHeaderStyle}>
+        <View style={{ flex: 1, gap: 2, minWidth: 0 }}>
+          <Text numberOfLines={1} style={mobileTitleStyle}>
+            {mobileTitle}
+          </Text>
+          {mobileSubtitle ? (
+            <Text numberOfLines={1} style={mobileWorkspaceStyle}>
+              {mobileSubtitle}
+            </Text>
+          ) : null}
+        </View>
+        <View style={[mobileStatusPillStyle, { borderColor: statusTone }]}>
+          <View style={[mobileStatusDotStyle, { backgroundColor: statusTone }]} />
+          <Text numberOfLines={1} style={[mobileStatusTextStyle, { color: statusTone }]}>
+            {readLifecycleStatusLabel(session, language)}
+          </Text>
+        </View>
+      </View>
+
+      <View style={mobileSublineStyle}>
+        <Text numberOfLines={1} style={mobileAgentStyle}>{agentLabel}</Text>
+        <Text numberOfLines={1} style={secondaryTextStyle}>{updated}</Text>
+      </View>
+
+      <View style={mobileSignalsStyle}>
+        <MobileSignal
+          label={t(language, "Host", "Host")}
+          tone={session.hostOnline === false ? colors.coral : colors.ink}
+          value={hostLabel}
         />
-      ) : null}
+        <MobileSignal
+          label={t(language, "Bridge", "Bridge")}
+          tone={session.bridgeConnected || session.connectionId ? colors.green : colors.muted}
+          value={readBridgeLabel(session, language)}
+        />
+        <MobileSignal
+          label={t(language, "活动", "Activity")}
+          tone={session.error ? colors.coral : hasSessionActiveEvent(session) ? colors.cyan : colors.muted}
+          value={activityDetail || readActivityLabel(session, language)}
+        />
+      </View>
+
+      <View style={mobileFooterStyle}>
+        <Pressable
+          accessibilityLabel={t(language, "复制 Session ID", "Copy session ID")}
+          accessibilityRole="button"
+          onPress={onCopy}
+          style={mobileSessionIdStyle}
+        >
+          <Text style={[
+            secondaryMonoStyle,
+            sessionIdTextStyle,
+            copied ? { color: colors.green } : null,
+          ]}>
+            {copied
+              ? t(language, "已复制", "Copied")
+              : session.sessionId}
+          </Text>
+        </Pressable>
+        {canClose ? (
+          <ActionButton
+            disabled={closing}
+            label={closing ? t(language, "关闭中", "Closing") : t(language, "关闭", "Close")}
+            onPress={onClose}
+          />
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
+function MobileSignal({
+  label,
+  tone,
+  value,
+}: {
+  label: string;
+  tone: string;
+  value: string;
+}) {
+  return (
+    <View style={mobileSignalStyle}>
+      <Text numberOfLines={1} style={mobileSignalLabelStyle}>{label}</Text>
+      <Text numberOfLines={1} style={[mobileSignalValueStyle, { color: tone }]}>{value}</Text>
     </View>
   );
 }
 
 function ActionButton({
+  disabled,
   label,
   onPress,
 }: {
+  disabled?: boolean;
   label: string;
   onPress: () => void;
 }) {
   return (
-    <Pressable onPress={onPress} style={actionButtonStyle}>
+    <Pressable
+      accessibilityState={disabled ? { disabled: true } : undefined}
+      disabled={disabled}
+      onPress={onPress}
+      style={[actionButtonStyle, disabled ? disabledActionButtonStyle : null]}
+    >
       <Text style={actionButtonTextStyle}>{label}</Text>
     </Pressable>
   );
@@ -573,8 +841,28 @@ async function copyText(value: string): Promise<boolean> {
     navigator.clipboard &&
     typeof navigator.clipboard.writeText === "function"
   ) {
-    await navigator.clipboard.writeText(value);
-    return true;
+    try {
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch {
+      // Fall through to the textarea-based fallback for local HTTP workbench pages.
+    }
+  }
+  if (typeof document !== "undefined" && typeof document.execCommand === "function") {
+    const textarea = document.createElement("textarea");
+    textarea.value = value;
+    textarea.setAttribute("readonly", "true");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    textarea.style.top = "0";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    try {
+      return document.execCommand("copy");
+    } finally {
+      document.body.removeChild(textarea);
+    }
   }
   return false;
 }
@@ -631,25 +919,50 @@ function readWorkspaceSummary(session: SessionRecord, language: LanguageMode): s
   if (session.workspaceRoots.length === 0) {
     return t(language, "未限定目录", "No workspace limit");
   }
-  const [first, ...rest] = session.workspaceRoots.map(readWorkspaceLabel);
+  const [first, ...rest] = session.workspaceRoots;
   return rest.length === 0 ? first : `${first} +${rest.length}`;
+}
+
+function readSessionContextLine(session: SessionRecord, language: LanguageMode): string {
+  const workspace = readWorkspaceSummary(session, language);
+  if (session.workspaceRoots.length <= 1) return workspace;
+  return `${workspace} · ${t(language, "共", "Total")} ${session.workspaceRoots.length} ${t(language, "个目录", "workspaces")}`;
 }
 
 function readLifecycleStatusLabel(session: SessionRecord, language: LanguageMode): string {
   if (session.lifecycle === "offline" || session.status === "offline") {
-    return t(language, "离线历史", "Offline history");
+    return t(language, "Session 已关闭", "Session closed");
+  }
+  if (session.status === "detached") {
+    return t(language, "未连接，未关闭", "Detached open");
+  }
+  if (session.hostOnline === false) {
+    return t(language, "Host 离线", "Host offline");
   }
   return readStatusLabel(session.status, language);
 }
 
-function readConnectionSummary(session: SessionRecord, language: LanguageMode): string {
-  if (session.connectionId) {
-    return `${t(language, "连接", "Conn")} ${shortId(session.connectionId)}`;
+function readBridgeLabel(session: SessionRecord, language: LanguageMode): string {
+  return session.bridgeConnected || session.connectionId
+    ? t(language, "已连接", "Connected")
+    : t(language, "未连接", "Disconnected");
+}
+
+function readActivityLabel(session: SessionRecord, language: LanguageMode): string {
+  return hasSessionActiveEvent(session)
+    ? t(language, "有活动", "Active event")
+    : t(language, "无活动", "No activity");
+}
+
+function hasSessionActiveEvent(session: SessionRecord): boolean {
+  return Boolean(session.hasActiveEvent || session.error);
+}
+
+function canCloseFromWorkbench(session: SessionRecord): boolean {
+  if (session.lifecycle === "offline" || session.status === "offline") {
+    return false;
   }
-  if (session.requestId !== undefined) {
-    return `${t(language, "请求", "Req")} ${String(session.requestId)}`;
-  }
-  return t(language, "无活动连接", "No active connection");
+  return !Boolean(session.bridgeConnected || session.connectionId);
 }
 
 function readSessionDetail(session: SessionRecord, language: LanguageMode): string {
@@ -657,35 +970,45 @@ function readSessionDetail(session: SessionRecord, language: LanguageMode): stri
   const event = session.latestEvent?.trim();
   if (!event) return "";
   if (event === "Session is not attached to a live ACP client.") {
-    return t(language, "未连接到实时 ACP 客户端。", "Not attached to a live ACP client.");
+    return t(language, "ACP Session 未关闭。", "ACP session is open.");
+  }
+  if (event === "ACP session is open.") {
+    return t(language, "ACP Session 未关闭。", "ACP session is open.");
+  }
+  if (event === "ACP session was closed.") {
+    return t(language, "ACP Session 已关闭。", "ACP session was closed.");
   }
   return event;
 }
 
 function matchesStatusFilter(session: SessionRecord, status: StatusFilter): boolean {
   if (status === "all") return true;
-  if (status === "online") return session.lifecycle !== "offline" && session.status !== "offline";
+  if (status === "online") return session.lifecycle !== "offline" && session.status !== "offline" && session.status !== "detached";
   if (status === "offline") return session.lifecycle === "offline" || session.status === "offline";
   return session.status === status;
 }
 
 function readEmptyFilterMessage(
   status: StatusFilter,
-  counts: { live: number; offline: number; total: number },
+  counts: { detached: number; live: number; offline: number; total: number },
   language: LanguageMode,
 ): string {
-  if (status === "online" && counts.offline > 0) {
+  if (status === "online" && (counts.detached > 0 || counts.offline > 0)) {
     return t(
       language,
-      "当前没有在线 Session。可在状态筛选中选择离线或全部查看历史。",
-      "No online sessions. Choose Offline or All in the state filter to view history.",
+      counts.detached > 0
+        ? "当前没有在线 Session。可在状态筛选中选择未连接或全部查看未关闭 Session。"
+        : "当前没有在线 Session。可在状态筛选中选择已关闭或全部查看历史。",
+      counts.detached > 0
+        ? "No online sessions. Choose Detached or All in the state filter to view open sessions."
+        : "No online sessions. Choose Closed or All in the state filter to view history.",
     );
   }
   if (status === "offline" && counts.live > 0) {
     return t(
       language,
-      "当前没有离线 Session。可在状态筛选中选择在线或全部查看激活 Session。",
-      "No offline sessions. Choose Online or All in the state filter to view live sessions.",
+      "当前没有已关闭 Session。可在状态筛选中选择在线或全部查看在线 Session。",
+      "No closed sessions. Choose Online or All in the state filter to view live sessions.",
     );
   }
   return t(language, "调整筛选条件或搜索词后再查看。", "Adjust the filters or search text.");
@@ -694,16 +1017,31 @@ function readEmptyFilterMessage(
 function readStatusLabel(status: SessionRecord["status"], language: LanguageMode): string {
   if (status === "waiting_authorization") return t(language, "等待授权", "Waiting");
   if (status === "starting") return t(language, "启动中", "Starting");
+  if (status === "detached") return t(language, "未连接", "Detached");
   if (status === "failed") return t(language, "失败", "Failed");
-  if (status === "offline") return t(language, "离线历史", "Offline");
+  if (status === "offline") return t(language, "已关闭", "Closed");
   return t(language, "运行中", "Active");
 }
 
 function readStatusTone(status: SessionRecord["status"]): string {
   if (status === "failed") return colors.coral;
   if (status === "starting" || status === "waiting_authorization") return colors.cyan;
+  if (status === "detached") return colors.cyan;
   if (status === "offline") return colors.muted;
   return colors.green;
+}
+
+function readLifecycleStatusTone(session: SessionRecord): string {
+  if (session.lifecycle === "offline" || session.status === "offline") {
+    return colors.muted;
+  }
+  if (session.status === "detached") {
+    return colors.cyan;
+  }
+  if (session.hostOnline === false) {
+    return colors.coral;
+  }
+  return readStatusTone(session.status);
 }
 
 function readHealthCheckLabel(status: SessionHealth["checks"][number]["status"], language: LanguageMode): string {
@@ -733,12 +1071,34 @@ function readHealthCheckMessage(
     return t(language, "没有在线主机，需启动或重连 Free host。", "No host is online. Start or reconnect a Free host.");
   }
   if (health.liveSessionCount > 0) {
-    return t(language, `${health.liveSessionCount} 个激活 Session 可见。`, `${health.liveSessionCount} live session${health.liveSessionCount === 1 ? "" : "s"} visible.`);
+    return t(language, `${health.liveSessionCount} 个在线 Session 可见。`, `${health.liveSessionCount} live session${health.liveSessionCount === 1 ? "" : "s"} visible.`);
+  }
+  if ((health.detachedSessionCount ?? 0) > 0) {
+    return t(language, "没有在线 Session，存在未连接但未关闭的 Session。", "No live session. Detached open sessions are available.");
   }
   if (health.offlineSessionCount > 0) {
-    return t(language, "没有激活 Session，存在离线历史。", "No live session. Offline session history is available.");
+    return t(language, "没有在线 Session，存在已关闭历史。", "No live session. Closed session history is available.");
   }
-  return t(language, "没有激活 Session，请从 ACP 客户端启动。", "No live session. Start a session from an ACP client.");
+  return t(language, "没有在线 Session，请从 ACP 客户端启动。", "No live session. Start a session from an ACP client.");
+}
+
+function ToastNotice({ toast }: { toast: ToastState }) {
+  return (
+    <View
+      accessibilityRole="alert"
+      style={[
+        toastNoticeStyle,
+        { borderColor: toast.tone === "error" ? colors.coral : colors.green },
+      ]}
+    >
+      <Text style={[
+        toastNoticeTextStyle,
+        { color: toast.tone === "error" ? colors.coral : colors.green },
+      ]}>
+        {toast.value}
+      </Text>
+    </View>
+  );
 }
 
 function readWorkspaceLabel(path: string): string {
@@ -759,6 +1119,15 @@ function formatTime(value: string | undefined, language: LanguageMode): string {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(date);
+}
+
+function formatSessionUpdated(session: SessionRecord, language: LanguageMode): string {
+  const value = session.updatedAt ?? session.createdAt;
+  if (value) return formatTime(value, language);
+  if (session.lifecycle !== "offline" && session.status !== "offline" && session.status !== "detached") {
+    return t(language, "当前在线", "Live now");
+  }
+  return t(language, "未记录", "Not recorded");
 }
 
 const inputStyle = {
@@ -798,6 +1167,29 @@ const healthTitleStyle = {
   color: colors.ink,
   fontFamily: typography.sansSemi,
   fontSize: 14,
+};
+
+const toastNoticeStyle = {
+  backgroundColor: "#FFFFFF",
+  borderRadius: 8,
+  borderWidth: 1,
+  maxWidth: 360,
+  paddingHorizontal: 12,
+  paddingVertical: 9,
+  position: "absolute" as const,
+  right: 0,
+  shadowColor: colors.ink,
+  shadowOffset: { width: 2, height: 2 },
+  shadowOpacity: 1,
+  shadowRadius: 0,
+  top: 0,
+  zIndex: 500,
+};
+
+const toastNoticeTextStyle = {
+  fontFamily: typography.sansSemi,
+  fontSize: 13,
+  lineHeight: 17,
 };
 
 const selectButtonStyle = {
@@ -866,32 +1258,6 @@ const selectOptionTextStyle = {
   fontSize: 12,
 };
 
-const rowStyle = {
-  alignItems: "center" as const,
-  borderBottomColor: colors.line,
-  borderBottomWidth: 1,
-  flexDirection: "row" as const,
-  gap: 12,
-  minHeight: 56,
-  paddingHorizontal: 12,
-  paddingVertical: 8,
-};
-
-const compactRowStyle = {
-  alignItems: "flex-start" as const,
-  flexDirection: "column" as const,
-  gap: 7,
-};
-
-const actionRailStyle = {
-  alignItems: "center" as const,
-  flexDirection: "row" as const,
-  flexWrap: "wrap" as const,
-  gap: 6,
-  justifyContent: "flex-end" as const,
-  minWidth: 154,
-};
-
 const actionButtonStyle = {
   backgroundColor: "#FFFFFF",
   borderColor: colors.ink,
@@ -908,11 +1274,176 @@ const actionButtonTextStyle = {
   fontSize: 12,
 };
 
-const primaryTextStyle = {
+const disabledActionButtonStyle = {
+  opacity: 0.55,
+};
+
+const mobileListStyle = {
+  backgroundColor: "#FFFFFF",
+  borderColor: colors.ink,
+  borderRadius: 8,
+  borderWidth: 1,
+  overflow: "hidden" as const,
+};
+
+const desktopRowStyle = {
+  alignItems: "center" as const,
+  borderBottomColor: colors.line,
+  borderBottomWidth: 1,
+  flexDirection: "row" as const,
+  gap: 12,
+  minHeight: 78,
+  paddingHorizontal: 14,
+  paddingVertical: 10,
+};
+
+const desktopMainStyle = {
+  flex: 1.35,
+  gap: 3,
+  minWidth: 0,
+};
+
+const desktopTitleLineStyle = {
+  alignItems: "center" as const,
+  flexDirection: "row" as const,
+  gap: 8,
+  minWidth: 0,
+};
+
+const desktopSignalsStyle = {
+  borderColor: colors.line,
+  borderRadius: 7,
+  borderWidth: 1,
+  flex: 1.35,
+  flexDirection: "row" as const,
+  minWidth: 360,
+  overflow: "hidden" as const,
+};
+
+const desktopSignalStyle = {
+  borderRightColor: colors.line,
+  borderRightWidth: 1,
+  flex: 1,
+  gap: 2,
+  minWidth: 0,
+  paddingHorizontal: 9,
+  paddingVertical: 7,
+};
+
+const desktopTailStyle = {
+  alignItems: "flex-end" as const,
+  gap: 6,
+  minWidth: 112,
+};
+
+const mobileRowStyle = {
+  borderBottomColor: colors.line,
+  borderBottomWidth: 1,
+  gap: 9,
+  paddingHorizontal: 14,
+  paddingVertical: 12,
+};
+
+const mobileRowHeaderStyle = {
+  alignItems: "flex-start" as const,
+  flexDirection: "row" as const,
+  gap: 10,
+};
+
+const mobileTitleStyle = {
   color: colors.ink,
   fontFamily: typography.sansSemi,
-  fontSize: 14,
-  lineHeight: 18,
+  fontSize: 15,
+  lineHeight: 19,
+};
+
+const mobileWorkspaceStyle = {
+  color: colors.muted,
+  fontFamily: typography.mono,
+  fontSize: 11,
+  lineHeight: 15,
+};
+
+const mobileStatusPillStyle = {
+  alignItems: "center" as const,
+  borderRadius: 999,
+  borderWidth: 1,
+  flexDirection: "row" as const,
+  gap: 5,
+  maxWidth: 116,
+  minHeight: 24,
+  paddingHorizontal: 8,
+};
+
+const mobileStatusDotStyle = {
+  borderRadius: 999,
+  height: 6,
+  width: 6,
+};
+
+const mobileStatusTextStyle = {
+  fontFamily: typography.sansSemi,
+  fontSize: 11,
+  lineHeight: 14,
+};
+
+const mobileSublineStyle = {
+  alignItems: "center" as const,
+  flexDirection: "row" as const,
+  gap: 8,
+  justifyContent: "space-between" as const,
+};
+
+const mobileAgentStyle = {
+  color: colors.ink,
+  flex: 1,
+  fontFamily: typography.sansSemi,
+  fontSize: 12,
+  lineHeight: 16,
+};
+
+const mobileSignalsStyle = {
+  borderColor: colors.line,
+  borderRadius: 7,
+  borderWidth: 1,
+  flexDirection: "row" as const,
+  overflow: "hidden" as const,
+};
+
+const mobileSignalStyle = {
+  borderRightColor: colors.line,
+  borderRightWidth: 1,
+  flex: 1,
+  gap: 2,
+  minWidth: 0,
+  paddingHorizontal: 8,
+  paddingVertical: 7,
+};
+
+const mobileSignalLabelStyle = {
+  color: colors.muted,
+  fontFamily: typography.mono,
+  fontSize: 10,
+  lineHeight: 13,
+  textTransform: "uppercase" as const,
+};
+
+const mobileSignalValueStyle = {
+  fontFamily: typography.sansSemi,
+  fontSize: 12,
+  lineHeight: 16,
+};
+
+const mobileFooterStyle = {
+  alignItems: "center" as const,
+  flexDirection: "row" as const,
+  gap: 8,
+  justifyContent: "space-between" as const,
+};
+
+const mobileSessionIdStyle = {
+  flex: 1,
+  minWidth: 0,
 };
 
 const secondaryTextStyle = {
@@ -929,9 +1460,8 @@ const secondaryMonoStyle = {
   lineHeight: 15,
 };
 
-const headerCellStyle = {
+const sessionIdTextStyle = {
   color: colors.muted,
-  fontFamily: typography.mono,
-  fontSize: 11,
-  textTransform: "uppercase" as const,
+  fontSize: 10.5,
+  flexShrink: 1,
 };

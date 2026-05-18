@@ -1,5 +1,6 @@
 import { GithubIcon, Login03Icon } from "@hugeicons/core-free-icons";
-import { Pressable, Text, View } from "react-native";
+import { useState } from "react";
+import { ActivityIndicator, Pressable, Text, View } from "react-native";
 
 import { createLoginUrl, currentWorkbenchUrl } from "../../api/relay";
 import type { AccountSession, LanguageMode, LoadState } from "../../types";
@@ -13,6 +14,8 @@ type AccessScreenProps = {
 };
 
 export function AccessScreen({ language, session }: AccessScreenProps) {
+  const [openingLogin, setOpeningLogin] = useState(false);
+
   if (session.status === "loading") {
     return (
       <StatePanel
@@ -34,12 +37,27 @@ export function AccessScreen({ language, session }: AccessScreenProps) {
           )}
         />
         <Pressable
-          onPress={() => navigateToLogin(createLoginUrl(currentWorkbenchUrl()))}
-          style={[common.panel, { alignItems: "center", backgroundColor: colors.lime, flexDirection: "row", gap: 12, padding: 16 }]}
+          accessibilityState={openingLogin ? { busy: true, disabled: true } : undefined}
+          disabled={openingLogin}
+          onPress={() => {
+            setOpeningLogin(true);
+            setTimeout(() => {
+              navigateToLogin(createLoginUrl(currentWorkbenchUrl()));
+            }, 120);
+          }}
+          style={[
+            common.panel,
+            { alignItems: "center", backgroundColor: colors.lime, flexDirection: "row", gap: 12, padding: 16 },
+            openingLogin ? { opacity: 0.65 } : null,
+          ]}
         >
-          <Icon icon={GithubIcon} size={22} />
+          {openingLogin ? (
+            <ActivityIndicator color={colors.ink} size="small" />
+          ) : (
+            <Icon icon={GithubIcon} size={22} />
+          )}
           <Text style={{ color: colors.ink, fontFamily: typography.sansSemi, fontSize: 16 }}>
-            {t(language, "使用 GitHub 登录", "Sign in with GitHub")}
+            {openingLogin ? t(language, "正在打开登录", "Opening sign in") : t(language, "使用 GitHub 登录", "Sign in with GitHub")}
           </Text>
           <Icon icon={Login03Icon} size={20} />
         </Pressable>

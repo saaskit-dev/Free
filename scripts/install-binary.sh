@@ -21,8 +21,8 @@ Usage:
 Options:
   --no-login       Only install the Free binary.
   --force-login    Force browser login refresh after installing.
-  --relay-env      Relay environment passed to auth login: online or local.
-  --relay-url      Custom relay WebSocket URL passed to auth login.
+  --relay-env      Relay environment passed to login: online or local.
+  --relay-url      Custom relay WebSocket URL passed to login.
   --install-dir    Directory for the free binary. Default: ~/.local/bin.
   --version        GitHub release tag. Default: latest.
   --base-url       Override binary download base URL.
@@ -32,8 +32,8 @@ Environment:
   FREE_VERSION           GitHub release tag. Default: latest.
   FREE_INSTALL_DIR       Directory for the free binary.
   FREE_INSTALL_BASE_URL  Binary download base URL.
-  FREE_RELAY_ENV         Relay environment passed to auth login.
-  FREE_RELAY_URL         Custom relay WebSocket URL passed to auth login.
+  FREE_RELAY_ENV         Relay environment passed to login.
+  FREE_RELAY_URL         Custom relay WebSocket URL passed to login.
 EOF
 }
 
@@ -177,7 +177,7 @@ chmod 0755 "$installed_bin"
 
 ensure_active_path "$installed_bin"
 
-auth_args=(auth login)
+auth_args=(login)
 if [ -n "$RELAY_ENV" ]; then
   auth_args+=(--relay-env "$RELAY_ENV")
 fi

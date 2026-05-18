@@ -55,8 +55,7 @@ import {
   type AcpRemoteHostServiceScope,
   getAcpRemoteHostUserServiceStatus,
   installAcpRemoteHostUserService,
-  restartAcpRemoteHostUserService,
-  stopAcpRemoteHostUserService,
+  resolveAcpRemoteHostLaunchdLabel,
   uninstallAcpRemoteHostUserService,
 } from "./service.js";
 import {
@@ -68,6 +67,7 @@ const ACP_REMOTE_HOST_ACCOUNT_SESSION_ENV_VAR =
   "ACP_REMOTE_HOST_ACCOUNT_SESSION";
 const HOST_BINARY_CHANGE_CHECK_INTERVAL_MS = 60_000;
 const HOST_PENDING_RESTART_CHECK_INTERVAL_MS = 60_000;
+const HOST_RUNTIME_KEEPALIVE_INTERVAL_MS = 30_000;
 const HOST_SHUTDOWN_FORCE_EXIT_MS = 5_000;
 const HOST_LOG_DIR = join(homedir(), ".free", "logs");
 const HOST_TEXT_LOG_PATH = join(HOST_LOG_DIR, "host.log.text.jsonl");
@@ -232,7 +232,7 @@ async function resolveSession(
           `Cached ACP relay session is no longer valid: ${validation.reason}`,
           validation.retryable
             ? "Keep the cached login and retry after the relay/network is reachable."
-            : "Run `free auth login --force` to refresh login, then restart the host.",
+            : "Run `free login --force` to refresh login, then restart the host.",
         ].join("\n"),
       );
     }
@@ -258,20 +258,14 @@ export async function runFreeHostCommand(rawArgv: readonly string[]): Promise<vo
     printHelp();
     return;
   }
-  const serviceOptions = readServiceOptions(argv, command.name);
+  const serviceLabel = resolveAcpRemoteHostLaunchdLabel(
+    parseAcpRemoteHostCliConfig({ argv }).relayUrl,
+  );
+  const serviceOptions = readServiceOptions(argv, command.name, serviceLabel);
   if (serviceOptions.modeConflict) {
-    if (command.name === "status") {
-      process.stdout.write(
-        "mode: conflict\nBoth user and system host services are installed. " +
-        "Install one mode again to switch cleanly, or uninstall one mode explicitly.\n",
-      );
-      printServiceStatus(serviceOptions.modeConflict.userStatus, "user");
-      printServiceStatus(serviceOptions.modeConflict.systemStatus, "system");
-      return;
-    }
     throw new Error(
       "Both user and system host services are installed. Pass --system to manage " +
-      "the system host, or uninstall one mode before using automatic mode detection.",
+      "the system host, or stop one mode before using automatic mode detection.",
     );
   }
   if (shouldRerunWithSudo(command.name, serviceOptions.scope)) {
@@ -280,44 +274,21 @@ export async function runFreeHostCommand(rawArgv: readonly string[]): Promise<vo
   }
 
   switch (command.name) {
-    case "install":
+    case "start":
       await installService(argv);
       return;
-    case "uninstall":
-      await uninstallAcpRemoteHostUserService(
-        undefined,
-        serviceOptions.scope,
-        serviceOptions.homeDir,
-      );
-      process.stdout.write("ACP remote host service uninstalled.\n");
+    case "stop":
+      {
+        const config = parseAcpRemoteHostCliConfig({ argv });
+        const label = resolveAcpRemoteHostLaunchdLabel(config.relayUrl);
+        await uninstallAcpRemoteHostUserService(
+          label,
+          serviceOptions.scope,
+          serviceOptions.homeDir,
+        );
+      }
+      process.stdout.write("Free host stopped.\n");
       return;
-    case "restart": {
-      const status = await restartAcpRemoteHostUserService(
-        undefined,
-        serviceOptions.scope,
-        serviceOptions.homeDir,
-      );
-      printServiceStatus(status);
-      return;
-    }
-    case "stop": {
-      const status = stopAcpRemoteHostUserService(
-        undefined,
-        serviceOptions.scope,
-        serviceOptions.homeDir,
-      );
-      printServiceStatus(status);
-      return;
-    }
-    case "status": {
-      const status = getAcpRemoteHostUserServiceStatus(
-        undefined,
-        serviceOptions.scope,
-        serviceOptions.homeDir,
-      );
-      printServiceStatus(status);
-      return;
-    }
     case "run":
       await runHost(argv);
       return;
@@ -329,7 +300,8 @@ export async function runFreeHostCommand(rawArgv: readonly string[]): Promise<vo
 
 async function installService(argv: readonly string[]): Promise<void> {
   const config = parseAcpRemoteHostCliConfig({ argv });
-  const serviceOptions = readServiceOptions(argv, "install");
+  const label = resolveAcpRemoteHostLaunchdLabel(config.relayUrl);
+  const serviceOptions = readServiceOptions(argv, "start", label);
   const workspaceRoots = readWorkspaceRoots(argv, serviceOptions.homeDir);
   await resolveSession(argv, config.relayUrl, {
     forceLogin: config.forceLogin,
@@ -344,6 +316,7 @@ async function installService(argv: readonly string[]): Promise<void> {
     env,
     homeDir: serviceOptions.homeDir,
     identityPath: config.identityPath,
+    label,
     relayUrl: config.relayUrl,
     scope: serviceOptions.scope,
     userName: serviceOptions.userName,
@@ -501,7 +474,7 @@ async function runHost(argv: readonly string[]): Promise<void> {
     [
       "Foreground host started.",
       "Keep this terminal open while debugging.",
-      `For Zed and regular use, run \`${hostInstallCommandForRelay(config.relayUrl)}\` instead.`,
+      `For Zed and regular use, run \`${hostStartCommandForRelay(config.relayUrl)}\` instead.`,
       `Workspace roots: ${workspaceRootList}`,
     ].join(" "),
     {
@@ -558,6 +531,19 @@ async function runHost(argv: readonly string[]): Promise<void> {
   }, HOST_PENDING_RESTART_CHECK_INTERVAL_MS);
   pendingRestartTimer.unref?.();
   const stopPendingRestartTimer = () => clearInterval(pendingRestartTimer);
+  const runtimeKeepaliveTimer = setInterval(() => {
+    void runtime.management.status().catch((error) => {
+      writeHostLog(
+        `ACP runtime service health check failed: ${error instanceof Error ? error.message : String(error)}`,
+        {
+          "acp.remote.error": error instanceof Error ? error.message : String(error),
+          "acp.remote.runtime_instance_id": runtimeInstanceId,
+        },
+        "ERROR",
+      );
+    });
+  }, HOST_RUNTIME_KEEPALIVE_INTERVAL_MS);
+  const stopRuntimeKeepaliveTimer = () => clearInterval(runtimeKeepaliveTimer);
   process.once("SIGINT", () => stop("SIGINT"));
   process.once("SIGTERM", () => stop("SIGTERM"));
 
@@ -607,6 +593,7 @@ async function runHost(argv: readonly string[]): Promise<void> {
   }
   stopWatchingHostBinary?.();
   stopPendingRestartTimer();
+  stopRuntimeKeepaliveTimer();
   await relayTelemetry?.close();
 }
 
@@ -748,13 +735,10 @@ function normalizeHostSocketCloseEvent(event: unknown): string | undefined {
 }
 
 type HostServiceCommand =
-  | "install"
-  | "restart"
   | "run"
   | "runtime-service"
-  | "status"
-  | "stop"
-  | "uninstall";
+  | "start"
+  | "stop";
 
 function readCommand(argv: readonly string[]): {
   argv: readonly string[];
@@ -762,13 +746,10 @@ function readCommand(argv: readonly string[]): {
 } {
   const first = argv[0];
   if (
-    first === "install" ||
     first === "run" ||
     first === "runtime-service" ||
-    first === "restart" ||
-    first === "status" ||
-    first === "stop" ||
-    first === "uninstall"
+    first === "start" ||
+    first === "stop"
   ) {
     return { argv: argv.slice(1), name: first };
   }
@@ -781,6 +762,7 @@ function readCommand(argv: readonly string[]): {
 function readServiceOptions(
   argv: readonly string[],
   commandName: HostServiceCommand,
+  label = resolveAcpRemoteHostLaunchdLabel(),
 ): {
   homeDir: string;
   modeConflict?: {
@@ -792,14 +774,14 @@ function readServiceOptions(
 } {
   const system = argv.includes("--system");
   const userHomeDir = readOptionValue(argv, "--home-dir") ?? homedir();
-  if (!system && commandName !== "install" && commandName !== "run") {
+  if (!system && commandName !== "start" && commandName !== "run") {
     const userStatus = getAcpRemoteHostUserServiceStatus(
-      undefined,
+      label,
       "user",
       userHomeDir,
     );
     const systemStatus = getAcpRemoteHostUserServiceStatus(
-      undefined,
+      label,
       "system",
       userHomeDir,
     );
@@ -843,7 +825,6 @@ function shouldRerunWithSudo(
   return (
     scope === "system" &&
     command !== "run" &&
-    command !== "status" &&
     process.getuid?.() !== 0
   );
 }
@@ -929,14 +910,11 @@ function printHelp(): void {
   process.stdout.write(
     [
       "Usage:",
+      "  free host start [--relay-env online|local] [--workspace-root <path>...] [--system]",
+      "  free host start [--relay-url <ws-url>] [--workspace-root <path>...] [--system]",
       "  free host run [--relay-env online|local]",
       "  free host run [--relay-url <ws-url>]",
-      "  free host install [--relay-env online|local] [--workspace-root <path>...] [--system]",
-      "  free host install [--relay-url <ws-url>] [--workspace-root <path>...] [--system]",
-      "  free host status [--system]",
       "  free host stop [--system]",
-      "  free host restart [--system]",
-      "  free host uninstall [--system]",
       "",
       "Options:",
       `  --relay-url          Relay WebSocket URL (default: ${ACP_REMOTE_DEFAULT_RELAY_URL})`,
@@ -956,9 +934,9 @@ function printHelp(): void {
       "  ACP_REMOTE_HOST_WORKSPACE_ROOTS      Comma-separated workspace roots",
       "  ACP_REMOTE_HOST_ACCOUNT_SESSION      Encoded AccountSession",
       "",
-      "Service install:",
-      "  install writes a macOS user LaunchAgent with RunAtLoad and KeepAlive.",
-      "  install --system writes a root-owned launchd plist in /Library/LaunchDaemons",
+      "Background host:",
+      "  start writes a macOS user LaunchAgent with RunAtLoad and KeepAlive.",
+      "  start --system writes a root-owned launchd plist in /Library/LaunchDaemons",
       "  and runs the host as the invoking sudo user by default.",
       "  Installing one mode removes or rejects the other so only one service mode is active.",
       "  The host process also reconnects to the relay with exponential backoff.",
@@ -979,7 +957,7 @@ function printHelp(): void {
       "",
       `Current relay: ${describeHostRelayTarget(currentRelayUrl)}`,
       `Current cached session: ${getSessionPath(undefined, currentRelayUrl)}`,
-      `Background host: ${hostInstallCommandForRelay(currentRelayUrl)}`,
+      `Background host: ${hostStartCommandForRelay(currentRelayUrl)}`,
       `Foreground debug host: ${hostRunCommandForRelay(currentRelayUrl)}`,
     ].join("\n") + "\n",
   );
@@ -995,14 +973,14 @@ function describeHostRelayTarget(relayUrl: string): string {
   return `custom (${relayUrl})`;
 }
 
-function hostInstallCommandForRelay(relayUrl: string): string {
+function hostStartCommandForRelay(relayUrl: string): string {
   if (relayUrl === FREE_LOCAL_RELAY_URL) {
-    return "free host install --relay-env local --workspace-root /Users/dev";
+    return "free host start --relay-env local --workspace-root /Users/dev";
   }
   if (relayUrl === ACP_REMOTE_DEFAULT_RELAY_URL) {
-    return "free host install --relay-env online";
+    return "free host start --relay-env online";
   }
-  return `free host install --relay-url ${relayUrl}`;
+  return `free host start --relay-url ${relayUrl}`;
 }
 
 function hostRunCommandForRelay(relayUrl: string): string {

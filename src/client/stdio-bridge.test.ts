@@ -169,7 +169,7 @@ describe("createAcpRemoteStdioBridge", () => {
         status: 200,
       });
     });
-    vi.stubGlobal("fetch", fetchMock);
+    const restoreFetch = stubFetch(fetchMock as typeof fetch);
     const sockets: TestSocket[] = [];
     const bridge = createAcpRemoteStdioBridge({
       autoAuthorize: {
@@ -249,7 +249,7 @@ describe("createAcpRemoteStdioBridge", () => {
       );
     } finally {
       bridge.close();
-      vi.unstubAllGlobals();
+      restoreFetch();
     }
   });
 
@@ -265,7 +265,7 @@ describe("createAcpRemoteStdioBridge", () => {
         status: 200,
       });
     });
-    vi.stubGlobal("fetch", fetchMock);
+    const restoreFetch = stubFetch(fetchMock as typeof fetch);
     const sockets: TestSocket[] = [];
     const bridge = createAcpRemoteStdioBridge({
       autoAuthorize: {
@@ -332,7 +332,7 @@ describe("createAcpRemoteStdioBridge", () => {
       );
     } finally {
       bridge.close();
-      vi.unstubAllGlobals();
+      restoreFetch();
     }
   });
 
@@ -515,7 +515,7 @@ describe("createAcpRemoteStdioBridge", () => {
         status: 200,
       });
     });
-    vi.stubGlobal("fetch", fetchMock);
+    const restoreFetch = stubFetch(fetchMock as typeof fetch);
     const bridge = createAcpRemoteStdioBridge({
       clientId: "client-1",
       connectionId: "connection-1",
@@ -567,7 +567,7 @@ describe("createAcpRemoteStdioBridge", () => {
       expect(JSON.stringify(outbound)).not.toContain(imageBody.toString("base64"));
     } finally {
       bridge.close();
-      vi.unstubAllGlobals();
+      restoreFetch();
     }
   });
 
@@ -656,7 +656,7 @@ describe("createAcpRemoteStdioBridge", () => {
       pendingResponses.push(response);
       return response.promise;
     });
-    vi.stubGlobal("fetch", fetchMock);
+    const restoreFetch = stubFetch(fetchMock as typeof fetch);
     const bridge = createAcpRemoteStdioBridge({
       clientId: "client-1",
       connectionId: "connection-1",
@@ -748,7 +748,7 @@ describe("createAcpRemoteStdioBridge", () => {
       expect(JSON.stringify(outbound)).not.toContain(imageBodies[1]!.toString("base64"));
     } finally {
       bridge.close();
-      vi.unstubAllGlobals();
+      restoreFetch();
     }
   });
 
@@ -1194,6 +1194,65 @@ describe("createAcpRemoteStdioBridge", () => {
     } finally {
       bridge.close();
     }
+  });
+
+  it("fails in-flight requests before closing the bridge", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    let outputText = "";
+    let closed = false;
+    output.setEncoding("utf8");
+    output.on("data", (chunk: string) => {
+      outputText += chunk;
+    });
+    const sockets: TestSocket[] = [];
+    const bridge = createAcpRemoteStdioBridge({
+      clientId: "client-1",
+      connectionId: "connection-1",
+      input,
+      onClose() {
+        closed = true;
+      },
+      output,
+      relayUrl: "ws://relay.test",
+      socketFactory() {
+        const socket = new TestSocket();
+        sockets.push(socket);
+        return socket;
+      },
+    });
+
+    input.write(
+      `${JSON.stringify({
+        id: 8,
+        jsonrpc: "2.0",
+        method: "session/prompt",
+        params: {
+          prompt: [{ text: "hello", type: "text" }],
+          sessionId: "session-1",
+        },
+      })}\n`,
+    );
+    await waitFor(() => sockets[0]?.sent.length === 1);
+
+    bridge.close({
+      reason: "Bridge executable changed before this request completed.",
+    });
+
+    await waitFor(() => outputText.includes('"id":8'));
+    expect(JSON.parse(outputText.trim().split("\n")[0]!)).toMatchObject({
+      error: {
+        code: -32007,
+        data: {
+          method: "session/prompt",
+          reason: "bridge_closed",
+        },
+        message: expect.stringContaining("Bridge executable changed"),
+      },
+      id: 8,
+      jsonrpc: "2.0",
+    });
+    await waitFor(() => closed);
   });
 
   it("acknowledges relay responses after writing them to stdio", async () => {
@@ -1843,6 +1902,83 @@ describe("createAcpRemoteStdioBridge", () => {
       bridge.close();
     }
   });
+
+  it("rebuilds the remote display config from request metadata when the option cache is cold", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    let outputText = "";
+    output.setEncoding("utf8");
+    output.on("data", (chunk: string) => {
+      outputText += chunk;
+    });
+    const sockets: TestSocket[] = [];
+    const bridge = createAcpRemoteStdioBridge({
+      clientId: "client-1",
+      connectionId: "connection-1",
+      hostDisplayNames: new Map([["host-a", "Studio"]]),
+      input,
+      output,
+      relayUrl: "ws://relay.test",
+      socketFactory() {
+        const socket = new TestSocket();
+        sockets.push(socket);
+        return socket;
+      },
+    });
+
+    try {
+      input.write(
+        `${JSON.stringify({
+          id: 50,
+          jsonrpc: "2.0",
+          method: "session/set_config_option",
+          params: {
+            _meta: {
+              "acp-runtime/remote/hostId": "host-a",
+              "acp-runtime/remote/sessionAgent": { id: "codex" },
+              "acp-runtime/remote/sessionMachine": "dev.local",
+              "acp-runtime/remote/sessionWorkspaceRoots": ["/Users/dev/Free"],
+            },
+            configId: "acp-runtime.remote.context",
+            sessionId: "session-cold",
+            value: "ignored",
+          },
+        })}\n`,
+      );
+
+      await waitFor(() => outputText.includes('"id":50'));
+      expect(sockets[0]?.sent).toHaveLength(0);
+      const response = JSON.parse(outputText.trim()) as {
+        result: {
+          configOptions: {
+            currentValue?: string;
+            id: string;
+            options?: { description?: string; name: string; value: string }[];
+          }[];
+        };
+      };
+      expect(response.result.configOptions).toEqual([
+        expect.objectContaining({
+          currentValue: "Studio · /Users/dev/Free",
+          id: "acp-runtime.remote.context",
+          options: expect.arrayContaining([
+            {
+              description: "codex",
+              name: "codex",
+              value: "codex",
+            },
+            {
+              description: "session-cold",
+              name: "session-cold",
+              value: "session-cold",
+            },
+          ]),
+        }),
+      ]);
+    } finally {
+      bridge.close();
+    }
+  });
 });
 
 class TestSocket implements AcpWebSocketLike {
@@ -1950,6 +2086,22 @@ function createDeferred<T>(): Deferred<T> {
     reject = rejectPromise;
   });
   return { promise, reject, resolve };
+}
+
+function stubFetch(fetchMock: typeof fetch): () => void {
+  const previousFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    value: fetchMock,
+    writable: true,
+  });
+  return () => {
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      value: previousFetch,
+      writable: true,
+    });
+  };
 }
 
 function createAttachmentUploadResponse(input: {

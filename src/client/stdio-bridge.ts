@@ -79,7 +79,7 @@ export type AcpRemoteBridgeDebugContext = {
 } & AcpRemotePayloadLogSummary;
 
 export type AcpRemoteStdioBridgeHandle = {
-  close(): void;
+  close(options?: { reason?: string }): void;
   connection: ConnectedAcpRemoteClientRelay;
 };
 
@@ -582,11 +582,15 @@ export function createAcpRemoteStdioBridge(
     });
   };
 
-  const close = () => {
+  const close = (input: { reason?: string } = {}) => {
     if (closed) {
       return;
     }
     closed = true;
+    const pendingToFail = collectPendingOutboundRequestsForClose(
+      pendingOutbound,
+      inFlightOutbound,
+    );
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = undefined;
@@ -602,7 +606,14 @@ export function createAcpRemoteStdioBridge(
     endAllClientRequestSpans(
       new Error("Bridge closed before request completed."),
     );
-    options.onClose?.();
+    flushBridgeClosedResponses(
+      output,
+      pendingToFail,
+      input.reason ?? "Bridge closed before this request completed.",
+      debugLog,
+      connectionId,
+      options.onClose,
+    );
   };
 
   const preparePromptAttachmentsForRelay = async (
@@ -923,6 +934,7 @@ export function createAcpRemoteStdioBridge(
           outboundSessionId
             ? configOptionsBySessionId.get(outboundSessionId) ?? lastConfigOptions
             : lastConfigOptions,
+          options.hostDisplayNames,
         );
         if (remoteConfigResponse) {
           writeOutput(output, `${remoteConfigResponse}\n`, () => close());
@@ -1098,12 +1110,12 @@ export function createAcpRemoteStdioBridge(
   output.on?.("error", onEnd);
 
   return {
-    close() {
+    close(closeOptions) {
       input.off("data", onData);
       input.off("end", onEnd);
       input.off("error", onEnd);
       output.off?.("error", onEnd);
-      close();
+      close(closeOptions);
     },
     connection: connection!,
   };
@@ -1175,6 +1187,66 @@ function writeOutput(
     });
   } catch {
     onClosed();
+  }
+}
+
+function collectPendingOutboundRequestsForClose(
+  pendingOutbound: readonly PendingOutboundMessage[],
+  inFlightOutbound: ReadonlyMap<string | number, PendingOutboundMessage>,
+): PendingOutboundMessage[] {
+  const collected = new Map<string | number, PendingOutboundMessage>();
+  for (const entry of [...inFlightOutbound.values(), ...pendingOutbound]) {
+    if (entry.id === undefined || collected.has(entry.id)) {
+      continue;
+    }
+    collected.set(entry.id, entry);
+  }
+  return [...collected.values()];
+}
+
+function flushBridgeClosedResponses(
+  output: Writable,
+  requests: readonly PendingOutboundMessage[],
+  reason: string,
+  debugLog: (
+    message: string,
+    context?: AcpRemoteBridgeDebugContext,
+  ) => void,
+  connectionId: string,
+  onComplete: (() => void) | undefined,
+): void {
+  if (requests.length === 0) {
+    onComplete?.();
+    return;
+  }
+
+  let remaining = requests.length;
+  const finishOne = () => {
+    remaining -= 1;
+    if (remaining === 0) {
+      onComplete?.();
+    }
+  };
+
+  for (const request of requests) {
+    writeOutput(
+      output,
+      `${createBridgeClosedResponse(request, reason)}\n`,
+      finishOne,
+      finishOne,
+    );
+    debugLog(
+      `failed in-flight relay request because bridge closed id=${formatJsonRpcId(
+        request.id,
+      )} method=${request.method ?? "-"}`,
+      {
+        connectionId,
+        eventName: "acp.remote.bridge.inflight_failed_on_close",
+        jsonRpcId: request.id,
+        method: request.method,
+        severityText: "ERROR",
+      },
+    );
   }
 }
 
@@ -1947,6 +2019,7 @@ function isRelaySessionNewRequest(message: string): boolean {
 function createRemoteConfigSetResponse(
   message: string,
   configOptions: readonly unknown[],
+  hostDisplayNames?: ReadonlyMap<string, string>,
 ): string | undefined {
   const parsed = parseJson(message);
   if (!parsed || parsed.method !== "session/set_config_option") {
@@ -1960,11 +2033,23 @@ function createRemoteConfigSetResponse(
   if (!Object.prototype.hasOwnProperty.call(parsed, "id")) {
     return undefined;
   }
+  const fallbackOption =
+    isRecord(params?._meta)
+      ? createRemoteDisplayConfigOption(
+          params._meta,
+          readString(params?.sessionId),
+          hostDisplayNames,
+        )
+      : undefined;
+  const remoteOption = readRemoteConfigOption(configOptions) ?? fallbackOption;
+  const responseConfigOptions = remoteOption
+    ? [...readNonRemoteConfigOptions(configOptions), remoteOption]
+    : configOptions;
   return JSON.stringify({
     id: parsed.id,
     jsonrpc: "2.0",
     result: {
-      configOptions,
+      configOptions: responseConfigOptions,
     },
   });
 }
@@ -2236,6 +2321,24 @@ function createRelayConnectionLostResponse(
       code: -32001,
       message:
         "Relay connection closed before this request completed. The request status is unknown; retry if appropriate.",
+    },
+    id: request.id,
+    jsonrpc: "2.0",
+  });
+}
+
+function createBridgeClosedResponse(
+  request: PendingOutboundMessage,
+  reason: string,
+): string {
+  return JSON.stringify({
+    error: {
+      code: -32007,
+      data: {
+        method: request.method,
+        reason: "bridge_closed",
+      },
+      message: `${reason} Retry the request after Free reconnects.`,
     },
     id: request.id,
     jsonrpc: "2.0",

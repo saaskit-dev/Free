@@ -14,7 +14,7 @@ import { colors, typography } from "./ui/theme";
 
 export default function App() {
   const [route, setRoute] = useState<RouteId>(readWorkbenchRouteFromLocation());
-  const { preferences, setLanguage, setTheme } = useWorkbenchPreferences();
+  const { preferences, setLanguage, setSidebar, setTheme } = useWorkbenchPreferences();
   const [fontsLoaded] = useFonts({
     BricolageGrotesqueBold: require("../assets/fonts/BricolageGrotesque-Bold.ttf"),
     IBMPlexMono: require("../assets/fonts/IBMPlexMono-Regular.ttf"),
@@ -95,6 +95,7 @@ export default function App() {
         route={route}
         setLanguage={setLanguage}
         setRoute={setRoute}
+        setSidebar={setSidebar}
         setTheme={setTheme}
       />
     </>

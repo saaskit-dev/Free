@@ -51,7 +51,7 @@ async function loadAccountCredential() {
   const raw = await readFile(join(homedir(), ".free", "account-session.json"), "utf8");
   const credential = JSON.parse(raw);
   if (!credential?.accountSession?.accountId || !credential?.privateKey) {
-    throw new Error("Missing ~/.free/account-session.json. Run `free auth login` first.");
+    throw new Error("Missing ~/.free/account-session.json. Run `free login` first.");
   }
   return credential;
 }
@@ -83,7 +83,7 @@ async function listHosts(accountSessionValue) {
 function resolveHost(hosts) {
   const host = chooseHost(hosts);
   if (!host?.hostId) {
-    throw new Error("No online host found. Run `free auth login` on the target machine.");
+    throw new Error("No online host found. Run `free login` on the target machine.");
   }
   return host;
 }

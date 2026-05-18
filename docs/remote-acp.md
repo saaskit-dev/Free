@@ -7,9 +7,9 @@ keeps external ACP clients working while Free builds its own Session Workbench
 as the primary product client. The compatibility layer is an important current
 implementation surface, but it is not the final product center.
 
-The user-facing path has three moving parts:
+The compatibility path has three moving parts:
 
-- `free bridge run` speaks native ACP over stdio to the editor.
+- the hidden bridge command speaks native ACP over stdio to the editor.
 - The relay routes native ACP bytes and stores reconnect state.
 - The local Free host verifies the bridge proof and serves the local runtime.
 
@@ -24,7 +24,7 @@ restore, logs, attachments, and workflow continuation.
 authority and contains the account id, principal id, principal type, expiry, and
 principal public key.
 
-`free auth login` stores one local credential at
+`free login` stores one local credential at
 `~/.free/account-session.json`. The host uses the encoded AccountSession for
 relay API and registration, and the bridge uses the matching private key to
 prove each client connection.

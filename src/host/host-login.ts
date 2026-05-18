@@ -227,7 +227,7 @@ export async function loginViaOAuth(
         const accountId = url.searchParams.get("accountId");
         if (!encodedSession || !accountId) {
           sendHtml(res, 400, createLocalOAuthResultPage({
-            detail: "Run `free auth login --force` to start a fresh browser sign in.",
+            detail: "Run `free login --force` to start a fresh browser sign in.",
             message: "The relay completed sign in, but did not return the account credential this device needs.",
             tone: "error",
           }));
@@ -240,7 +240,7 @@ export async function loginViaOAuth(
           accountSession = decodeAcpRemoteAccountSession(encodedSession);
         } catch (error) {
           sendHtml(res, 400, createLocalOAuthResultPage({
-            detail: "Run `free auth login --force` to request a new account credential.",
+            detail: "Run `free login --force` to request a new account credential.",
             message: "The relay returned an account credential that this version of Free could not read.",
             tone: "error",
           }));
@@ -254,7 +254,7 @@ export async function loginViaOAuth(
           accountSession.principalType !== "client"
         ) {
           sendHtml(res, 400, createLocalOAuthResultPage({
-            detail: "Run `free auth login --force` from the same terminal session and browser.",
+            detail: "Run `free login --force` from the same terminal session and browser.",
             message: "The returned account credential does not match this device.",
             tone: "error",
           }));
@@ -674,16 +674,16 @@ function translateLocalOAuthMessage(value: string): string {
       return "可以关闭此标签页。";
     case "The relay completed sign in, but did not return the account credential this device needs.":
       return "Relay 已完成登录，但未返回此设备需要的账号凭证。";
-    case "Run `free auth login --force` to start a fresh browser sign in.":
-      return "运行 `free auth login --force` 重新开始浏览器登录。";
+    case "Run `free login --force` to start a fresh browser sign in.":
+      return "运行 `free login --force` 重新开始浏览器登录。";
     case "The relay returned an account credential that this version of Free could not read.":
       return "Relay 返回的账号凭证无法被当前版本的 Free 读取。";
-    case "Run `free auth login --force` to request a new account credential.":
-      return "运行 `free auth login --force` 请求新的账号凭证。";
+    case "Run `free login --force` to request a new account credential.":
+      return "运行 `free login --force` 请求新的账号凭证。";
     case "The returned account credential does not match this device.":
       return "返回的账号凭证与此设备不匹配。";
-    case "Run `free auth login --force` from the same terminal session and browser.":
-      return "在同一个终端会话和浏览器中运行 `free auth login --force`。";
+    case "Run `free login --force` from the same terminal session and browser.":
+      return "在同一个终端会话和浏览器中运行 `free login --force`。";
     default:
       return value;
   }

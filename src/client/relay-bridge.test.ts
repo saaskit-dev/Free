@@ -4,6 +4,7 @@ import type { AcpRemoteAccountSessionCredential } from "../protocol/account-sess
 import { decodeAcpRemoteAccountSession } from "../protocol/account-session.js";
 import {
   createBridgeAutoAuthorizeOptions,
+  resolveBridgeHostId,
   waitForBridgeHostSelection,
 } from "./relay-bridge.js";
 
@@ -76,6 +77,37 @@ describe("Free relay bridge host discovery recovery", () => {
     expect(logs[0]).toContain("retrying in 100ms (1/4)");
   });
 
+  it("selects a registered host even when it is not currently connected", async () => {
+    const restoreFetch = stubFetch(async () => new Response(JSON.stringify({
+      hosts: [
+        {
+          hostId: "host-offline",
+          metadata: { machine: "remote-machine" },
+          online: false,
+        },
+      ],
+    }), { status: 200 }));
+    try {
+      const selection = await resolveBridgeHostId({
+        accountCredential: credential,
+        relayUrl: "ws://127.0.0.1:8791",
+      });
+
+      expect(selection).toEqual({
+        hosts: [
+          {
+            hostId: "host-offline",
+            metadata: { machine: "remote-machine" },
+            online: false,
+          },
+        ],
+        primaryHostId: "host-offline",
+      });
+    } finally {
+      restoreFetch();
+    }
+  });
+
   it("keeps authorization failures fatal instead of hiding invalid credentials behind retries", async () => {
     const delays: number[] = [];
 
@@ -95,3 +127,11 @@ describe("Free relay bridge host discovery recovery", () => {
     expect(delays).toEqual([]);
   });
 });
+
+function stubFetch(fetchMock: typeof fetch): () => void {
+  const previous = globalThis.fetch;
+  globalThis.fetch = fetchMock;
+  return () => {
+    globalThis.fetch = previous;
+  };
+}
