@@ -180,6 +180,11 @@ if command -v xattr >/dev/null 2>&1; then
   xattr -cr "$installed_bin" 2>/dev/null || true
 fi
 
+# Apply ad-hoc code signature so macOS does not reject the binary on launch.
+if command -v codesign >/dev/null 2>&1; then
+  codesign --force --sign - "$installed_bin" 2>/dev/null || true
+fi
+
 ensure_active_path "$installed_bin"
 
 auth_args=(login)

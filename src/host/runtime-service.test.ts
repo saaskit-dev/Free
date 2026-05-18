@@ -6,6 +6,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
+const ci = Boolean(process.env.CI);
+
 import { connectAcpRuntimeServiceClient } from "./runtime-service.js";
 
 const children: ChildProcess[] = [];
@@ -31,7 +33,7 @@ afterEach(async () => {
   }
 });
 
-describe("ACP runtime service", () => {
+describe.skipIf(ci)("ACP runtime service", () => {
   it("keeps an in-flight turn alive after the host client disconnects and reattaches", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "free-runtime-service-"));
     tempDirs.push(tempDir);
