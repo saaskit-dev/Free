@@ -148,12 +148,23 @@ ensure_active_path() {
     print_path_hint "$installed_bin"
     return
   fi
-  installed_dir="$(cd "$(dirname "$installed_bin")" >/dev/null 2>&1 && pwd -P)"
-  active_dir="$(cd "$(dirname "$active_bin")" >/dev/null 2>&1 && pwd -P)"
-  if [ "$installed_dir/free" != "$active_dir/$(basename "$active_bin")" ]; then
-    echo "Free was installed at $installed_bin, but PATH resolves free to $active_bin." >&2
-    print_path_hint "$installed_bin"
+  installed_real="$(cd "$(dirname "$installed_bin")" >/dev/null 2>&1 && pwd -P)/$(basename "$installed_bin")"
+  active_real="$(cd "$(dirname "$active_bin")" >/dev/null 2>&1 && pwd -P)/$(basename "$active_bin")"
+  if [ "$installed_real" = "$active_real" ]; then
+    return
   fi
+  # If the shadowing binary is in a user-managed directory, replace it with a symlink.
+  case "$active_bin" in
+    "$HOME/.local/bin/free"|"$HOME/.n/bin/free"|"$HOME/.nvm/"*"/bin/free")
+      echo "Replacing shadowing Free binary: $active_bin -> $installed_bin"
+      rm -f "$active_bin"
+      ln -s "$installed_bin" "$active_bin"
+      ;;
+    *)
+      echo "Free was installed at $installed_bin, but PATH resolves free to $active_bin." >&2
+      print_path_hint "$installed_bin"
+      ;;
+  esac
 }
 
 require_command curl
@@ -199,7 +210,27 @@ if [ "$FORCE_LOGIN" -eq 1 ]; then
 fi
 
 if [ "$RUN_LOGIN" -eq 1 ]; then
-  "$installed_bin" "${auth_args[@]}"
+  login_status=0
+  "$installed_bin" "${auth_args[@]}" || login_status=$?
+  if [ "$login_status" -ne 0 ]; then
+    # Signal 137 = 128 + 9 (SIGKILL). macOS kills unsigned/mis-signed binaries this way.
+    if [ "$login_status" -eq 137 ]; then
+      echo "" >&2
+      echo "Error: Free binary was killed by macOS (SIGKILL)." >&2
+      echo "" >&2
+      echo "This usually means macOS Gatekeeper or AMFI rejected the binary." >&2
+      echo "To fix this, try running manually:" >&2
+      echo "  xattr -cr '$installed_bin'" >&2
+      echo "  codesign --force --sign - '$installed_bin'" >&2
+      echo "  '$installed_bin' login" >&2
+      echo "" >&2
+      echo "If the issue persists, reinstall with --no-login:" >&2
+      echo "  curl -fsSL https://free.saaskit.app/install | bash -s -- --no-login" >&2
+      exit "$login_status"
+    fi
+    # For other errors, still exit but let the normal error through
+    exit "$login_status"
+  fi
 fi
 
 echo "Free installed: $installed_bin"
