@@ -56,7 +56,11 @@
     "workbench:typecheck": "bun run --cwd apps/workbench typecheck",
     "remote:prod-smoke": "make remote-prod-smoke",
     "pack:local": "make pack-local",
+    "verify:core": "make verify-core",
     "verify:binary": "make verify-binary",
+    "verify:local": "make verify-local",
+    "verify:relay-local": "make verify-relay-local",
+    "verify:prod-smoke": "make verify-prod-smoke",
     "postinstall": "node scripts/install-maintenance.cjs",
     "verify": "make verify"
   },

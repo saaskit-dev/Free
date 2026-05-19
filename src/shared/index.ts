@@ -23,7 +23,6 @@ export {
   requiredScopeForAcpPayload,
   isJsonRpcMessage,
   isJsonRpcRequest,
-  readScope,
   createOutboundFrameTracker,
   type OutboundFrameTracker,
   type JsonRpcMessage,

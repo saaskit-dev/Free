@@ -113,6 +113,9 @@ make remote-prod-smoke
 `make build` builds the local `../acp-runtime` dependency and then Free.
 `make verify` runs typecheck, tests, package creation, install smoke, and relay
 deploy dry-run.
+See `docs/verification-matrix.md` for the maintained verification layers and
+the manual real-chain checks required for Workbench, Zed, host lifecycle, and
+session recovery changes.
 
 ## Cloudflare Deployment
 

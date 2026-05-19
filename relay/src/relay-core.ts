@@ -3,14 +3,14 @@ import {
   AcpRemoteChannelKind,
   AcpRemoteEndpointKind,
   AcpRemoteFrameType,
-  assertAcpRemoteFrame,
+  parseAcpRemoteFrameText,
+  requiredScopeForAcpPayload,
   type AcpRemoteAckFrame,
   type AcpRemoteAgentGrant,
   type AcpRemoteConnectionProof,
   type AcpRemoteDataFrame,
   type AcpRemoteGrant,
   type AcpRemoteScope,
-  type AcpRemoteFrame,
   type AcpRemotePingFrame,
 } from "../../src/protocol/index.js";
 import {
@@ -2325,7 +2325,7 @@ export class AcpRelayBroker {
     if (this.handleHostAttachmentAck(text)) {
       return undefined;
     }
-    const frame = parseFrame(text);
+    const frame = parseAcpRemoteFrameText(text);
     if (frame?.frameType === AcpRemoteFrameType.Ack) {
       await this.handleHostAck(frame);
       return frame.connectionId;
@@ -5893,14 +5893,6 @@ export function createRelayAuthorizationResultPage(
 	</html>`;
 }
 
-function parseFrame(text: string): AcpRemoteFrame | undefined {
-  try {
-    return assertAcpRemoteFrame(JSON.parse(text));
-  } catch {
-    return undefined;
-  }
-}
-
 function parseJsonRpcMessage(text: string): RelayJsonRpcMessage | undefined {
   try {
     const value: unknown = JSON.parse(text);
@@ -6123,34 +6115,6 @@ function isReplayOrDuplicateHostFrame(
   }
   client.lastHostSeq = frame.seq;
   return false;
-}
-
-const ACP_METHOD_SCOPE_BY_METHOD = {
-  "session/close": "acp:session:resume",
-  "session/set_config_option": "acp:session:resume",
-  "session/set_mode": "acp:session:resume",
-  "session/fork": "acp:session:resume",
-  "session/list": "acp:session:list",
-  "session/load": "acp:session:resume",
-  "session/new": "acp:session:create",
-  "session/prompt": "acp:turn:send",
-  "session/resume": "acp:session:resume",
-} as const satisfies Record<string, AcpRemoteScope>;
-
-const ACP_NOTIFICATION_SCOPE_BY_METHOD = {
-  "session/cancel": "acp:turn:cancel",
-} as const satisfies Record<string, AcpRemoteScope>;
-
-function requiredScopeForAcpPayload(
-  payload: RelayJsonRpcMessage,
-): AcpRemoteScope | undefined {
-  if (isJsonRpcResponsePayload(payload)) {
-    return undefined;
-  }
-  if (isJsonRpcRequest(payload)) {
-    return readScope(ACP_METHOD_SCOPE_BY_METHOD, payload.method);
-  }
-  return readScope(ACP_NOTIFICATION_SCOPE_BY_METHOD, payload.method);
 }
 
 function isRelayJsonRpcMessage(value: unknown): value is RelayJsonRpcMessage {
@@ -6408,15 +6372,6 @@ function isJsonRpcResponsePayload(value: unknown): value is RelayJsonRpcResponse
 
 function isStoredJsonRpcId(id: unknown): id is string | number {
   return typeof id === "string" || typeof id === "number";
-}
-
-function readScope<T extends Record<string, AcpRemoteScope>>(
-  scopes: T,
-  method: string,
-): AcpRemoteScope | undefined {
-  return Object.prototype.hasOwnProperty.call(scopes, method)
-    ? scopes[method as keyof T]
-    : undefined;
 }
 
 function isSessionOpenRequest(

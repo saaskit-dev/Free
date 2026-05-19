@@ -1,87 +1,36 @@
 import {
   type AcpRemoteAckFrame,
   type AcpRemoteDataFrame,
-  type AcpRemoteFrame,
-  type AcpRemoteScope,
 } from "../protocol/types.js";
 import {
-  assertAcpRemoteFrame,
-} from "../protocol/validation.js";
+  ACP_METHOD_SCOPE_BY_METHOD,
+  ACP_NOTIFICATION_SCOPE_BY_METHOD,
+  isAcpRemoteJsonRpcMessage,
+  isAcpRemoteJsonRpcRequest,
+  parseAcpRemoteFrameText,
+  requiredScopeForAcpPayload,
+  type AcpRemoteJsonRpcMessage,
+  type AcpRemoteJsonRpcNotification,
+  type AcpRemoteJsonRpcRequest,
+} from "../protocol/index.js";
 
-export function parseFrame(text: string): AcpRemoteFrame | undefined {
-  try {
-    return assertAcpRemoteFrame(JSON.parse(text));
-  } catch {
-    return undefined;
-  }
-}
+export const parseFrame = parseAcpRemoteFrameText;
 
-export const ACP_METHOD_SCOPE_BY_METHOD = {
-  "session/close": "acp:session:resume",
-  "session/set_config_option": "acp:session:resume",
-  "session/set_mode": "acp:session:resume",
-  "session/fork": "acp:session:resume",
-  "session/list": "acp:session:list",
-  "session/load": "acp:session:resume",
-  "session/new": "acp:session:create",
-  "session/prompt": "acp:turn:send",
-  "session/resume": "acp:session:resume",
-} as const satisfies Record<string, AcpRemoteScope>;
-
-export const ACP_NOTIFICATION_SCOPE_BY_METHOD = {
-  "session/cancel": "acp:turn:cancel",
-} as const satisfies Record<string, AcpRemoteScope>;
-
-export function requiredScopeForAcpPayload(payload: unknown): AcpRemoteScope | undefined {
-  if (!isJsonRpcMessage(payload)) {
-    return undefined;
-  }
-  if (isJsonRpcRequest(payload)) {
-    return readScope(ACP_METHOD_SCOPE_BY_METHOD, payload.method);
-  }
-  return readScope(ACP_NOTIFICATION_SCOPE_BY_METHOD, payload.method);
-}
-
-export type JsonRpcMessage = JsonRpcNotification | JsonRpcRequest;
-
-export type JsonRpcNotification = {
-  jsonrpc: "2.0";
-  method: string;
+export {
+  ACP_METHOD_SCOPE_BY_METHOD,
+  ACP_NOTIFICATION_SCOPE_BY_METHOD,
+  requiredScopeForAcpPayload,
 };
 
-export type JsonRpcRequest = JsonRpcNotification & {
-  id: number | string | null;
-};
+export type JsonRpcMessage = AcpRemoteJsonRpcMessage;
 
-export function isJsonRpcMessage(value: unknown): value is JsonRpcMessage {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "jsonrpc" in value &&
-    value.jsonrpc === "2.0" &&
-    "method" in value &&
-    typeof value.method === "string"
-  );
-}
+export type JsonRpcNotification = AcpRemoteJsonRpcNotification;
 
-export function isJsonRpcRequest(value: unknown): value is JsonRpcRequest {
-  return (
-    isJsonRpcMessage(value) &&
-    "id" in value &&
-    (typeof value.id === "string" ||
-      typeof value.id === "number" ||
-      value.id === null)
-  );
-}
+export type JsonRpcRequest = AcpRemoteJsonRpcRequest;
 
-export function readScope<const T extends Record<string, AcpRemoteScope>>(
-  scopes: T,
-  method: string,
-): AcpRemoteScope | undefined {
-  return Object.hasOwn(scopes, method)
-    ? scopes[method as keyof T]
-    : undefined;
-}
+export const isJsonRpcMessage = isAcpRemoteJsonRpcMessage;
+
+export const isJsonRpcRequest = isAcpRemoteJsonRpcRequest;
 
 export type OutboundFrameTracker = {
   nextSeq(connectionId: string): number;

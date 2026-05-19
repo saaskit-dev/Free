@@ -9,7 +9,9 @@ import {
   createAcpRemoteConnectionProof,
   exportEd25519PrivateKey,
   exportEd25519PublicKey,
+  parseAcpRemoteFrameText,
   readAcpRemoteAccountSessionVerificationKeys,
+  requiredScopeForAcpPayload,
   verifyAcpRemoteConnectionProof,
 } from "./index.js";
 
@@ -135,6 +137,45 @@ describe("remote account sessions", () => {
       frameType: AcpRemoteFrameType.Hello,
       proof,
     });
+  });
+});
+
+describe("remote protocol helpers", () => {
+  it("keeps ACP method scope mapping in the protocol package", () => {
+    expect(
+      requiredScopeForAcpPayload({
+        id: 1,
+        jsonrpc: "2.0",
+        method: "session/prompt",
+      }),
+    ).toBe("acp:turn:send");
+    expect(
+      requiredScopeForAcpPayload({
+        jsonrpc: "2.0",
+        method: "session/cancel",
+      }),
+    ).toBe("acp:turn:cancel");
+    expect(
+      requiredScopeForAcpPayload({
+        id: 1,
+        jsonrpc: "2.0",
+        result: {},
+      }),
+    ).toBeUndefined();
+  });
+
+  it("parses ACP remote frame text through the protocol package", () => {
+    expect(
+      parseAcpRemoteFrameText(JSON.stringify({
+        connectionId: "conn-1",
+        frameType: AcpRemoteFrameType.Ping,
+        nonce: "nonce-1",
+      })),
+    ).toMatchObject({
+      connectionId: "conn-1",
+      frameType: AcpRemoteFrameType.Ping,
+    });
+    expect(parseAcpRemoteFrameText("{")).toBeUndefined();
   });
 });
 

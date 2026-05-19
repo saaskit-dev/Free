@@ -1,8 +1,8 @@
 SHELL := /bin/bash
 
-.PHONY: help install build build-self build-binary verify-binary dev typecheck lint test verify source-install-smoke local-full-test local-stop \
+.PHONY: help install build build-self build-binary verify-binary dev typecheck lint test verify verify-core verify-local verify-relay-local verify-prod-smoke source-install-smoke local-full-test local-stop \
 	workbench-export workbench-deploy \
-	relay-typecheck relay-dev relay-deploy relay-deploy-dry-run \
+	workbench-typecheck relay-typecheck relay-dev relay-deploy relay-deploy-dry-run \
 	relay-e2e relay-e2e-local relay-migrate-local relay-migrate-remote remote-prod-smoke pack-local package-install-check clean
 
 PACKAGE_VERSION := $(shell node -p "require('./package.json').version")
@@ -18,9 +18,13 @@ help:
 			"  make build-binary         Build Bun compiled Free binary for the current platform" \
 		"  make build-self           Build only Free TypeScript" \
 		"  make dev                  Watch Free TypeScript" \
-		"  make typecheck            Typecheck Free and relay" \
+		"  make typecheck            Typecheck Free, relay, and Workbench" \
+		"  make verify-core          Run local typecheck and unit tests" \
 		"  make test                 Run unit tests" \
 			"  make verify               Run typecheck, tests, package, and install smoke" \
+			"  make verify-local         Run verify plus local relay e2e" \
+			"  make verify-relay-local   Run only local relay e2e" \
+			"  make verify-prod-smoke    Run hosted relay smoke" \
 			"  make verify-binary        Build and smoke-test the Bun compiled Free binary" \
 		"  make source-install-smoke Run the source installer from a clean git clone" \
 		"  make local-full-test      Run verify plus local Wrangler relay e2e" \
@@ -70,14 +74,22 @@ verify-binary: build-binary
 dev:
 	bunx tsc -p tsconfig.json --watch
 
-typecheck: build-self relay-typecheck
+typecheck: build-self relay-typecheck workbench-typecheck
 
 lint: build relay-typecheck
 
 test:
 	bunx vitest run
 
+verify-core: typecheck test
+
 verify: typecheck test pack-local package-install-check source-install-smoke relay-deploy-dry-run
+
+verify-local: local-full-test
+
+verify-relay-local: relay-e2e-local
+
+verify-prod-smoke: remote-prod-smoke
 
 source-install-smoke:
 	scripts/source-install-smoke.sh
@@ -89,6 +101,9 @@ local-stop:
 
 relay-typecheck:
 	cd relay && bunx tsc --noEmit -p tsconfig.json
+
+workbench-typecheck:
+	bun run --cwd apps/workbench typecheck
 
 relay-dev: relay-migrate-local
 	cd relay && bunx wrangler dev --ip 127.0.0.1 --port "$${RELAY_PORT:-8791}"
